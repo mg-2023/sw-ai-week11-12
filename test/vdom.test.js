@@ -199,3 +199,56 @@ test('clone 은 깊은 복사다', () => {
   assert.equal(v.children[0].children[0].props.nodeValue, 'x');
   assert.equal(v.props.a, '1');
 });
+
+// ───────── Codex 리뷰 ① 에서 나온 경우 (docs/codex-review-log.md) ─────────
+
+test('[C1-1] type="file" input 에 value 가 있어도 render 가 멈추지 않는다', () => {
+  const { document } = setup();
+  const v = V.htmlToChildren('<input type="file" value="x">', document)[0];
+  assert.doesNotThrow(() => V.render(v, document));
+});
+
+test('[C1-2] 주석으로 끊긴 글자는 한 덩어리로 합쳐 왕복해도 같다', () => {
+  const { document } = setup();
+  const kids = V.htmlToChildren('<p>a<!--x-->b</p>', document);
+  assert.deepEqual(kids[0].children, [text('ab')]);
+  assert.deepEqual(V.htmlToChildren(V.toHtml(kids), document), kids);
+});
+
+test('[C1-3] SVG 안 <style> 글자는 이스케이프해서 왕복한다', () => {
+  const { document } = setup();
+  const kids = V.htmlToChildren('<svg><style>&lt;b&gt;x&lt;/b&gt;</style></svg>', document);
+  assert.deepEqual(V.htmlToChildren(V.toHtml(kids), document), kids);
+});
+
+test('[C1-4] xlink:href 는 XLink 이름공간으로 넣는다', () => {
+  const { document } = setup();
+  const kids = V.htmlToChildren('<svg><use xlink:href="#x"></use></svg>', document);
+  const el = V.render(kids[0], document);
+  assert.equal(el.firstChild.getAttributeNS('http://www.w3.org/1999/xlink', 'href'), '#x');
+});
+
+test('[C1-5] MathML 이름공간, SVG <title> 안 HTML 요소', () => {
+  const { document } = setup();
+  const [math] = V.htmlToChildren('<math><mi>x</mi></math>', document);
+  assert.equal(V.render(math, document).firstChild.namespaceURI, V.MATHML_NS);
+  const [svg] = V.htmlToChildren('<svg><title><b>x</b></title></svg>', document);
+  // 브라우저 파서와 같은 결과를 내는지: 원본 DOM 의 b 이름공간과 render 결과를 비교
+  const tpl = document.createElement('template');
+  tpl.innerHTML = '<svg><title><b>x</b></title></svg>';
+  const want = tpl.content.firstChild.firstChild.firstChild ? tpl.content.firstChild.firstChild.firstChild.namespaceURI : null;
+  const got = V.render(svg, document).firstChild.firstChild;
+  if (want) assert.equal(got.namespaceURI, want);
+});
+
+test('[C1-6] <select value> 는 option 을 붙인 뒤 고른다', () => {
+  const { document } = setup();
+  const el = V.render(h('select', { value: 'b' }, h('option', { value: 'a' }, 'A'), h('option', { value: 'b' }, 'B')), document);
+  assert.equal(el.value, 'b');
+});
+
+test('[C1-7] \r 은 속성 · 텍스트 모두 왕복해도 남는다', () => {
+  const { document } = setup();
+  const kids = V.htmlToChildren('<p title="&#13;">a&#13;b</p>', document);
+  assert.deepEqual(V.htmlToChildren(V.toHtml(kids), document), kids);
+});

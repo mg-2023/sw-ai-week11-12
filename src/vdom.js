@@ -94,13 +94,28 @@
     return { type, props, children: childrenToVdom(source, keep) };
   }
 
-  /** childNodes 를 차례로 바꾸고, 버린 것(null)은 뺀다. (children 은 요소만 줘서 쓰지 않는다) */
+  /**
+   * childNodes 를 차례로 바꾸고, 버린 것은 뺀다. (children 은 요소만 줘서 쓰지 않는다)
+   * 주석을 버리면 `a<!--x-->b` 의 a 와 b 가 붙게 된다 → 주석이 없었던 것처럼 "ab" 한 덩어리로 합친다.
+   * (안 합치면 HTML 로 썼다 다시 읽을 때 한 개로 읽혀 구조가 달라진다)
+   */
   function childrenToVdom(parent, keepWhitespace = false) {
     const out = [];
+    let pending = null; // 아직 내보내지 않은 이어진 글자
+    const flush = () => {
+      if (pending !== null && (keepWhitespace || !isIndentText(pending))) out.push(text(pending));
+      pending = null;
+    };
     for (const child of Array.from(parent.childNodes)) {
-      const v = domToVdom(child, keepWhitespace);
-      if (v) out.push(v);
+      if (child.nodeType === TEXT_NODE) {
+        pending = (pending || '') + child.nodeValue;
+        continue;
+      }
+      if (child.nodeType !== ELEMENT_NODE) continue; // 주석 등: 글자 사이를 끊지 않는다
+      flush();
+      out.push(domToVdom(child, keepWhitespace));
     }
+    flush();
     return out;
   }
 
@@ -128,9 +143,8 @@
   // 이벤트 함수를 요소마다 기억해 두는 곳 (바꿀 때 옛 함수를 떼어 내야 한다)
   const listenerMap = new WeakMap();
 
-  function isEventProp(name, value) {
-    return /^on/i.test(name) && typeof value === 'function';
-  }
+  // xlink:href 같은 이름공간 붙은 속성 (SVG <use> 가 쓰는 옛 방식)
+  const ATTR_NS = { xlink: 'http://www.w3.org/1999/xlink', xml: 'http://www.w3.org/XML/1998/namespace' };
 
   /**
    * 속성 하나를 실제 요소에 반영한다. value 가 null/undefined/false 면 지운다.
@@ -161,15 +175,20 @@
     const remove = value === null || value === undefined || value === false;
 
     // 2) 속성
+    const attrNs = ATTR_NS[name.split(':')[0]];
     if (remove) {
       el.removeAttribute(name);
+    } else if (attrNs && name.includes(':')) {
+      el.setAttributeNS(attrNs, name, value === true ? '' : String(value));
     } else {
       el.setAttribute(name, value === true ? '' : String(value));
     }
 
     // 3) 지금 상태(프로퍼티)도 맞춘다
     if (LIVE_PROPS.has(name) && name in el) {
-      if (name === 'value') {
+      if (name === 'value' && el.type === 'file') {
+        // 파일 입력의 .value 는 보안상 '' 만 넣을 수 있다 (다른 값은 예외)
+      } else if (name === 'value') {
         el.value = remove ? '' : String(value);
       } else {
         el[name] = !remove; // checked · selected: 속성이 있으면 켜짐
@@ -177,11 +196,30 @@
     }
   }
 
-  /** 자식이 쓸 이름공간: <svg> 안은 SVG, <foreignObject> 안은 다시 HTML */
+  const MATHML_NS = 'http://www.w3.org/1998/Math/MathML';
+  // SVG · MathML 안이지만 자식은 다시 HTML 인 요소 (HTML 파서의 "integration point")
+  const HTML_INSIDE = {
+    [SVG_NS]: new Set(['foreignObject', 'desc', 'title']),
+    [MATHML_NS]: new Set(['mi', 'mo', 'mn', 'ms', 'mtext']),
+  };
+
+  /** 이 요소의 자식이 쓸 이름공간 (요소 이름과 이 요소의 이름공간으로 정한다) */
+  function namespaceForChildren(type, ownNs) {
+    if (HTML_INSIDE[ownNs] && HTML_INSIDE[ownNs].has(type)) return HTML_NS;
+    return ownNs;
+  }
+
+  /** 이 요소 자신의 이름공간 (부모 쪽 이름공간 + 요소 이름) */
+  function namespaceFor(type, parentNs) {
+    if (type === 'svg') return SVG_NS;
+    if (type === 'math') return MATHML_NS;
+    return parentNs;
+  }
+
+  /** 실제 부모 요소를 보고 새 자식이 쓸 이름공간을 정한다 (patch 가 CREATE 할 때) */
   function childNamespace(parentEl) {
     if (!parentEl || !parentEl.namespaceURI) return HTML_NS;
-    if (parentEl.localName === 'foreignObject') return HTML_NS;
-    return parentEl.namespaceURI;
+    return namespaceForChildren(parentEl.localName, parentEl.namespaceURI);
   }
 
   /**
@@ -192,20 +230,23 @@
   function render(vnode, doc = root.document, ns = HTML_NS) {
     if (isText(vnode)) return doc.createTextNode(vnode.props.nodeValue);
 
-    let myNs = ns;
-    if (vnode.type === 'svg') myNs = SVG_NS;
+    const myNs = namespaceFor(vnode.type, ns);
     const el = myNs === HTML_NS ? doc.createElement(vnode.type) : doc.createElementNS(myNs, vnode.type);
 
+    // <select value> 는 option 이 생긴 뒤에야 고를 수 있으니 맨 나중에 넣는다
+    const isSelect = vnode.type === 'select';
     for (const [name, value] of Object.entries(vnode.props)) {
+      if (isSelect && name === 'value') continue;
       setProp(el, name, value);
     }
 
     // <template> 는 자식을 .content 에 넣어야 한다
     const target = vnode.type === 'template' && el.content ? el.content : el;
-    const kidNs = childNamespace(el);
+    const kidNs = namespaceForChildren(vnode.type, myNs);
     for (const child of vnode.children) {
       target.appendChild(render(child, doc, kidNs));
     }
+    if (isSelect && 'value' in vnode.props) setProp(el, 'value', vnode.props.value);
     return el;
   }
 
@@ -215,11 +256,14 @@
   // 안의 글자를 이스케이프하면 내용이 바뀌는 요소
   const RAW_TEXT = new Set(['script', 'style', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
 
+  // \u00a0(&nbsp;) 와 \r 은 그대로 쓰면 다시 읽을 때 보통 공백 · \n 으로 바뀌므로 문자 참조로 쓴다
   function escapeText(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/ /g, '&nbsp;');
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/\u00a0/g, '&nbsp;').replace(/\r/g, '&#13;');
   }
   function escapeAttr(s) {
-    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/ /g, '&nbsp;');
+    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/\u00a0/g, '&nbsp;').replace(/\r/g, '&#13;');
   }
 
   /**
@@ -228,35 +272,43 @@
    *   - 들여쓰기(줄바꿈 + 공백)는 읽을 때 버려지는 규칙(결정 2)이므로 안전
    *   - 자식에 텍스트가 섞여 있으면 들여쓰기를 넣지 않는다 (글자에 공백이 붙어 버리므로)
    *   - <pre> 안은 들여쓰기를 넣지 않는다
+   * 지원 안 함: <plaintext> (닫을 수 없는 옛 요소)
    */
   function toHtml(children, depth = 0, pretty = true) {
     const canIndent = pretty && children.length > 0 && children.every((c) => !isText(c));
     const pad = '  '.repeat(depth);
     return children
-      .map((c) => (canIndent ? pad : '') + nodeToHtml(c, depth, pretty, null))
+      .map((c) => (canIndent ? pad : '') + nodeToHtml(c, depth, pretty, false, HTML_NS))
       .join(canIndent ? '\n' : '');
   }
 
-  function nodeToHtml(vnode, depth, pretty, parentType) {
+  /**
+   * rawParent: 부모가 HTML 의 <script> · <style> 같은 raw text 요소인가 (그 안 글자는 이스케이프 안 함)
+   * ns: 부모 쪽 이름공간 (SVG 안의 <style> 은 raw text 가 아니다)
+   */
+  function nodeToHtml(vnode, depth, pretty, rawParent, ns) {
     if (isText(vnode)) {
-      return RAW_TEXT.has(parentType) ? vnode.props.nodeValue : escapeText(vnode.props.nodeValue);
+      return rawParent ? vnode.props.nodeValue : escapeText(vnode.props.nodeValue);
     }
     const attrs = Object.entries(vnode.props)
       .filter(([, v]) => v !== null && v !== undefined && v !== false && typeof v !== 'function')
       .map(([k, v]) => (v === true || v === '' ? ` ${k}` : ` ${k}="${escapeAttr(String(v))}"`))
       .join('');
     const open = `<${vnode.type}${attrs}>`;
-    if (VOID.has(vnode.type)) return open;
+    const myNs = namespaceFor(vnode.type, ns);
+    if (myNs === HTML_NS && VOID.has(vnode.type)) return open;
 
-    const keep = KEEP_WHITESPACE.has(vnode.type);
+    const kidNs = namespaceForChildren(vnode.type, myNs);
+    const raw = myNs === HTML_NS && RAW_TEXT.has(vnode.type);
+    const keep = myNs === HTML_NS && KEEP_WHITESPACE.has(vnode.type);
     const kids = vnode.children;
     const indent = pretty && !keep && kids.length > 0 && kids.every((c) => !isText(c));
     let inner;
     if (indent) {
       const pad = '  '.repeat(depth + 1);
-      inner = '\n' + kids.map((c) => pad + nodeToHtml(c, depth + 1, pretty, vnode.type)).join('\n') + '\n' + '  '.repeat(depth);
+      inner = '\n' + kids.map((c) => pad + nodeToHtml(c, depth + 1, pretty, raw, kidNs)).join('\n') + '\n' + '  '.repeat(depth);
     } else {
-      inner = kids.map((c) => nodeToHtml(c, depth + 1, pretty && !keep, vnode.type)).join('');
+      inner = kids.map((c) => nodeToHtml(c, depth + 1, pretty && !keep, raw, kidNs)).join('');
       // 파서는 <pre> · <textarea> 바로 뒤 첫 줄바꿈 하나를 지운다 → 글자가 줄바꿈으로 시작하면 하나 더 넣는다
       if (keep && /^\n/.test(inner)) inner = '\n' + inner;
     }
@@ -273,7 +325,7 @@
   }
 
   const api = {
-    TEXT, SVG_NS, HTML_NS,
+    TEXT, SVG_NS, HTML_NS, MATHML_NS,
     h, text, isText, isIndentText,
     domToVdom, childrenToVdom, htmlToChildren, htmlToVdom,
     render, setProp, childNamespace,
