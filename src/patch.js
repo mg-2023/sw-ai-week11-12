@@ -1,21 +1,10 @@
-/**
- * patch.js — diff 가 만든 "바꿀 일 목록" 을 실제 DOM 에 적용한다
- *
- * 입력: rootEl (Virtual DOM 루트와 짝인 실제 요소), patches (diff 결과)
- * 출력: 루트 요소 (루트 자체가 REPLACE 되면 새 요소)
- *
- * 노드 찾는 법 (결정 4): path 의 번호대로 childNodes 를 걷는다.
- *   전제 — 실제 DOM 의 childNodes 와 Virtual DOM 의 children 이 1:1 이어야 한다.
- *   그래서 처음 한 번은 실제 영역을 Virtual DOM 으로 다시 그려(mount) 들여쓰기 · 주석 노드를 없앤다.
- *
- * 바뀐 노드만 건드린다: 텍스트는 nodeValue, 속성은 그 속성 하나, 자식은 그 자식 하나.
- */
+/* diff 가 만든 patch 목록을 실제 DOM 에 바뀐 곳만 적용하는 모듈 */
 (function (root) {
   'use strict';
 
   const V = typeof require === 'function' ? require('./vdom.js') : root.MiniReact;
 
-  /** path 번호대로 내려가 실제 노드를 찾는다. 없으면 DOM 과 VDOM 이 어긋난 것 → 에러 */
+  /* 경로 번호대로 childNodes 를 내려가 실제 노드를 찾는 함수 */
   function findNode(rootEl, path) {
     let node = rootEl;
     for (let depth = 0; depth < path.length; depth++) {
@@ -28,21 +17,17 @@
     return node;
   }
 
-  /** <template> 는 자식이 .content 안에 있다 */
+  /* 자식이 들어 있는 곳(template 이면 .content)을 돌려주는 함수 */
   function childContainer(el) {
     return el.localName === 'template' && el.content ? el.content : el;
   }
 
-  /**
-   * rootEl 이 없을 수도 있다 (diff(undefined, 새 트리) → 루트 CREATE). 그때는 doc 을 넘긴다.
-   * 루트 REMOVE 면 null 을 돌려준다.
-   */
+  /* patch 목록을 순서대로 실제 DOM 에 적용하고 루트를 돌려주는 함수 */
   function applyPatches(rootEl, patches, doc = rootEl ? rootEl.ownerDocument : root.document) {
     let currentRoot = rootEl;
 
     for (const p of patches) {
       if (p.path.length === 0 && (p.type === 'CREATE' || p.type === 'REMOVE')) {
-        // 루트 자체가 생기거나 없어진다
         const parent = currentRoot && currentRoot.parentNode;
         const ns = parent && parent.nodeType === 1 ? V.childNamespace(parent) : V.HTML_NS;
         const fresh = p.type === 'CREATE' ? V.render(p.node, doc, ns) : null;
@@ -55,7 +40,6 @@
       }
       switch (p.type) {
         case 'CREATE': {
-          // 부모를 찾아 index 자리에 넣는다 (뒤가 비어 있으면 맨 끝)
           const parent = findNode(currentRoot, p.path.slice(0, -1));
           const index = p.path[p.path.length - 1];
           const container = childContainer(parent);
@@ -74,7 +58,6 @@
         case 'REPLACE': {
           const node = findNode(currentRoot, p.path);
           const parent = node.parentNode;
-          // 부모가 요소면 부모를 보고, <template> 안(문서 조각)이나 부모 없는 루트면 HTML
           const ns = parent && parent.nodeType === 1 ? V.childNamespace(parent) : V.HTML_NS;
           const fresh = V.render(p.node, doc, ns);
           if (parent) parent.replaceChild(fresh, node);
@@ -101,20 +84,12 @@
     return currentRoot;
   }
 
-  /**
-   * <textarea> 의 글자 자식은 "처음 값" 일 뿐이다. 사용자가 한 번 입력하면 화면 값(.value)은 따로 논다.
-   * 그래서 자식 글자를 고친 뒤 .value 도 같은 글자로 맞춘다.
-   */
+  /* textarea 의 화면 값(.value)을 글자 자식과 맞추는 함수 */
   function syncTextarea(el) {
     if (el && el.localName === 'textarea' && el.namespaceURI === V.HTML_NS) el.value = el.textContent;
   }
 
-  /**
-   * 폼 요소의 "지금 상태"(프로퍼티)를 VDOM 대로 다시 맞춘다.
-   * diff 는 VDOM 끼리만 비교하므로, 사용자가 실제 영역 input 에 직접 친 값 · 체크는 patch 에 안 잡힌다.
-   * (두 기록에서 value 가 같으면 PROPS 가 안 나온다) → 기록 이동 · Patch 뒤에 이 함수로 맞춘다.
-   * 속성은 건드리지 않으므로 DOM 변경(MutationObserver)은 생기지 않는다.
-   */
+  /* 폼 요소의 지금 상태(입력값 · 체크 · 선택)를 Virtual DOM 대로 맞추는 함수 */
   function syncFormState(el, vnode) {
     if (!el || !vnode || V.isText(vnode) || el.nodeType !== 1) return;
     const p = vnode.props;
@@ -132,11 +107,7 @@
     if (el.localName === 'select' && has('value')) el.value = String(p.value);
   }
 
-  /**
-   * 처음 한 번: 실제 요소의 자식을 Virtual DOM 대로 다시 그린다.
-   * 이 뒤로 rootEl.childNodes 와 vnode.children 이 1:1 로 맞는다.
-   * (루트 요소 자체와 그 속성은 그대로 둔다)
-   */
+  /* 실제 요소의 자식을 Virtual DOM 대로 다시 그려 1:1 로 맞추는 함수 */
   function mount(rootEl, vnode) {
     const doc = rootEl.ownerDocument;
     const container = childContainer(rootEl);

@@ -1,17 +1,10 @@
-/**
- * history.js — State History: Virtual DOM 스냅샷을 순서대로 쌓고 앞뒤로 오간다
- *
- *   [v0, v1, v2]   index = 2 (지금)
- *   back()    → index 1, v1 을 돌려준다
- *   push(v3)  → 지금 뒤에 있던 기록(앞으로가기 대상)은 버리고 v3 을 쌓는다 (브라우저 뒤로가기와 같음)
- *
- * 넣을 때와 꺼낼 때 깊은 복사를 해서, 바깥에서 객체를 고쳐도 기록이 바뀌지 않는다.
- */
+/* Virtual DOM 스냅샷을 쌓고 뒤로 · 앞으로 오가는 State History 모듈 */
 (function (root) {
   'use strict';
 
   const V = typeof require === 'function' ? require('./vdom.js') : root.MiniReact;
 
+  /* 첫 Virtual DOM 으로 기록 객체를 만드는 함수 */
   function createHistory(initial) {
     const stack = [V.clone(initial)];
     let index = 0;
@@ -19,20 +12,18 @@
     return {
       current: () => V.clone(stack[index]),
       push(vnode) {
-        stack.splice(index + 1); // 앞으로가기 기록 버림
+        stack.splice(index + 1);
         stack.push(V.clone(vnode));
         index = stack.length - 1;
         return V.clone(stack[index]);
       },
       canBack: () => index > 0,
       canForward: () => index < stack.length - 1,
-      /** 한 칸 뒤로. 더 갈 수 없으면 null */
       back() {
         if (index === 0) return null;
         index--;
         return V.clone(stack[index]);
       },
-      /** 한 칸 앞으로. 더 갈 수 없으면 null */
       forward() {
         if (index === stack.length - 1) return null;
         index++;

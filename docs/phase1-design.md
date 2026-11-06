@@ -68,6 +68,65 @@
 - `h(type, props, ...children)` 로 VDOM 을 직접 만들 수 있음 (컴포넌트가 돌려줄 모양)
 - 함수는 같은 함수일 때만 "안 바뀜" (diff 가 `!==` 로 비교)
 
+### 구현 메모 — 왜 이렇게 했나
+
+> 코드 주석은 함수마다 한 줄로 줄였다. 지운 주석 중 "이유"를 설명하던 것을 여기 모았다.
+
+**공통**
+
+| 어디 | 무엇 | 왜 |
+| --- | --- | --- |
+| 모든 `src/*.js` | ES 모듈 대신 즉시 실행 함수 + `window.MiniReact` / `module.exports` | `index.html` 을 `file://` 로 더블클릭해 열면 브라우저가 ES 모듈을 막는다. 같은 파일을 Node 테스트에서도 `require` 로 읽는다 |
+
+**변환 · 렌더 (src/vdom.js)**
+
+| 함수 | 무엇 | 왜 |
+| --- | --- | --- |
+| `domToVdom` | 태그 이름을 `tagName` 이 아니라 `localName` 으로 읽음 | HTML 은 소문자, SVG 는 `linearGradient` 처럼 원래 대소문자가 남는다 (`tagName` 은 HTML 을 대문자로 줌) |
+| `domToVdom` · `stripScripts` · `diffProps` | 속성을 `props[name] = v` 대신 `Object.defineProperty` 로 넣음 | 이름이 `__proto__` 면 대입으로는 칸이 안 생긴다 |
+| `domToVdom` · `render` | `<template>` 는 자식을 `.content` 에서 읽고 `.content` 에 넣음 | template 의 자식은 `childNodes` 가 아니라 문서 조각 `.content` 안에 있다 |
+| `childrenToVdom` | `children` 이 아니라 `childNodes` 를 돈다 | `children` 은 요소만 줘서 텍스트를 잃는다 |
+| `htmlToChildren` | `<template>` 의 `innerHTML` 로 파싱 | template 안은 실행되지 않는다 → `<img onerror>` · `<script>` 가 읽는 순간 실행되지 않음 |
+| `stripScripts` | 테스트 영역 입력에서 `<script>` 와 `on…="문자열"` 을 뺌 | `createElement('script')` 로 만들어 붙여도 실행된다. Phase 2 의 이벤트는 문자열이 아니라 함수라 영향 없음 |
+| `setProp` | 이벤트 함수를 `WeakMap` 에 요소별로 기억 | 함수를 바꿀 때 옛 함수를 `removeEventListener` 해야 한다 |
+| `setProp` | 함수를 붙일 때 같은 이름의 문자열 속성(`onclick="…"`)을 지움 | 남아 있으면 둘 다 실행된다 |
+| `setProp` | `xlink:` · `xml:` 속성은 `setAttributeNS` | `setAttribute` 로 넣으면 이름공간을 잃어 SVG `<use>` 참조가 동작하지 않는다 |
+| `setProp` | `value` · `checked` · `selected` 는 속성과 프로퍼티를 함께, 단 `input` · `textarea` · `select` · `option` 에만 | 지금 상태는 프로퍼티에 있다 (`<input value="a">` 에 b 를 치면 속성 a, `.value` b). `<li value>` · `<progress value>` 의 `.value` 는 숫자라 대입하면 `"01"` → `"1"` 이 되거나 예외 |
+| `setProp` | `type="file"` 이면 `.value` 를 건드리지 않음 | 보안상 `''` 외의 값은 넣을 수 없다 (예외) |
+| `namespaceForChildren` | `foreignObject` · `desc` · `title`(SVG), `mi` · `mo` · `mn` · `ms` · `mtext`(MathML) 안의 자식은 HTML | HTML 파서의 "integration point" 규칙과 같게 |
+| `render` | `<select>` 의 `value` 는 자식(option)을 다 붙인 뒤에 넣음 | option 이 생기기 전에는 그 값을 고를 수 없다 |
+| `toHtml` | 자식이 모두 요소일 때만 들여씀, `<pre>` 안은 안 들여씀 | 들여쓰기(줄바꿈 + 공백)는 읽을 때 버려지니 안전. 글자가 섞여 있으면 글자에 공백이 붙어 버린다 |
+| `nodeToHtml` | `<script>` · `<style>` 등 raw text 요소 안 글자는 이스케이프하지 않음, 단 HTML 이름공간일 때만 | 이스케이프하면 내용이 바뀐다. SVG 안 `<style>` 은 raw text 가 아니다 |
+| `nodeToHtml` | `<pre>` · `<textarea>` 글자가 줄바꿈으로 시작하면 줄바꿈 하나를 더 씀 | 파서가 여는 태그 바로 뒤 첫 줄바꿈 하나를 지운다 |
+| `escapeText` · `escapeAttr` | ` ` 은 `&nbsp;`, `\r` 은 `&#13;` 로 씀 | 그대로 쓰면 다시 읽을 때 보통 공백 · `\n` 으로 바뀐다 |
+
+**Diff (src/diff.js)**
+
+| 함수 | 무엇 | 왜 |
+| --- | --- | --- |
+| `walk` | 없어진 뒤쪽 자식은 뒤 번호부터 REMOVE | 앞에서부터 빼면 남은 번호가 밀려 엉뚱한 노드를 지운다. 생긴 자식은 앞 번호부터 CREATE |
+| `walk` | `<select value>` 는 값이나 option 이 바뀌면 자식 patch 뒤에 value PROPS 를 한 번 더 냄 (value 만 바뀐 앞 PROPS 는 뺌) | option 이 다 갖춰진 뒤에야 고를 수 있다 |
+
+**Patch (src/patch.js)**
+
+| 함수 | 무엇 | 왜 |
+| --- | --- | --- |
+| `findNode` | 경로에서 노드를 못 찾으면 에러 | DOM 과 VDOM 이 어긋났다는 뜻 → 조용히 엉뚱한 곳을 고치지 않게 |
+| `applyPatches` | REPLACE 때 부모가 문서 조각(template 안)이거나 없으면 HTML 이름공간 | 옛 노드(예: svg)의 이름공간을 물려받으면 SVG `<p>` 가 생긴다 |
+| `syncTextarea` | textarea 의 글자 자식을 고친 뒤 `.value` 도 맞춤 | 글자 자식은 "처음 값" 일 뿐, 사용자가 한 번 입력하면 화면 값은 따로 논다 |
+| `syncFormState` | Patch · 기록 이동 뒤 폼 요소의 프로퍼티만 VDOM 대로 맞춤 | diff 는 VDOM 끼리만 비교해서 사용자가 실제 영역에 직접 친 값은 patch 에 안 잡힌다. 속성은 안 건드리니 DOM 변경은 0건 |
+| `mount` | 루트 요소와 그 속성은 두고 자식만 다시 그림 | 이 뒤로 `childNodes` 와 `children` 이 1:1 이 된다 (결정 ④ 의 전제) |
+
+**검증 페이지 (app.js)**
+
+| 함수 | 무엇 | 왜 |
+| --- | --- | --- |
+| (로드) | `MutationObserver` 로 실제 영역 변경을 셈 | "바뀐 곳만" 반영했는지 patch 수와 나란히 눈으로 확인 |
+| `onPatch` | 변경이 없으면 기록에 안 넣고, 파서가 고친 모양으로 테스트 영역을 다시 씀 | 같은 화면이 기록에 쌓이지 않게. 잘못 닫힌 HTML 이 어떻게 읽혔는지 보여 줌 |
+| `apply` | 적용 중 예외가 나면 지금 기록(`shown`)대로 `mount` 하고 `null` | 일부만 바뀐 채 남으면 화면 · 기록 · 테스트 영역이 계속 어긋난다 |
+| `travel` | 적용이 실패하면 목표 기록을 그대로 다시 그림 | 기록끼리의 이동은 원래 실패하지 않지만 만약을 위해 |
+| `flash` | 바뀐 노드를 `element.animate` 로 깜빡임, REMOVE 는 부모 · 텍스트는 부모 요소를 | class 를 붙이면 속성이 바뀌어 DOM ↔ VDOM 이 어긋난다. Web Animations 는 속성을 안 건드림 |
+
 ---
 
 ## 4. 고려한 엣지 케이스

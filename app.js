@@ -1,10 +1,4 @@
-/**
- * app.js — 검증 페이지: 실제 영역 · 테스트 영역 · Patch · 뒤로가기 · 앞으로가기
- *
- * 상태는 둘뿐:
- *   shown   지금 실제 영역에 그려진 Virtual DOM (Diff 의 "이전")
- *   history State History (Virtual DOM 스냅샷 목록)
- */
+/* 검증 페이지: 실제 영역 · 테스트 영역 · Patch · 뒤로가기 · 앞으로가기를 묶는 스크립트 */
 (function () {
   'use strict';
 
@@ -19,20 +13,17 @@
   const logEl = document.getElementById('patch-log');
   const logSummaryEl = document.getElementById('log-summary');
 
-  // 실제 DOM 이 몇 번 바뀌었는지 센다 → "바뀐 곳만" 반영했는지 눈으로 확인
   const observer = new MutationObserver(() => {});
   observer.observe(actualEl, { subtree: true, childList: true, attributes: true, characterData: true });
 
-  // ── 로드: 실제 영역 → Virtual DOM → 테스트 영역 ──
   let shown = M.domToVdom(actualEl);
-  M.mount(actualEl, shown); // 들여쓰기 · 주석 노드를 없애 DOM ↔ VDOM 을 1:1 로 (patch 가 번호로 찾기 위해)
+  M.mount(actualEl, shown);
   observer.takeRecords();
   const history = M.createHistory(shown);
   showInTestArea(shown);
   refreshButtons();
   setStatus('준비됨: 실제 영역을 Virtual DOM 으로 읽어 테스트 영역에 그렸습니다');
 
-  // ── Patch ──
   btnPatch.addEventListener('click', onPatch);
   testEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -41,35 +32,35 @@
     }
   });
 
+  /* 테스트 영역을 읽어 Diff 하고 바뀐 곳만 실제 영역에 반영한 뒤 기록에 저장하는 함수 */
   function onPatch() {
-    const next = M.htmlToVdom(testEl.value, shown); // 1. 테스트 영역 → 새 Virtual DOM
-    const patches = M.diff(shown, next); // 2. 이전과 비교
+    const next = M.htmlToVdom(testEl.value, shown);
+    const patches = M.diff(shown, next);
     if (patches.length === 0) {
-      M.syncFormState(actualEl, shown); // 실제 영역에서 손으로 바꾼 입력값도 되돌린다
+      M.syncFormState(actualEl, shown);
       setStatus('바뀐 곳이 없습니다 (기록에 넣지 않음)');
       showLog([], 0);
-      showInTestArea(next); // 파서가 고친 모양으로 다시 보여 준다
+      showInTestArea(next);
       return;
     }
-    const mutations = apply(patches, next); // 3. 바뀐 곳만 실제 영역에
-    if (mutations === null) return; // 적용 실패 → 되돌렸고 기록도 안 늘림
-    shown = history.push(next); // 4. State History 에 저장
+    const mutations = apply(patches, next);
+    if (mutations === null) return;
+    shown = history.push(next);
     showInTestArea(shown);
     refreshButtons();
     setStatus(`Patch ${patches.length}건 반영, 기록 ${history.index + 1} 번째에 저장`);
     showLog(patches, mutations);
   }
 
-  // ── 뒤로 · 앞으로: 기록의 Virtual DOM 으로 두 영역을 함께 바꾼다 ──
   btnBack.addEventListener('click', () => travel(history.back(), '뒤로'));
   btnForward.addEventListener('click', () => travel(history.forward(), '앞으로'));
 
+  /* 기록의 Virtual DOM 으로 실제 영역 · 테스트 영역을 함께 바꾸는 함수 */
   function travel(target, label) {
     if (!target) return;
     const patches = M.diff(shown, target);
     const mutations = apply(patches, target);
     if (mutations === null) {
-      // 기록끼리의 이동은 원래 실패하지 않지만, 만약을 위해 목표 기록 그대로 다시 그린다
       M.mount(actualEl, target);
       observer.takeRecords();
     }
@@ -80,14 +71,7 @@
     showLog(patches, mutations);
   }
 
-  // ── 도움 함수 ──
-
-  /**
-   * patches 를 실제 영역에 적용하고, 실제 DOM 변경 횟수를 돌려준다.
-   * 중간에 실패하면 (예: 파서는 받아 주지만 setAttribute 는 거부하는 속성 이름 `a@`)
-   * 일부만 바뀐 채로 남지 않게 지금 기록(shown)대로 다시 그리고 null 을 돌려준다.
-   * target: 적용 뒤 폼 상태(입력값 · 체크)를 맞출 기준 VDOM
-   */
+  /* patch 를 실제 영역에 적용하고 DOM 변경 수를 돌려주며, 실패하면 되돌리고 null 을 돌려주는 함수 */
   function apply(patches, target) {
     observer.takeRecords();
     try {
@@ -106,12 +90,11 @@
     return count;
   }
 
-  /** 바뀐 노드를 잠깐 노랗게. 속성을 건드리지 않는 Web Animations 를 써서 DOM ↔ VDOM 이 어긋나지 않게 한다 */
+  /* 바뀐 노드를 잠깐 노랗게 깜빡이는 함수 */
   function flash(patches) {
     for (const p of patches) {
       let node;
       try {
-        // REMOVE 는 노드가 없으니 부모, 텍스트는 그 부모 요소를 깜빡인다
         node = M.findNode(actualEl, p.type === 'REMOVE' ? p.path.slice(0, -1) : p.path);
       } catch (e) {
         continue;
@@ -126,20 +109,24 @@
     }
   }
 
+  /* Virtual DOM 을 HTML 로 바꿔 테스트 영역에 쓰는 함수 */
   function showInTestArea(vnode) {
     testEl.value = M.toHtml(vnode.children);
   }
 
+  /* 뒤로 · 앞으로 버튼 상태와 기록 위치를 갱신하는 함수 */
   function refreshButtons() {
     btnBack.disabled = !history.canBack();
     btnForward.disabled = !history.canForward();
     posEl.textContent = `기록 ${history.index + 1} / ${history.length}`;
   }
 
+  /* 상태 문구를 바꾸는 함수 */
   function setStatus(msg) {
     statusEl.textContent = msg;
   }
 
+  /* 마지막 patch 목록과 DOM 변경 수를 화면에 보여 주는 함수 */
   function showLog(patches, mutations) {
     logSummaryEl.textContent = `patch ${patches.length}건 · 실제 DOM 변경 ${mutations}건`;
     logEl.textContent = '';
@@ -151,6 +138,7 @@
     }
   }
 
+  /* patch 하나를 사람이 읽을 한 줄로 만드는 함수 */
   function describe(p) {
     const at = `[${p.path.join(', ')}]`;
     const short = (s) => (s.length > 40 ? s.slice(0, 40) + '…' : s);
