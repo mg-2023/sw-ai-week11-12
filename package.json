@@ -1,0 +1,12 @@
+{
+  "name": "mini-react",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vanilla JS 미니 리액트 — Phase 1: Virtual DOM · Diff · Patch",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}
