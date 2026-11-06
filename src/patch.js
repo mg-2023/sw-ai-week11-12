@@ -33,11 +33,26 @@
     return el.localName === 'template' && el.content ? el.content : el;
   }
 
-  function applyPatches(rootEl, patches) {
-    const doc = rootEl.ownerDocument;
+  /**
+   * rootEl 이 없을 수도 있다 (diff(undefined, 새 트리) → 루트 CREATE). 그때는 doc 을 넘긴다.
+   * 루트 REMOVE 면 null 을 돌려준다.
+   */
+  function applyPatches(rootEl, patches, doc = rootEl ? rootEl.ownerDocument : root.document) {
     let currentRoot = rootEl;
 
     for (const p of patches) {
+      if (p.path.length === 0 && (p.type === 'CREATE' || p.type === 'REMOVE')) {
+        // 루트 자체가 생기거나 없어진다
+        const parent = currentRoot && currentRoot.parentNode;
+        const ns = parent && parent.nodeType === 1 ? V.childNamespace(parent) : V.HTML_NS;
+        const fresh = p.type === 'CREATE' ? V.render(p.node, doc, ns) : null;
+        if (parent) {
+          if (fresh) parent.replaceChild(fresh, currentRoot);
+          else parent.removeChild(currentRoot);
+        }
+        currentRoot = fresh;
+        continue;
+      }
       switch (p.type) {
         case 'CREATE': {
           // 부모를 찾아 index 자리에 넣는다 (뒤가 비어 있으면 맨 끝)
@@ -46,25 +61,31 @@
           const container = childContainer(parent);
           const before = container.childNodes[index] || null;
           container.insertBefore(V.render(p.node, doc, V.childNamespace(parent)), before);
+          syncTextarea(parent);
           break;
         }
         case 'REMOVE': {
           const node = findNode(currentRoot, p.path);
-          node.parentNode.removeChild(node);
+          const parent = node.parentNode;
+          parent.removeChild(node);
+          syncTextarea(parent);
           break;
         }
         case 'REPLACE': {
           const node = findNode(currentRoot, p.path);
           const parent = node.parentNode;
-          // 부모가 없는 문서 조각(template.content 등)도 있으니 parentNode 로 이름공간을 고른다
-          const ns = parent && parent.nodeType === 1 ? V.childNamespace(parent) : (node.namespaceURI || V.HTML_NS);
+          // 부모가 요소면 부모를 보고, <template> 안(문서 조각)이나 부모 없는 루트면 HTML
+          const ns = parent && parent.nodeType === 1 ? V.childNamespace(parent) : V.HTML_NS;
           const fresh = V.render(p.node, doc, ns);
           if (parent) parent.replaceChild(fresh, node);
+          syncTextarea(parent);
           if (p.path.length === 0) currentRoot = fresh;
           break;
         }
         case 'TEXT': {
-          findNode(currentRoot, p.path).nodeValue = p.value;
+          const node = findNode(currentRoot, p.path);
+          node.nodeValue = p.value;
+          syncTextarea(node.parentNode);
           break;
         }
         case 'PROPS': {
@@ -78,6 +99,14 @@
       }
     }
     return currentRoot;
+  }
+
+  /**
+   * <textarea> 의 글자 자식은 "처음 값" 일 뿐이다. 사용자가 한 번 입력하면 화면 값(.value)은 따로 논다.
+   * 그래서 자식 글자를 고친 뒤 .value 도 같은 글자로 맞춘다.
+   */
+  function syncTextarea(el) {
+    if (el && el.localName === 'textarea' && el.namespaceURI === V.HTML_NS) el.value = el.textContent;
   }
 
   /**

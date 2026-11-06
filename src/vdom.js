@@ -85,7 +85,8 @@
     const type = node.localName;
     const props = {};
     for (const attr of Array.from(node.attributes)) {
-      props[attr.name] = attr.value;
+      // props[attr.name] = … 은 이름이 "__proto__" 면 칸이 안 생긴다
+      Object.defineProperty(props, attr.name, { value: attr.value, enumerable: true, writable: true, configurable: true });
     }
 
     const keep = keepWhitespace || KEEP_WHITESPACE.has(type);
@@ -124,18 +125,36 @@
    * <template> 안에서 파싱하므로 <img onerror> · <script> 가 실행되지 않는다.
    * 잘못 닫힌 HTML 은 브라우저 파서가 고친 결과를 따른다.
    */
-  function htmlToChildren(html, doc = root.document) {
+  function htmlToChildren(html, doc = root.document, options = {}) {
     const tpl = doc.createElement('template');
     tpl.innerHTML = html;
-    return childrenToVdom(tpl.content, false);
+    const kids = childrenToVdom(tpl.content, false);
+    return options.dropScripts ? kids.map(stripScripts).filter(Boolean) : kids;
+  }
+
+  /**
+   * 사용자가 친 HTML 을 실제 영역에 넣기 전에 실행되는 것을 뺀다.
+   *   <script> 는 createElement 로 만들어 붙여도 실행된다 → 노드째 뺀다
+   *   onclick="…" 같은 문자열 이벤트 속성 → 뺀다 (Phase 2 의 이벤트는 문자열이 아니라 함수)
+   */
+  function stripScripts(vnode) {
+    if (isText(vnode)) return vnode;
+    if (vnode.type === 'script') return null;
+    const props = {};
+    for (const [k, v] of Object.entries(vnode.props)) {
+      if (/^on/i.test(k) && typeof v === 'string') continue;
+      Object.defineProperty(props, k, { value: v, enumerable: true, writable: true, configurable: true });
+    }
+    return { type: vnode.type, props, children: vnode.children.map(stripScripts).filter(Boolean) };
   }
 
   /**
    * 테스트 영역 HTML 을 읽어 루트 노드로 감싼다.
    * rootVnode: 이전 루트 (type · props 를 그대로 물려받는다 — 루트는 실제 영역 상자 자체)
+   * 기본으로 <script> · on…="문자열" 을 뺀다 (stripScripts)
    */
-  function htmlToVdom(html, rootVnode, doc = root.document) {
-    return { type: rootVnode.type, props: { ...rootVnode.props }, children: htmlToChildren(html, doc) };
+  function htmlToVdom(html, rootVnode, doc = root.document, options = { dropScripts: true }) {
+    return { type: rootVnode.type, props: { ...rootVnode.props }, children: htmlToChildren(html, doc, options) };
   }
 
   // ───────────────────────── VDOM → DOM ─────────────────────────
@@ -327,7 +346,7 @@
   const api = {
     TEXT, SVG_NS, HTML_NS, MATHML_NS,
     h, text, isText, isIndentText,
-    domToVdom, childrenToVdom, htmlToChildren, htmlToVdom,
+    domToVdom, childrenToVdom, htmlToChildren, htmlToVdom, stripScripts,
     render, setProp, childNamespace,
     toHtml, clone,
   };

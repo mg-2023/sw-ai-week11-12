@@ -231,3 +231,49 @@ test('History 를 오가며 patch 하면 실제 DOM 이 그 시점 VDOM 과 같�
   go(hs.forward());
   assert.deepEqual(V.domToVdom(rootEl), v2);
 });
+
+// ───────── Codex 리뷰 ② · ③ 에서 나온 경우 ─────────
+
+test('[C2-1/C3-1] select: option 이 생긴 뒤 value 를 고른다', () => {
+  const a = h('div', null, h('select', { value: 'a' }, h('option', { value: 'a' }, 'A')));
+  const b = h('div', null, h('select', { value: 'b' }, h('option', { value: 'a' }, 'A'), h('option', { value: 'b' }, 'B')));
+  assert.equal(patchAndRead(a, b).el.firstChild.value, 'b');
+});
+
+test('[C2-2] 루트 CREATE: rootEl 없이 doc 만으로 새 루트를 만들어 돌려준다 / 루트 REMOVE 는 null', () => {
+  const { document } = setup();
+  const v = h('div', null, 'X');
+  const el = applyPatches(null, diff(undefined, v), document);
+  assert.equal(el.outerHTML, '<div>X</div>');
+  document.body.appendChild(el);
+  assert.equal(applyPatches(el, diff(v, undefined)), null);
+  assert.equal(el.parentNode, null, '문서에서도 빠진다');
+});
+
+test('[C3-2] <template> 안에서 REPLACE 하면 HTML 이름공간으로 만든다', () => {
+  const { document } = setup();
+  const a = h('div', null, h('template', null, h('svg')));
+  const b = h('div', null, h('template', null, h('p', null, 'x')));
+  const el = V.render(a, document);
+  applyPatches(el, diff(a, b));
+  assert.equal(el.firstChild.content.firstChild.namespaceURI, V.HTML_NS);
+});
+
+test('[C3-3] 사용자가 입력한 textarea 도 Patch · 뒤로가기에 따라 화면 값이 바뀐다', () => {
+  const { document } = setup();
+  const a = h('div', null, h('textarea', null, 'a'));
+  const b = h('div', null, h('textarea', null, 'b'));
+  const el = V.render(a, document);
+  el.firstChild.value = 'typed';
+  applyPatches(el, diff(a, b));
+  assert.equal(el.firstChild.value, 'b');
+  applyPatches(el, diff(b, a));
+  assert.equal(el.firstChild.value, 'a');
+});
+
+test('테스트 영역 입력의 <script> · on…="문자열" 은 빠진다 (htmlToVdom 기본)', () => {
+  const { document } = setup();
+  const root = h('div', { id: 'actual' });
+  const v = V.htmlToVdom('<p onclick="x()">a<script>evil()</script></p><script>y()</script>', root, document);
+  assert.deepEqual(v.children, [h('p', null, 'a')]);
+});

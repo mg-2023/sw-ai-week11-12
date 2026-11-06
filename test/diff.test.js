@@ -116,3 +116,24 @@ test('diff 는 입력을 고치지 않는다', () => {
   assert.equal(JSON.stringify(b), sb);
 });
 
+
+// ───────── Codex 리뷰 ② 에서 나온 경우 ─────────
+
+test('[C2-1] select value 는 option patch 뒤에 나온다 (값만 바뀌어도 · option 만 바뀌어도)', () => {
+  const a = h('select', { value: 'a' }, h('option', { value: 'a' }, 'A'));
+  const b = h('select', { value: 'b' }, h('option', { value: 'a' }, 'A'), h('option', { value: 'b' }, 'B'));
+  const ps = diff(a, b);
+  assert.deepEqual(ps.map((p) => p.type), ['CREATE', 'PROPS']);
+  assert.deepEqual(ps[1].set, { value: 'b' });
+  // value 는 그대로, option 순서만 바뀜 → value 를 다시 넣는다
+  const c = h('select', { value: 'b' }, h('option', { value: 'b' }, 'B'), h('option', { value: 'a' }, 'A'));
+  assert.equal(diff(b, c).at(-1).set.value, 'b');
+  // 아무것도 안 바뀌면 아무 patch 도 없다
+  assert.deepEqual(diff(b, V.clone(b)), []);
+});
+
+test('[C2-3] 이름이 __proto__ 인 속성도 set 에 들어간다', () => {
+  const ps = diff(h('div'), h('div', JSON.parse('{"__proto__":"x"}')));
+  assert.equal(ps.length, 1);
+  assert.ok(Object.prototype.hasOwnProperty.call(ps[0].set, '__proto__'));
+});

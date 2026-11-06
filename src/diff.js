@@ -56,6 +56,7 @@
     // 4) 같은 요소 → 속성 비교, 그다음 자식 비교
     const propPatch = diffProps(oldV.props, newV.props);
     if (propPatch) patches.push({ type: 'PROPS', path, ...propPatch });
+    const beforeKids = patches.length;
 
     const oldKids = oldV.children;
     const newKids = newV.children;
@@ -73,6 +74,32 @@
     for (let i = oldKids.length - 1; i >= common; i--) {
       patches.push({ type: 'REMOVE', path: path.concat(i) });
     }
+
+    // <select value> 는 option 이 다 갖춰진 뒤에 골라야 한다.
+    // 값이 바뀌었거나 option 이 바뀌었으면, 자식 patch 뒤에 value 를 한 번 더 넣는다.
+    if (newV.type === 'select' && has(newV.props, 'value')) {
+      const kidsChanged = patches.length > beforeKids;
+      const valueChanged = propPatch !== null && has(propPatch.set, 'value');
+      if (valueChanged) {
+        delete propPatch.set.value;
+        // value 만 바뀐 PROPS 였다면 빈 껍데기가 되니 목록에서 뺀다 (beforeKids - 1 자리)
+        if (Object.keys(propPatch.set).length === 0 && propPatch.remove.length === 0) {
+          patches.splice(beforeKids - 1, 1);
+        }
+      }
+      if (valueChanged || kidsChanged) {
+        patches.push({ type: 'PROPS', path, set: { value: newV.props.value }, remove: [] });
+      }
+    }
+  }
+
+  function has(obj, name) {
+    return Object.prototype.hasOwnProperty.call(obj, name);
+  }
+
+  /** set[name] = value 대신. 이름이 "__proto__" 여도 진짜 칸으로 만든다 */
+  function put(obj, name, value) {
+    Object.defineProperty(obj, name, { value, enumerable: true, writable: true, configurable: true });
   }
 
   /**
@@ -85,12 +112,12 @@
     const set = {};
     const remove = [];
     for (const name of Object.keys(newProps)) {
-      if (!Object.prototype.hasOwnProperty.call(oldProps, name) || oldProps[name] !== newProps[name]) {
-        set[name] = newProps[name];
+      if (!has(oldProps, name) || oldProps[name] !== newProps[name]) {
+        put(set, name, newProps[name]);
       }
     }
     for (const name of Object.keys(oldProps)) {
-      if (!Object.prototype.hasOwnProperty.call(newProps, name)) remove.push(name);
+      if (!has(newProps, name)) remove.push(name);
     }
     if (Object.keys(set).length === 0 && remove.length === 0) return null;
     return { set, remove };
