@@ -252,3 +252,21 @@ test('[C1-7] \r 은 속성 · 텍스트 모두 왕복해도 남는다', () => {
   const kids = V.htmlToChildren('<p title="&#13;">a&#13;b</p>', document);
   assert.deepEqual(V.htmlToChildren(V.toHtml(kids), document), kids);
 });
+
+// ───────── Codex 리뷰 ⑤ 에서 나온 경우 ─────────
+
+test('[C5-1] script 를 뺀 뒤 붙은 글자는 합친다 → 다시 읽어도 변경 없음', () => {
+  const { document } = setup();
+  const root = h('div');
+  const v1 = V.htmlToVdom('<p>a<script>x()</script>b</p>', root, document);
+  assert.deepEqual(v1.children[0].children, [text('ab')]);
+  const v2 = V.htmlToVdom(V.toHtml(v1.children), root, document);
+  assert.deepEqual(v2, v1);
+});
+
+test('[C5-2] 폼 요소가 아닌 value(li · progress)는 속성만 넣는다', () => {
+  const { document } = setup();
+  const li = V.render(h('li', { value: '01' }, 'x'), document);
+  assert.equal(li.getAttribute('value'), '01');
+  assert.doesNotThrow(() => V.render(h('progress', { value: 'abc' }), document));
+});

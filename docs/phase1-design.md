@@ -5,7 +5,7 @@
 > 노드는 늘 `{ type, props, children }` 세 칸, Diff 는 경로(path) 달린 할 일 목록, Patch 는 그 목록대로 그 노드만 고친다.
 
 - 실행: `index.html` 더블클릭 (서버 필요 없음)
-- 테스트: `npm install` 한 번 → `npm test` (69개)
+- 테스트: `npm install` 한 번 → `npm test` (73개)
 - 기록: Codex 검증은 [codex-review-log.md](codex-review-log.md)
 
 ---
@@ -50,7 +50,7 @@
 | src/diff.js | `diff(old, new)` | VDOM 두 개 | patch 목록 `[{ type, path, ... }]` |
 | src/patch.js | `applyPatches(rootEl, patches)` | 실제 루트 요소, patch 목록 | 루트 요소 (루트가 바뀌면 새 요소) |
 | | `mount(rootEl, vnode)` | 실제 루트 요소, VDOM | 루트 요소 (자식을 VDOM 대로 다시 그림) |
-| src/history.js | `createHistory(v0)` | 첫 VDOM | `{ push, back, forward, current, canBack, canForward }` — 꺼낼 때마다 깊은 복사 |
+| src/history.js | `createHistory(v0)` | 첫 VDOM | `{ push, back, forward, current, canBack, canForward }` — 넣고 꺼낼 때마다 트리를 재귀 복사 (props 는 한 단계 복사 — 지금 props 값은 글자 · 함수뿐이라 충분) |
 
 **patch 종류 5개**
 
@@ -80,10 +80,10 @@
 | --- | --- | --- |
 | 아무것도 안 바꾸고 Patch | patch 0건, 기록 안 늘어남 | diff "같은 트리면 patches 가 비어 있다", 페이지 확인 |
 | 글자만 바뀜 | TEXT 1건, 텍스트 노드 객체는 그대로 | patch "TEXT: 글자만 바꾸고 노드는 그대로" |
-| 속성 바뀜 · 생김 · 없어짐 | PROPS 1건에 모아서 | diff · patch "PROPS" |
+| 속성 바뀜 · 생김 · 없어짐 | PROPS 1건에 모아서 | diff "속성: 바뀐 것 · 생긴 것은 set…", patch "PROPS" |
 | 목록 끝에 추가 · 삭제 | CREATE / 뒤에서부터 REMOVE | diff "자식이 늘면 / 줄면" |
 | 태그가 바뀜 | REPLACE, 형제는 그대로 | patch "REPLACE" |
-| 뒤로 · 앞으로 · 뒤로 간 뒤 새 Patch | 앞 기록은 버림 (브라우저와 같음) | patch "History" 3개 |
+| 뒤로 · 앞으로 · 뒤로 간 뒤 새 Patch | 앞 기록은 버림 (브라우저와 같음) | patch "History" 4개 |
 
 ### 경계
 
@@ -100,6 +100,7 @@
 | SVG · MathML · `foreignObject` · `xlink:href` | 이름공간대로 만듦 | vdom "SVG", `[C1-4]`, `[C1-5]` |
 | `<table>` 조각, `<template>` | 파서 규칙대로 (`tbody` 자동), `.content` 사용 | vdom "table", `[C3-2]` |
 | 특수 문자 · 한글 · 이모지 · `&nbsp;` · `\r` | 그대로 왕복 | vdom "특수 문자", `[C1-7]` |
+| `<li value="01">` · `<progress value="abc">` | 속성만 넣음 (`.value` 프로퍼티는 폼 요소만) | `[C5-2]` |
 | 루트가 생김 · 없어짐 | 새 루트 / `null` | `[C2-2]` |
 | `__proto__` 같은 속성 이름 | 진짜 칸으로 비교 | `[C2-3]` |
 | 무작위 트리 500쌍 | render(old) + patch == new | patch "무작위 트리 500쌍" |
@@ -109,7 +110,7 @@
 | 경우 | 기대 | 테스트 |
 | --- | --- | --- |
 | 닫히지 않은 HTML (`<p>a<p>b`) | 브라우저 파서가 고친 모양을 따름, 테스트 영역도 고친 모양으로 다시 씀 | vdom "닫히지 않은 HTML" |
-| `<img onerror>` · `<script>` 입력 | 읽을 때 실행 안 함(template 파싱), 실제 영역에 넣을 때도 뺌 | vdom "스크립트 · onerror", patch "테스트 영역 입력의 script" |
+| `<img onerror>` · `<script>` 입력 | 읽을 때 실행 안 함(template 파싱), 실제 영역에 넣을 때도 뺌, 뺀 자리 양옆 글자는 합침 (`[C5-1]`) | vdom "스크립트 · onerror", patch "테스트 영역 입력의 script" |
 | 텍스트에 `<img onerror=…>` 글자 | 글자로만 들어감 (`innerHTML` 안 씀) | vdom "render 는 텍스트를 HTML 로 해석하지 않는다" |
 | `<input type="file" value>` | 예외 없이 그림 | `[C1-1]` |
 | DOM 과 VDOM 이 어긋남 | "경로 […] 에서 노드를 찾지 못했습니다" 에러 | patch "어긋나면 알 수 있는 에러" |
@@ -124,6 +125,7 @@
 | `key` 비교 없음 — 목록 맨 앞에 넣으면 뒤 항목이 모두 TEXT 로 바뀌고 끝에 CREATE | Phase 1 마감 우선. 결과는 맞고 효율만 떨어짐 (테스트로 동작 고정) | Phase 2 에서 목록 렌더링이 생기면 `props.key` 로 이동(MOVE) patch 추가 |
 | 로드 때 실제 영역을 한 번 다시 그림 (`mount`) | 번호로 걷기의 전제(1:1)를 맞추는 가장 단순한 방법 | — |
 | 줄바꿈만 있는 공백은 화면에서도 사라짐 (예: `</label>\n<button>` 사이 공백) | 결정 ② 의 대가 | 같은 줄에 쓰면 남는다 |
+| MathML 의 드문 경계 (`annotation-xml encoding="text/html"` 안 HTML, `<mi>` 안 `mglyph`) 이름공간이 파서와 다름 | 거의 안 쓰는 경우라 Phase 1 범위 밖 (Codex ⑤) | 필요하면 `namespaceForChildren` 에 규칙 추가 |
 | `<plaintext>` 지원 안 함 | 닫을 수 없는 폐기된 요소 | — |
 | 실제 영역에서 사용자가 바꾼 값(입력 · 체크)은 VDOM 에 없음 | VDOM 은 테스트 영역 HTML 에서만 만든다 (요구사항대로) | Phase 2 에서 state 로 다룸 |
 
@@ -135,4 +137,4 @@
 | --- | --- |
 | `node:test` (Node 내장) | 설치 없이 `npm test` 한 줄 |
 | `jsdom` (개발 의존성 하나) | Node 에는 `document` 가 없다. 브라우저 DOM 을 흉내 내서 변환 · Patch 를 실제 DOM API 로 검사 |
-| 브라우저 직접 확인 | 실제 Chrome 에서 Patch · 뒤로 · 앞으로를 눌러 봄 (patch 수 == 실제 DOM 변경 수) |
+| 브라우저 직접 확인 | 실제 Chrome 에서 Patch · 뒤로 · 앞으로를 눌러 봄. 페이지가 patch 수와 실제 DOM 변경 수(MutationObserver)를 나란히 보여 줌 — 둘은 같지 않을 수 있다 (PROPS 1건에 속성 2개면 변경 2건) |

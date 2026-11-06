@@ -32,6 +32,7 @@
   // 지금 상태가 속성(attribute)이 아니라 프로퍼티에 있는 것들
   //   <input value="a"> 에 사용자가 b 를 치면 속성은 a, .value 는 b
   const LIVE_PROPS = new Set(['value', 'checked', 'selected']);
+  const FORM_TAGS = new Set(['input', 'textarea', 'select', 'option']);
 
   // ───────────────────────── 노드 만들기 ─────────────────────────
 
@@ -129,7 +130,7 @@
     const tpl = doc.createElement('template');
     tpl.innerHTML = html;
     const kids = childrenToVdom(tpl.content, false);
-    return options.dropScripts ? kids.map(stripScripts).filter(Boolean) : kids;
+    return options.dropScripts ? mergeTexts(kids.map(stripScripts).filter(Boolean)) : kids;
   }
 
   /**
@@ -145,7 +146,18 @@
       if (/^on/i.test(k) && typeof v === 'string') continue;
       Object.defineProperty(props, k, { value: v, enumerable: true, writable: true, configurable: true });
     }
-    return { type: vnode.type, props, children: vnode.children.map(stripScripts).filter(Boolean) };
+    return { type: vnode.type, props, children: mergeTexts(vnode.children.map(stripScripts).filter(Boolean)) };
+  }
+
+  /** 노드를 빼고 나면 글자끼리 붙을 수 있다 (`a<script>…</script>b`) → 주석 때와 같이 한 덩어리로 */
+  function mergeTexts(kids) {
+    const out = [];
+    for (const k of kids) {
+      const last = out[out.length - 1];
+      if (isText(k) && last && isText(last)) out[out.length - 1] = text(last.props.nodeValue + k.props.nodeValue);
+      else out.push(k);
+    }
+    return out;
   }
 
   /**
@@ -204,7 +216,8 @@
     }
 
     // 3) 지금 상태(프로퍼티)도 맞춘다
-    if (LIVE_PROPS.has(name) && name in el) {
+    // 폼 요소만. <li value> · <progress value> 의 .value 는 숫자라 대입하면 "01"→"1" 로 바뀌거나 예외가 난다
+    if (LIVE_PROPS.has(name) && FORM_TAGS.has(el.localName) && el.namespaceURI === HTML_NS) {
       if (name === 'value' && el.type === 'file') {
         // 파일 입력의 .value 는 보안상 '' 만 넣을 수 있다 (다른 값은 예외)
       } else if (name === 'value') {
