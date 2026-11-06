@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual DOM · Diff 검증기</title>
+<style>
+:root{
+  --bg:#f6f7fa; --surface:#ffffff; --text:#1b2130; --muted:#586277; --border:#e2e6ee;
+  --accent:#2f5bea; --accent-soft:#e9efff; --ok:#12805c; --ok-soft:#e3f6ee;
+  --warn:#a35a00; --warn-soft:#fff3dd; --bad:#c0362c; --bad-soft:#fde9e7;
+  --purple:#7c3aed; --purple-soft:#f0e9ff;
+  --code-bg:#0f1729; --code-text:#e6edf7;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0c111d; --surface:#141b2c; --text:#e6eaf3; --muted:#98a3ba; --border:#252f47;
+    --accent:#86a5ff; --accent-soft:#1a2547; --ok:#4cd6a0; --ok-soft:#10302a;
+    --warn:#ffb85c; --warn-soft:#33260f; --bad:#ff8a80; --bad-soft:#3a1a1a;
+    --purple:#b79cff; --purple-soft:#271a47;
+    --code-bg:#080c17;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.7 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Noto Sans KR","Malgun Gothic",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+code,pre,textarea,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"D2Coding",monospace}
+.wrap{max-width:1200px;margin:0 auto;padding:28px 20px 80px}
+header h1{font-size:clamp(22px,3.4vw,30px);margin:0 0 4px;letter-spacing:-.02em}
+header p{margin:0;color:var(--muted)}
+.flow{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 4px;font-size:13px;color:var(--muted)}
+.flow span{background:var(--surface);border:1px solid var(--border);border-radius:99px;padding:2px 11px}
+.flow span.arr{border:0;background:none;padding:2px 0}
+
+/* 툴바 */
+.toolbar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  background:var(--bg);padding:12px 0;margin:10px 0 6px;border-bottom:1px solid var(--border)}
+.tb{font:inherit;font-size:14px;font-weight:600;padding:7px 16px;border-radius:9px;border:1px solid var(--border);
+  background:var(--surface);color:var(--text);cursor:pointer}
+.tb:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.tb:disabled{opacity:.4;cursor:not-allowed}
+.tb.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.tb.primary:hover:not(:disabled){filter:brightness(1.1);color:#fff}
+.status{margin-left:auto;font-size:13.5px;color:var(--muted);display:flex;gap:10px;align-items:center}
+.status b{color:var(--text)}
+
+.badge{display:inline-block;font-size:12px;font-weight:700;padding:1px 9px;border-radius:99px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.badge.ok{background:var(--ok-soft);color:var(--ok)}
+.badge.warn{background:var(--warn-soft);color:var(--warn)}
+.badge.bad{background:var(--bad-soft);color:var(--bad)}
+
+/* 두 영역 */
+.areas{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:14px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.panel-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border)}
+.panel-head h2{font-size:15px;margin:0}
+.panel-head .sp{margin-left:auto}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.seg button{font:inherit;font-size:12.5px;padding:3px 10px;border:0;background:var(--surface);color:var(--muted);cursor:pointer}
+.seg button.on{background:var(--accent-soft);color:var(--accent);font-weight:700}
+
+/* 두 영역 안에서 렌더링되는 샘플 HTML 의 스타일 */
+.canvas{padding:14px 18px;min-height:250px;font-size:15px;line-height:1.7;overflow-wrap:anywhere}
+.canvas h1,.canvas h2,.canvas h3{margin:.2em 0 .3em;line-height:1.3}
+.canvas p{margin:.4em 0}
+.canvas ul,.canvas ol{padding-left:1.4em;margin:.4em 0}
+.canvas li.done{text-decoration:line-through;color:var(--muted)}
+.canvas .hl{background:#ffe27a;color:#1b2130;padding:0 .2em;border-radius:3px}
+.canvas .big{font-size:1.25em}
+.canvas .btn{font:inherit;font-size:14px;padding:4px 14px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text)}
+.canvas .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.canvas .btn[disabled]{opacity:.5}
+.canvas .card{border:1px solid var(--border);border-radius:10px;padding:10px 14px}
+#test-root{outline:2px dashed transparent;outline-offset:-2px;transition:outline-color .15s;cursor:text}
+#test-root:focus{outline-color:var(--accent)}
+#test-src{display:none;width:100%;min-height:250px;border:0;resize:vertical;padding:14px 18px;font-size:13px;line-height:1.6;
+  background:var(--bg);color:var(--text);outline:none}
+.hint{font-size:12.5px;color:var(--muted);padding:8px 14px;border-top:1px solid var(--border);margin-top:auto}
+
+/* 하단: 로그 + 히스토리 */
+.lower{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:16px;margin-top:16px}
+.card2{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 14px}
+.card2>h2{font-size:15px;margin:0 0 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.msg{font-size:14px;margin:4px 0;color:var(--muted)}
+.plist{margin-top:8px;max-height:300px;overflow:auto;background:var(--code-bg);color:var(--code-text);border-radius:10px;padding:8px 10px;font-size:12.5px}
+.prow{display:flex;gap:8px;align-items:baseline;padding:2px 0;border-bottom:1px dashed #243158}
+.prow:last-child{border:0}
+.prow .badge{flex:none;min-width:68px;text-align:center}
+.prow code{color:#9fb0d2;flex:none}
+.prow .d{word-break:break-all}
+.badge.CREATE{background:var(--ok-soft);color:var(--ok)}
+.badge.REMOVE{background:var(--bad-soft);color:var(--bad)}
+.badge.REPLACE{background:var(--warn-soft);color:var(--warn)}
+.badge.TEXT{background:var(--accent-soft);color:var(--accent)}
+.badge.PROPS{background:var(--purple-soft);color:var(--purple)}
+.hist{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto}
+.hist-item{font:inherit;text-align:left;font-size:13px;padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);cursor:pointer;line-height:1.5}
+.hist-item:hover{border-color:var(--accent)}
+.hist-item.current{border-color:var(--accent);background:var(--accent-soft);font-weight:600}
+.hist-item.future{opacity:.5}
+.hist-item small{display:block;color:var(--muted);font-weight:400}
+details{margin-top:10px}
+summary{cursor:pointer;color:var(--accent);font-weight:600;font-size:14px}
+pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg);color:var(--code-text);border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.55}
+.how{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:6px 16px;margin-top:14px;font-size:14px}
+.how ol{margin:6px 0;padding-left:1.3em}
+@media (max-width:860px){.areas,.lower{grid-template-columns:minmax(0,1fr)}.status{margin-left:0;width:100%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Virtual DOM · Diff 검증기</h1>
+  <p>테스트 영역에서 HTML을 수정하고 Patch를 누르면, 달라진 부분만 실제 영역에 반영됩니다.</p>
+  <div class="flow">
+    <span>실제 영역 HTML</span><span class="arr">→</span><span>Virtual DOM</span><span class="arr">→</span><span>테스트 영역 렌더링</span><span class="arr">→</span><span>사용자 수정</span><span class="arr">→</span><span>Patch = 새 VDOM + Diff</span><span class="arr">→</span><span>실제 영역에 변경분만 반영</span><span class="arr">→</span><span>State History</span>
+  </div>
+</header>
+
+<div class="toolbar">
+  <button class="tb primary" id="btn-patch" type="button">Patch</button>
+  <button class="tb" id="btn-back" type="button">◀ 뒤로가기</button>
+  <button class="tb" id="btn-fwd" type="button">앞으로가기 ▶</button>
+  <div class="status"><span>State <b id="st-pos">1 / 1</b></span><span class="badge ok" id="st-dirty">Patch 완료</span></div>
+</div>
+
+<div class="areas">
+  <!-- ───────── 실제 영역: 이 안의 HTML 이 "샘플 HTML" 이다 ───────── -->
+  <section class="panel">
+    <div class="panel-head"><h2>실제 영역 (Real)</h2><span class="badge">Patch로만 갱신</span></div>
+    <div class="canvas" id="real-root">
+      <div class="card" id="profile">
+        <h2 class="title">Virtual DOM 연습</h2>
+        <p class="desc">조회수: <b>10</b> 회</p>
+        <ul class="list">
+          <li>React</li>
+          <li class="done">Virtual DOM</li>
+          <li>Diff 알고리즘</li>
+        </ul>
+        <button class="btn" disabled>저장</button>
+      </div>
+    </div>
+    <div class="hint">여기는 직접 수정하지 않아요. Patch / 뒤로가기 / 앞으로가기의 결과만 보입니다.</div>
+  </section>
+
+  <!-- ───────── 테스트 영역: 자유롭게 수정 ───────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>테스트 영역 (Test)</h2><span class="badge warn">자유롭게 수정</span>
+      <span class="sp seg" id="mode-seg">
+        <button type="button" data-mode="preview" class="on">미리보기 편집</button>
+        <button type="button" data-mode="source">HTML 소스 편집</button>
+      </span>
+    </div>
+    <div class="canvas" id="test-root" contenteditable="true" spellcheck="false"></div>
+    <textarea id="test-src" spellcheck="false" aria-label="테스트 영역 HTML 소스"></textarea>
+    <div class="hint">글자는 미리보기에서 바로 고치고, 태그·속성(class 등)을 바꾸려면 “HTML 소스 편집”을 쓰세요. 뒤로/앞으로 이동 시 Patch하지 않은 수정은 사라집니다.</div>
+  </section>
+</div>
+
+<div class="lower">
+  <section class="card2" aria-live="polite">
+    <h2>Diff / Patch 결과</h2>
+    <div id="log-title" class="msg"></div>
+    <div id="log-chips" class="chips"></div>
+    <div id="log-msg" class="msg"></div>
+    <div id="log-patches" class="plist" hidden></div>
+    <details><summary>현재 State의 Virtual DOM (JSON)</summary><pre class="json" id="vdom-json"></pre></details>
+  </section>
+  <section class="card2">
+    <h2>State History <small style="font-weight:400;color:var(--muted)">(클릭하면 해당 State로 이동)</small></h2>
+    <div class="hist" id="hist"></div>
+  </section>
+</div>
+
+<div class="how">
+  <b>사용 방법</b>
+  <ol>
+    <li>테스트 영역에서 글자를 고치거나, “HTML 소스 편집”에서 태그·속성을 바꿉니다. (예: <code>&lt;li&gt;</code> 추가, <code>class="done"</code> 부여, <code>&lt;p&gt;</code> → <code>&lt;h3&gt;</code>)</li>
+    <li><b>Patch</b>: 테스트 영역 → 새 Virtual DOM → 이전 VDOM과 Diff → 변경된 부분만 실제 영역에 반영(노란 깜빡임) → State History에 저장.</li>
+    <li><b>뒤로가기 / 앞으로가기</b>: 저장된 VDOM으로 이동. 실제 영역은 두 State 사이의 Diff 패치로, 테스트 영역은 해당 VDOM으로 다시 그립니다.</li>
+  </ol>
+  <p class="msg" style="margin:4px 0 10px">이 구현은 key 없이 “같은 위치끼리” 비교합니다. 보안을 위해 <code>script/style/iframe</code> 등과 <code>on*</code> 속성, <code>javascript:</code> 링크는 VDOM 변환에서 제외돼요.</p>
+</div>
+
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ======================================================================
+ * 1. Virtual DOM 코어
+ *    VNode  : { type, props, children }   (텍스트 노드는 문자열)
+ *    Patch  : CREATE | REMOVE | REPLACE | TEXT | PROPS
+ *    path   : 컨테이너의 childNodes 를 따라 내려가는 인덱스 배열
+ * ====================================================================== */
+const ROOT = '#root';   // 영역(컨테이너) 자체를 나타내는 가상 루트. 영역의 최상위 노드가 여러 개여도 다룰 수 있다.
+const SKIP_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'base']);
+const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction', 'xlink:href']);
+
+function isSafeAttr(name, value) {
+  if (name.startsWith('on')) return false;
+  if (URL_ATTRS.has(name) && /^\s*javascript:/i.test(value)) return false;
+  return true;
+}
+
+/** 들여쓰기용 공백(줄바꿈을 포함한 공백뿐인 텍스트)은 VDOM에서 제외한다. <pre> 안은 예외. */
+function isIgnorableText(node) {
+  if (node.nodeValue === '') return true;
+  if (node.nodeValue.trim() !== '' || !/\n/.test(node.nodeValue)) return false;
+  return !(node.parentElement && node.parentElement.closest('pre,textarea'));
+}
+
+/** 실제 DOM 노드 하나 → VNode. 변환 대상이 아니면 null. */
+function domToVdom(node) {
+  if (node.nodeType === Node.TEXT_NODE) return isIgnorableText(node) ? null : node.nodeValue;
+  if (node.nodeType !== Node.ELEMENT_NODE) return null;           // 주석 등은 무시
+  const type = node.localName;
+  if (SKIP_TAGS.has(type)) return null;
+  const props = {};
+  for (const { name, value } of node.attributes) {
+    if (isSafeAttr(name, value)) props[name] = value;
+  }
+  return { type, props, children: childrenToVdom(node) };
+}
+
+function childrenToVdom(parent) {
+  const out = [];
+  for (const child of parent.childNodes) {
+    const v = domToVdom(child);
+    if (v === null) continue;
+    if (typeof v === 'string' && typeof out[out.length - 1] === 'string') out[out.length - 1] += v; // 이웃한 텍스트는 합친다
+    else out.push(v);
+  }
+  return out;
+}
+
+/** 영역(컨테이너) 전체 → 루트 VNode */
+const containerToVdom = (container) => ({ type: ROOT, props: {}, children: childrenToVdom(container) });
+
+/** 실제 DOM 을 VDOM 과 1:1 로 맞춘다(= domToVdom 이 건너뛰는 노드를 미리 제거). path 기반 Patch 를 쓰기 위한 준비. */
+function normalizeDom(parent) {
+  for (const child of [...parent.childNodes]) {
+    if (child.nodeType === Node.ELEMENT_NODE) {
+      if (SKIP_TAGS.has(child.localName)) { child.remove(); continue; }
+      for (const { name, value } of [...child.attributes]) if (!isSafeAttr(name, value)) child.removeAttribute(name);
+      normalizeDom(child);
+    } else if (child.nodeType === Node.TEXT_NODE) {
+      if (isIgnorableText(child)) child.remove();
+    } else child.remove();
+  }
+  parent.normalize();
+}
+
+function setProp(el, name, value) {
+  try {
+    if (value === undefined) el.removeAttribute(name);
+    else el.setAttribute(name, value);
+  } catch (e) { /* 잘못된 속성 이름은 건너뜀 (검증 단계에서 불일치로 드러남) */ }
+}
+
+/** VNode → 실제 DOM */
+function createDom(vnode) {
+  if (typeof vnode === 'string') return document.createTextNode(vnode);
+  const el = document.createElement(vnode.type);
+  for (const [name, value] of Object.entries(vnode.props)) setProp(el, name, value);
+  vnode.children.forEach((child) => el.appendChild(createDom(child)));
+  return el;
+}
+
+/** 두 VNode 가 완전히 같은지 (props 순서는 무시) */
+function vdomEqual(a, b) {
+  if (typeof a === 'string' || typeof b === 'string') return a === b;
+  if (a.type !== b.type) return false;
+  const ka = Object.keys(a.props), kb = Object.keys(b.props);
+  if (ka.length !== kb.length || ka.some((k) => a.props[k] !== b.props[k])) return false;
+  return a.children.length === b.children.length && a.children.every((c, i) => vdomEqual(c, b.children[i]));
+}
+
+/* ---------------------------------------------------------------- Diff */
+function diffProps(oldProps, newProps) {
+  const changes = [];
+  for (const name of new Set([...Object.keys(oldProps), ...Object.keys(newProps)])) {
+    if (oldProps[name] !== newProps[name]) changes.push({ name, oldValue: oldProps[name], newValue: newProps[name] });
+  }
+  return changes;
+}
+
+function diff(oldV, newV, path = [], patches = []) {
+  if (oldV === undefined && newV === undefined) return patches;
+  if (oldV === undefined) { patches.push({ type: 'CREATE', path, vnode: newV }); return patches; }   // 추가
+  if (newV === undefined) { patches.push({ type: 'REMOVE', path }); return patches; }                // 삭제
+  if (typeof oldV === 'string' && typeof newV === 'string') {                                       // 텍스트 변경
+    if (oldV !== newV) patches.push({ type: 'TEXT', path, text: newV });
+    return patches;
+  }
+  if (typeof oldV === 'string' || typeof newV === 'string' || oldV.type !== newV.type) {            // 타입이 다르면 통째로 교체
+    patches.push({ type: 'REPLACE', path, vnode: newV });
+    return patches;
+  }
+  const changes = diffProps(oldV.props, newV.props);                                                // 같은 타입: 속성 비교
+  if (changes.length) patches.push({ type: 'PROPS', path, changes });
+
+  const oldKids = oldV.children, newKids = newV.children;
+  const common = Math.min(oldKids.length, newKids.length);
+  for (let i = 0; i < common; i++) diff(oldKids[i], newKids[i], [...path, i], patches);             // 자식 재귀
+  for (let i = common; i < newKids.length; i++) patches.push({ type: 'CREATE', path: [...path, i], vnode: newKids[i] }); // 앞에서부터 추가
+  for (let i = oldKids.length - 1; i >= common; i--) patches.push({ type: 'REMOVE', path: [...path, i] });             // 뒤에서부터 삭제
+  return patches;
+}
+
+/* ---------------------------------------------------------------- Patch 적용 */
+const getNode = (container, path) => path.reduce((node, i) => node.childNodes[i], container);
+
+/** patch 목록을 실제 DOM 에 적용하고, 건드린 노드들을 돌려준다(깜빡임 표시용) */
+function applyPatches(container, patches) {
+  const touched = [];
+  for (const patch of patches) {
+    const { type, path } = patch;
+    switch (type) {
+      case 'CREATE': {
+        const node = createDom(patch.vnode);
+        getNode(container, path.slice(0, -1)).appendChild(node);
+        touched.push(node); break;
+      }
+      case 'REMOVE': {
+        const node = getNode(container, path), parent = node.parentNode;
+        node.remove(); touched.push(parent); break;
+      }
+      case 'REPLACE': {
+        const node = createDom(patch.vnode);
+        getNode(container, path).replaceWith(node);
+        touched.push(node); break;
+      }
+      case 'TEXT': {
+        const node = getNode(container, path);
+        node.nodeValue = patch.text; touched.push(node); break;
+      }
+      case 'PROPS': {
+        const el = getNode(container, path);
+        for (const { name, newValue } of patch.changes) setProp(el, name, newValue);
+        touched.push(el); break;
+      }
+    }
+  }
+  return touched;
+}
+
+/* ---------------------------------------------------------------- 직렬화 (VDOM → HTML 문자열, 소스 편집 모드용) */
+const escText = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/ /g, '&nbsp;');
+const escAttr = (s) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+const hasText = (kids) => kids.some((c) => typeof c === 'string');
+
+function serializeNode(v, d = 0) {
+  const pad = '  '.repeat(d);
+  if (typeof v === 'string') return pad + escText(v);
+  const attrs = Object.entries(v.props).map(([k, val]) => ' ' + k + (val === '' ? '' : '="' + escAttr(val) + '"')).join('');
+  if (VOID_TAGS.has(v.type)) return pad + '<' + v.type + attrs + '>';
+  const open = '<' + v.type + attrs + '>', close = '</' + v.type + '>';
+  if (!v.children.length) return pad + open + close;
+  if (hasText(v.children)) return pad + open + v.children.map((c) => serializeNode(c, 0)).join('') + close; // 텍스트가 섞이면 한 줄로 (공백 보존)
+  return pad + open + '\n' + v.children.map((c) => serializeNode(c, d + 1)).join('\n') + '\n' + pad + close;
+}
+const serializeRoot = (root) => hasText(root.children) ? root.children.map((c) => serializeNode(c, 0)).join('') : root.children.map((c) => serializeNode(c, 0)).join('\n');
+
+/** HTML 문자열 → 루트 VNode (template 안에서 파싱하므로 스크립트/이미지 로딩이 일어나지 않음) */
+function parseHtmlToVdom(src) {
+  const t = document.createElement('template');
+  t.innerHTML = src;
+  return containerToVdom(t.content);
+}
+
+/* ======================================================================
+ * 2. 검증 페이지: State History + UI
+ * ====================================================================== */
+const $ = (s) => document.querySelector(s);
+const realEl = $('#real-root'), testEl = $('#test-root'), srcEl = $('#test-src');
+const btnPatch = $('#btn-patch'), btnBack = $('#btn-back'), btnFwd = $('#btn-fwd');
+
+let states = [];     // [{ vdom, label, summary, time }]  ← State History
+let cur = 0;         // 현재 State 인덱스
+let mode = 'preview';
+
+const readTestVdom = () => mode === 'source' ? parseHtmlToVdom(srcEl.value) : containerToVdom(testEl);
+const renderTestFrom = (vdom) => testEl.replaceChildren(...vdom.children.map(createDom));
+const countNodes = (container) => { let n = 0; const walk = (x) => { n++; x.childNodes.forEach(walk); }; container.childNodes.forEach(walk); return n; };
+
+function flash(node) {
+  const el = node && (node.nodeType === 1 ? node : node.parentElement);
+  if (!el || el === realEl || !el.animate) return;
+  el.animate([{ outline: '2px solid #f59e0b', backgroundColor: 'rgba(245,158,11,.4)' },
+              { outline: '2px solid rgba(245,158,11,0)', backgroundColor: 'rgba(245,158,11,0)' }], { duration: 1200 });
+}
+
+/** applyPatches 를 실행하면서 MutationObserver 로 "실제로 건드려진 DOM 수"를 센다 */
+function applyAndMeasure(patches) {
+  const mo = new MutationObserver(() => {});
+  mo.observe(realEl, { childList: true, attributes: true, characterData: true, subtree: true });
+  const touched = applyPatches(realEl, patches);
+  let mutated = 0;
+  for (const r of mo.takeRecords()) {
+    if (r.type === 'childList') {
+      const cnt = (n) => { let c = 1; n.childNodes.forEach((k) => (c += cnt(k))); return c; };
+      r.addedNodes.forEach((n) => (mutated += cnt(n)));
+      r.removedNodes.forEach((n) => (mutated += cnt(n)));
+    } else mutated += 1;
+  }
+  mo.disconnect();
+  touched.forEach(flash);
+  return mutated;
+}
+
+/* ---------------------------------------------------------------- 로그 / 화면 갱신 */
+const summarize = (patches) => {
+  if (!patches.length) return '변경 없음';
+  const c = {}; patches.forEach((p) => (c[p.type] = (c[p.type] || 0) + 1));
+  return patches.length + '개 · ' + Object.entries(c).map(([k, v]) => k + (v > 1 ? ' ×' + v : '')).join(', ');
+};
+const trunc = (s, n = 90) => s.length > n ? s.slice(0, n) + '…' : s;
+const show = (v) => v === undefined ? '(없음)' : "'" + v + "'";
+
+function patchRow(p) {
+  const row = document.createElement('div'); row.className = 'prow';
+  const badge = document.createElement('span'); badge.className = 'badge ' + p.type; badge.textContent = p.type;
+  const path = document.createElement('code'); path.textContent = '[' + p.path.join(', ') + ']';
+  const d = document.createElement('span'); d.className = 'd';
+  if (p.type === 'CREATE' || p.type === 'REPLACE') d.textContent = trunc(serializeNode(p.vnode).replace(/\n\s*/g, ''));
+  else if (p.type === 'TEXT') d.textContent = JSON.stringify(p.text);
+  else if (p.type === 'PROPS') d.textContent = p.changes.map((c) => c.name + ': ' + show(c.oldValue) + ' → ' + show(c.newValue)).join(', ');
+  else d.textContent = '해당 노드 삭제';
+  row.append(badge, path, d);
+  return row;
+}
+
+function chip(text, cls) { const s = document.createElement('span'); s.className = 'badge ' + (cls || ''); s.textContent = text; return s; }
+
+function showLog({ title, patches, message, mutated, verified, error }) {
+  $('#log-title').textContent = title;
+  const chips = $('#log-chips'); chips.replaceChildren();
+  if (patches) chips.append(chip('패치 ' + patches.length + '개'));
+  if (mutated !== undefined) chips.append(chip('실제 영역 DOM 변경 ' + mutated + '건'), chip('영역 전체 노드 ' + countNodes(realEl) + '개 (통째로 다시 그렸다면 전부 재생성)'));
+  if (verified !== undefined) chips.append(verified ? chip('✅ 실제 영역 = 목표 VDOM', 'ok') : chip('❌ 실제 영역 ≠ 목표 VDOM (버그)', 'bad'));
+  if (error) chips.append(chip('오류', 'bad'));
+  $('#log-msg').textContent = message || '';
+  const list = $('#log-patches');
+  list.replaceChildren(...(patches || []).map(patchRow));
+  list.hidden = !(patches && patches.length);
+}
+
+function checkDirty() {
+  let dirty = false;
+  try { dirty = !vdomEqual(readTestVdom(), states[cur].vdom); } catch (e) { dirty = true; }
+  const el = $('#st-dirty');
+  el.textContent = dirty ? '수정됨 · Patch 대기' : 'Patch 완료';
+  el.className = 'badge ' + (dirty ? 'warn' : 'ok');
+}
+let dirtyQueued = false;
+const scheduleDirty = () => { if (dirtyQueued) return; dirtyQueued = true; requestAnimationFrame(() => { dirtyQueued = false; checkDirty(); }); };
+
+function updateUI() {
+  $('#st-pos').textContent = (cur + 1) + ' / ' + states.length;
+  btnBack.disabled = cur === 0;
+  btnFwd.disabled = cur === states.length - 1;
+  $('#vdom-json').textContent = JSON.stringify(states[cur].vdom, null, 2);
+  $('#hist').replaceChildren(...states.map((s, i) => {
+    const b = document.createElement('button'); b.type = 'button';
+    b.className = 'hist-item' + (i === cur ? ' current' : '') + (i > cur ? ' future' : '');
+    b.append(document.createTextNode('#' + i + ' ' + s.label + (i === cur ? '  ← 현재' : '')));
+    const sm = document.createElement('small'); sm.textContent = s.summary + ' · ' + s.time; b.append(sm);
+    b.addEventListener('click', () => goTo(i));
+    return b;
+  }));
+  checkDirty();
+}
+const now = () => new Date().toLocaleTimeString('ko-KR', { hour12: false });
+
+/* ---------------------------------------------------------------- 동작: Patch / 이동 */
+function doPatch() {
+  try {
+    const next = readTestVdom();                               // ① 현재 테스트 영역 → 새 VDOM
+    const prev = states[cur].vdom;
+    const patches = diff(prev, next);                          // ② 이전 VDOM 과 비교
+    if (!patches.length) {
+      showLog({ title: 'Patch 실행', patches, message: '이전 State와 달라진 부분이 없어요. 테스트 영역을 수정한 뒤 다시 눌러 보세요.' });
+      return;
+    }
+    const mutated = applyAndMeasure(patches);                  // ③ 변경된 부분만 실제 영역에 렌더링
+    const verified = vdomEqual(containerToVdom(realEl), next);
+    states.length = cur + 1;                                   // ④ 새 VDOM 을 State History 에 저장 (되돌린 뒤 Patch 하면 이후 기록은 버림)
+    states.push({ vdom: next, label: 'Patch ' + states.length, summary: summarize(patches), time: now() });
+    cur = states.length - 1;
+    updateUI();
+    showLog({ title: 'Patch 실행 → State #' + cur + ' 저장', patches, mutated, verified });
+  } catch (err) { showLog({ title: 'Patch 실행', error: true, message: String(err) }); }
+}
+
+function goTo(i) {
+  if (i < 0 || i >= states.length || i === cur) return;
+  try {
+    const from = states[cur].vdom, to = states[i].vdom;
+    const patches = diff(from, to);                            // 실제 영역: 두 State 사이의 Diff 만 적용
+    const mutated = applyAndMeasure(patches);
+    const verified = vdomEqual(containerToVdom(realEl), to);
+    const title = (i < cur ? '뒤로가기' : '앞으로가기') + ': State #' + cur + ' → #' + i;
+    cur = i;
+    renderTestFrom(to);                                        // 테스트 영역: 해당 VDOM 으로 다시 그림
+    if (mode === 'source') srcEl.value = serializeRoot(to);
+    updateUI();
+    showLog({ title, patches, mutated, verified, message: patches.length ? '' : '두 State의 VDOM이 같아서 실제 영역은 바뀌지 않았어요.' });
+  } catch (err) { showLog({ title: '이동', error: true, message: String(err) }); }
+}
+
+/* ---------------------------------------------------------------- 편집 모드 전환 */
+function setMode(m) {
+  if (m === mode) return;
+  if (m === 'source') srcEl.value = serializeRoot(readTestVdom());
+  else renderTestFrom(parseHtmlToVdom(srcEl.value));
+  mode = m;
+  testEl.style.display = m === 'source' ? 'none' : '';
+  srcEl.style.display = m === 'source' ? 'block' : 'none';
+  document.querySelectorAll('#mode-seg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === m));
+  checkDirty();
+}
+
+/* ---------------------------------------------------------------- 초기화: 페이지 로드 */
+(function init() {
+  normalizeDom(realEl);                                        // 실제 DOM 을 VDOM 과 1:1 로 맞춤
+  const v0 = containerToVdom(realEl);                          // 실제 영역의 샘플 HTML → Virtual DOM
+  states = [{ vdom: v0, label: '초기 상태 (로드)', summary: '샘플 HTML → VDOM', time: now() }];
+  renderTestFrom(v0);                                          // 그 VDOM 으로 테스트 영역 렌더링
+  const same = vdomEqual(containerToVdom(testEl), v0);
+
+  btnPatch.addEventListener('click', doPatch);
+  btnBack.addEventListener('click', () => goTo(cur - 1));
+  btnFwd.addEventListener('click', () => goTo(cur + 1));
+  document.querySelectorAll('#mode-seg button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  new MutationObserver(scheduleDirty).observe(testEl, { childList: true, attributes: true, characterData: true, subtree: true });
+  srcEl.addEventListener('input', scheduleDirty);
+
+  updateUI();
+  showLog({
+    title: '페이지 로드',
+    message: '① 실제 영역의 샘플 HTML을 Virtual DOM으로 변환했고 ② 그 VDOM으로 테스트 영역을 렌더링했어요. 이제 테스트 영역을 수정하고 Patch를 눌러 보세요.',
+    verified: same,
+  });
+})();
+
+window.__VD = { domToVdom, containerToVdom, createDom, diff, applyPatches, vdomEqual, get states() { return states; } }; // 콘솔 실험용
+})();
+</script>
+</body>
+</html>
