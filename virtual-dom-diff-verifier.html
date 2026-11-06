@@ -219,25 +219,68 @@ const BLOCK_TAGS = new Set(['address', 'article', 'aside', 'blockquote', 'captio
   'dir', 'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup',
   'hr', 'li', 'listing', 'main', 'menu', 'nav', 'ol', 'optgroup', 'option', 'p', 'pre', 'section', 'summary', 'table', 'tbody', 'td',
   'template', 'tfoot', 'th', 'thead', 'tr', 'ul', 'xmp']);
-const SVG_TEXT = new Set(['text', 'tspan', 'textPath']);   // SVG 에서 공백이 의미를 갖는 요소
+// SVG / MathML 에서 공백이 의미를 갖는 요소: 텍스트 컨테이너(text, mtext, mi …)와, 안쪽에 HTML 인라인 요소가 들어오는 통합 지점(foreignObject, annotation-xml …)
+const FOREIGN_TEXT = new Set(['text', 'tspan', 'textPath', 'mtext', 'mi', 'mn', 'mo', 'ms', 'foreignObject', 'desc', 'title', 'annotation-xml']);
 const WS_ONLY = /^[ \t\n\f\r]+$/;                          // HTML 공백만 (&nbsp; 는 공백이 아님)
 
 /** <template> 의 자식은 childNodes 가 아니라 .content 안에 있다. 자식을 다룰 때는 이 "호스트"를 거친다. */
 const childrenHost = (node) =>
   node.nodeType === Node.ELEMENT_NODE && node.localName === 'template' && node.namespaceURI === XHTML ? node.content : node;
 
-/** setAttribute 가 받아들이는 속성 이름인가? (innerHTML 파서는 ',' '@click' 같은 이름도 허용하지만 setAttribute 는 예외를 던진다) */
+/**
+ * setProp 이 실제로 쓰는 방식(setAttribute / setAttributeNS)으로 설정할 수 있는 속성 이름인가?
+ * (innerHTML 파서는 ',' '@click' 같은 이름도 허용하지만 setAttribute 는 예외를 던진다.
+ *  xlink: / xml: 은 setAttributeNS 의 엄격한 QName 규칙을 따르므로 'xlink:' 'xlink:a:b' 도 걸러야 한다)
+ */
 const attrNameOk = (() => {
   const probe = document.createElement('div'), cache = new Map();
   return (name) => {
     if (!cache.has(name)) {
       let ok = true;
-      try { probe.setAttribute(name, ''); probe.removeAttribute(name); } catch (e) { ok = false; }
+      try {
+        const ns = name.startsWith('xlink:') ? XLINK_NS : name.startsWith('xml:') ? XML_NS : null;
+        if (ns) {
+          probe.setAttributeNS(ns, name, '');
+          // 브라우저에 따라 'xlink:a:b' 는 예외 없이 'xlink:a' 로 잘려 만들어진다 → 만들어진 이름이 요청한 이름과 같아야 통과
+          ok = probe.attributes.length === 1 && probe.attributes[0].name === name;
+        } else {
+          probe.setAttribute(name, '');   // (HTML 요소는 이름을 소문자로 바꾸므로 viewBox 등은 이름 비교를 하지 않는다)
+        }
+      } catch (e) { ok = false; }
+      while (probe.attributes.length) probe.removeAttributeNode(probe.attributes[0]);
       cache.set(name, ok);
     }
     return cache.get(name);
   };
 })();
+
+/** createDom 이 만들었을 때 localName 이 그대로 유지되는 태그 이름인가? ('m::row' 는 예외, 'mml:mrow' 는 접두사가 분리되어 localName 이 달라진다) */
+const tagNameOk = (() => {
+  const cache = new Map();
+  return (ns, name) => {
+    const key = ns + '|' + name;
+    if (!cache.has(key)) {
+      let ok = true;
+      try { ok = (ns === XHTML ? document.createElement(name) : document.createElementNS(ns, name)).localName === name; } catch (e) { ok = false; }
+      cache.set(key, ok);
+    }
+    return cache.get(key);
+  };
+})();
+
+/**
+ * 파서가 만든 요소의 localName → VDOM 에 쓸 태그 이름 (쓸 수 없으면 '').
+ * SVG/MathML 의 'mml:mrow' 처럼 XML 접두사가 붙은 이름은 HTML 파서가 접두사를 분리하지 않고 통째로 localName 에 넣는다.
+ * 그대로 createElementNS 하면 접두사가 분리되어 검증이 어긋나므로 접두사를 떼어 'mrow' 로 정규화한다.
+ */
+function resolveTag(ns, name) {
+  if (ns !== XHTML && name.includes(':')) {
+    const local = name.slice(name.indexOf(':') + 1);
+    if (local.includes(':')) return '';
+    name = local;
+  }
+  return tagNameOk(ns, name) ? name : '';
+}
 
 /** 속성을 VDOM 에 넣으면 안 되는 이유(없으면 ''). */
 function rejectAttr(name, value) {
@@ -258,7 +301,7 @@ const isBlockish = (item) => typeof item === 'object' && !item.ns && (BLOCK_TAGS
  *  - 인라인끼리 사이(<span>A</span>\n<span>B</span>) → 공백 한 칸으로 보이므로 남긴다
  */
 function isInsignificantSpace(parentEl, prev, next) {
-  if (parentEl && parentEl.namespaceURI !== XHTML) return !SVG_TEXT.has(parentEl.localName);   // SVG/MathML: 도형 사이 공백은 무의미
+  if (parentEl && parentEl.namespaceURI !== XHTML) return !FOREIGN_TEXT.has(parentEl.localName);   // SVG/MathML: 도형 사이 공백은 무의미 (텍스트 컨테이너 안은 의미 있음)
   const parentBlock = !parentEl || BLOCK_TAGS.has(parentEl.localName);
   const side = (sib) => (sib === undefined ? parentBlock : isBlockish(sib));
   return side(prev) || side(next);
@@ -268,7 +311,8 @@ function isInsignificantSpace(parentEl, prev, next) {
 function domToVdom(node, report = noop) {
   if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
   if (node.nodeType !== Node.ELEMENT_NODE) return null;           // 주석 등은 무시
-  const type = node.localName;                                    // SVG 는 clipPath 같은 대소문자가 유지된다
+  const type = resolveTag(node.namespaceURI, node.localName);     // SVG 는 clipPath 같은 대소문자가 유지된다. 'mml:mrow' 는 'mrow' 로 정규화
+  if (!type) { report('<' + node.localName + '> 태그 (잘못된 태그 이름)'); return null; }
   if (SKIP_TAGS.has(type)) { report('<' + type + '> 태그'); return null; }
   const props = {};
   for (const { name, value } of node.attributes) {
@@ -445,7 +489,7 @@ const hasText = (kids) => kids.some((c) => typeof c === 'string');
 /** 자식 사이에 줄바꿈+들여쓰기를 넣어도 파싱 결과가 같은가? (= 넣은 공백이 전부 "들여쓰기 공백"으로 버려지는가) */
 function canIndent(v) {
   if (hasText(v.children)) return false;
-  if (v.ns) return !SVG_TEXT.has(v.type);
+  if (v.ns) return !FOREIGN_TEXT.has(v.type);
   if (!BLOCK_TAGS.has(v.type)) return false;
   return v.children.every((c, i) => i === 0 || isBlockish(v.children[i - 1]) || isBlockish(c));
 }
@@ -639,7 +683,7 @@ function goTo(i) {
   });
 })();
 
-window.__VD = { domToVdom, containerToVdom, createDom, diff, applyPatches, vdomEqual, get states() { return states; } }; // 콘솔 실험용
+window.__VD = { domToVdom, containerToVdom, createDom, diff, applyPatches, vdomEqual, parseHtmlToVdom, serializeRoot, get states() { return states; } }; // 콘솔 실험용
 })();
 </script>
 </body>
