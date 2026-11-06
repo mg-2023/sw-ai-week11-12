@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
 const V = require('../src/vdom');
 const { diff } = require('../src/diff');
-const { applyPatches, findNode, mount } = require('../src/patch');
+const { applyPatches, findNode, mount, syncFormState } = require('../src/patch');
 const { createHistory } = require('../src/history');
 
 const { h } = V;
@@ -276,4 +276,40 @@ test('테스트 영역 입력의 <script> · on…="문자열" 은 빠진다 (ht
   const root = h('div', { id: 'actual' });
   const v = V.htmlToVdom('<p onclick="x()">a<script>evil()</script></p><script>y()</script>', root, document);
   assert.deepEqual(v.children, [h('p', null, 'a')]);
+});
+
+// ───────── Codex 리뷰 ④ 에서 나온 경우 ─────────
+
+test('[C4-2] syncFormState: 실제 영역에서 손으로 바꾼 입력값 · 체크를 VDOM 대로 되돌린다 (DOM 변경 없이)', () => {
+  const { document, window } = setup();
+  const v = h('div', null,
+    h('input', { value: 'a' }),
+    h('input', { type: 'checkbox', checked: '' }),
+    h('textarea', null, 't'),
+    h('select', { value: 'b' }, h('option', { value: 'a' }, 'A'), h('option', { value: 'b' }, 'B')));
+  const el = V.render(v, document);
+  document.body.appendChild(el);
+  el.childNodes[0].value = 'manual';
+  el.childNodes[1].checked = false;
+  el.childNodes[2].value = 'typed';
+  el.childNodes[3].value = 'a';
+  const mo = new window.MutationObserver(() => {});
+  mo.observe(el, { subtree: true, attributes: true, childList: true, characterData: true });
+  syncFormState(el, v);
+  assert.equal(el.childNodes[0].value, 'a');
+  assert.equal(el.childNodes[1].checked, true);
+  assert.equal(el.childNodes[2].value, 't');
+  assert.equal(el.childNodes[3].value, 'b');
+  assert.equal(mo.takeRecords().length, 0, '속성 · 노드는 건드리지 않는다');
+});
+
+test('[C4-1] setAttribute 가 거부하는 속성 이름은 예외 → 페이지가 잡아서 되돌릴 수 있다', () => {
+  const { document } = setup();
+  const a = h('div', null, h('p', null, 'before'));
+  const b = h('div', null, h('p', null, 'after'), h('div', JSON.parse('{"a@":"x"}')));
+  const el = V.render(a, document);
+  assert.throws(() => applyPatches(el, diff(a, b)));
+  // 앱은 이때 mount(el, a) 로 되돌린다
+  mount(el, a);
+  assert.deepEqual(V.domToVdom(el), a);
 });

@@ -110,6 +110,29 @@
   }
 
   /**
+   * 폼 요소의 "지금 상태"(프로퍼티)를 VDOM 대로 다시 맞춘다.
+   * diff 는 VDOM 끼리만 비교하므로, 사용자가 실제 영역 input 에 직접 친 값 · 체크는 patch 에 안 잡힌다.
+   * (두 기록에서 value 가 같으면 PROPS 가 안 나온다) → 기록 이동 · Patch 뒤에 이 함수로 맞춘다.
+   * 속성은 건드리지 않으므로 DOM 변경(MutationObserver)은 생기지 않는다.
+   */
+  function syncFormState(el, vnode) {
+    if (!el || !vnode || V.isText(vnode) || el.nodeType !== 1) return;
+    const p = vnode.props;
+    const has = (k) => Object.prototype.hasOwnProperty.call(p, k) && p[k] !== null && p[k] !== false && p[k] !== undefined;
+    if (el.localName === 'input' && el.namespaceURI === V.HTML_NS) {
+      if (el.type === 'checkbox' || el.type === 'radio') el.checked = has('checked');
+      else if (el.type !== 'file') el.value = has('value') ? String(p.value) : '';
+    } else if (el.localName === 'textarea') {
+      el.value = el.textContent;
+    } else if (el.localName === 'option') {
+      el.selected = has('selected');
+    }
+    const container = childContainer(el);
+    vnode.children.forEach((child, i) => syncFormState(container.childNodes[i], child));
+    if (el.localName === 'select' && has('value')) el.value = String(p.value);
+  }
+
+  /**
    * 처음 한 번: 실제 요소의 자식을 Virtual DOM 대로 다시 그린다.
    * 이 뒤로 rootEl.childNodes 와 vnode.children 이 1:1 로 맞는다.
    * (루트 요소 자체와 그 속성은 그대로 둔다)
@@ -123,7 +146,7 @@
     return rootEl;
   }
 
-  const api = { applyPatches, findNode, mount };
+  const api = { applyPatches, findNode, mount, syncFormState };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MiniReact = Object.assign(root.MiniReact || {}, api);

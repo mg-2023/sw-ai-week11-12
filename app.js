@@ -45,12 +45,14 @@
     const next = M.htmlToVdom(testEl.value, shown); // 1. 테스트 영역 → 새 Virtual DOM
     const patches = M.diff(shown, next); // 2. 이전과 비교
     if (patches.length === 0) {
+      M.syncFormState(actualEl, shown); // 실제 영역에서 손으로 바꾼 입력값도 되돌린다
       setStatus('바뀐 곳이 없습니다 (기록에 넣지 않음)');
       showLog([], 0);
       showInTestArea(next); // 파서가 고친 모양으로 다시 보여 준다
       return;
     }
-    const mutations = apply(patches); // 3. 바뀐 곳만 실제 영역에
+    const mutations = apply(patches, next); // 3. 바뀐 곳만 실제 영역에
+    if (mutations === null) return; // 적용 실패 → 되돌렸고 기록도 안 늘림
     shown = history.push(next); // 4. State History 에 저장
     showInTestArea(shown);
     refreshButtons();
@@ -65,7 +67,12 @@
   function travel(target, label) {
     if (!target) return;
     const patches = M.diff(shown, target);
-    const mutations = apply(patches);
+    const mutations = apply(patches, target);
+    if (mutations === null) {
+      // 기록끼리의 이동은 원래 실패하지 않지만, 만약을 위해 목표 기록 그대로 다시 그린다
+      M.mount(actualEl, target);
+      observer.takeRecords();
+    }
     shown = target;
     showInTestArea(shown);
     refreshButtons();
@@ -75,11 +82,26 @@
 
   // ── 도움 함수 ──
 
-  /** patches 를 실제 영역에 적용하고, 실제 DOM 변경 횟수를 돌려준다 */
-  function apply(patches) {
+  /**
+   * patches 를 실제 영역에 적용하고, 실제 DOM 변경 횟수를 돌려준다.
+   * 중간에 실패하면 (예: 파서는 받아 주지만 setAttribute 는 거부하는 속성 이름 `a@`)
+   * 일부만 바뀐 채로 남지 않게 지금 기록(shown)대로 다시 그리고 null 을 돌려준다.
+   * target: 적용 뒤 폼 상태(입력값 · 체크)를 맞출 기준 VDOM
+   */
+  function apply(patches, target) {
     observer.takeRecords();
-    M.applyPatches(actualEl, patches);
+    try {
+      M.applyPatches(actualEl, patches);
+    } catch (err) {
+      M.mount(actualEl, shown);
+      M.syncFormState(actualEl, shown);
+      observer.takeRecords();
+      setStatus(`적용 실패, 되돌렸습니다: ${err.message}`);
+      showLog([], 0);
+      return null;
+    }
     const count = observer.takeRecords().length;
+    if (target) M.syncFormState(actualEl, target);
     flash(patches);
     return count;
   }
