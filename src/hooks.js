@@ -30,7 +30,7 @@
     return current.hooks[i];
   }
 
-  /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 무시, 렌더 예외면 값을 되돌림) */
+  /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 무시, 렌더 예외면 update 가 값을 되돌림) */
   function makeSetter(hook, comp) {
     return (next) => {
       if (comp.phase === 'render') throw new Error('렌더 중에는 setState 를 부를 수 없습니다 (렌더 중 setState)');
@@ -39,12 +39,7 @@
       const value = typeof next === 'function' ? next(prev) : next;
       if (Object.is(prev, value)) return;
       hook.value = value;
-      try {
-        comp.update();
-      } catch (err) {
-        hook.value = prev;
-        throw err;
-      }
+      comp.update(() => { hook.value = prev; });
     };
   }
 

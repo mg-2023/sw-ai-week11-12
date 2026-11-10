@@ -89,10 +89,16 @@
       }
     }
 
-    /* 다시 렌더해 diff 한 patch 만 적용하고 보고하는 함수 (patch 실패 시 새 vdom 으로 다시 mount) */
-    update() {
+    /* 다시 렌더해 diff 한 patch 만 적용하고 보고하는 함수 (렌더 예외면 undo 로 값을 되돌리고, patch 실패 시 새 vdom 으로 다시 mount) */
+    update(undo) {
       const start = performance.now();
-      const tree = this.renderTree();
+      let tree;
+      try {
+        tree = this.renderTree();
+      } catch (err) {
+        if (undo) undo();
+        throw err;
+      }
       const vdom = { type: this.container.localName, props: {}, children: tree ? [tree] : [] };
       const stats = { compared: 0, eventOnly: 0 };
       const patches = D.diff(this.vdom, vdom, stats);

@@ -153,3 +153,16 @@ test('update 보고: kind 와 패치 개수', () => {
   assert.equal(r.patches.TEXT, 1);
   assert.ok(r.compared >= 1);
 });
+
+test('onCommit 리스너가 던져도 값은 새 값 그대로, 이어서 새 값에서 계산', () => {
+  let set;
+  const { comp, rootEl } = start(() => { const [n, s] = H.useState(0); set = s; return h('p', null, String(n)); });
+  const off = comp.onCommit(() => { throw new Error('listener boom'); });
+  assert.throws(() => set(1), /listener boom/);
+  off();
+  assert.equal(rootEl.innerHTML, '<p>1</p>');
+  assert.equal(comp.inspect().hooks[0].value, 1);
+  set((n) => n + 1);
+  assert.equal(rootEl.innerHTML, '<p>2</p>');
+  assert.equal(comp.inspect().hooks[0].value, 2);
+});
