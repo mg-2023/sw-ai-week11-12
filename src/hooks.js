@@ -48,6 +48,10 @@
       const value = typeof next === 'function' ? next(prev) : next;
       if (Object.is(prev, value)) return;
       hook.value = value;
+      if (comp.phase === 'commit') {
+        comp.pendingUpdate = true;
+        return;
+      }
       comp.update(() => { hook.value = prev; });
     };
   }
@@ -83,9 +87,10 @@
     return slot.value;
   }
 
-  /* 부수 효과 훅 자리 (다음 작업에서 구현) */
-  function useEffect() {
-    throw new Error('useEffect: not implemented yet');
+  /* 부수 효과를 등록하는 훅 (렌더 중엔 실행할 것만 표시하고, 커밋 뒤 컴포넌트가 실행한다) */
+  function useEffect(fn, deps) {
+    const slot = nextSlot('effect', () => ({ kind: 'effect', deps: undefined, cleanup: undefined }));
+    if (depsChanged(slot.deps, deps)) current.pendingEffects.push({ slot, fn, deps });
   }
 
   const api = { getCurrent, setCurrent, setInChild, nextSlot, depsChanged, useState, useMemo, useEffect };

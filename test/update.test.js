@@ -76,7 +76,7 @@ test('destroy 뒤 setState 는 무시한다', () => {
   const { comp, rootEl, reports } = start(() => { const [n, s] = H.useState(0); set = s; return h('p', null, String(n)); });
   comp.destroy();
   assert.doesNotThrow(() => set(5));
-  assert.equal(rootEl.textContent, '0');
+  assert.equal(rootEl.textContent, ''); // destroy 가 컨테이너를 비우고, 이후 setState 는 다시 그리지 않는다
   assert.equal(reports.length, 1);
 });
 

@@ -63,6 +63,8 @@
       this.listeners = [];
       this.phase = 'idle';
       this.destroyed = false;
+      this.pendingEffects = [];
+      this.pendingUpdate = false;
     }
 
     /* 함수를 실행해 펼친 트리로 컨테이너를 처음 그리고 보고하는 함수 */
@@ -71,12 +73,56 @@
       const start = performance.now();
       const tree = this.renderTree();
       const vdom = { type: this.container.localName, props: {}, children: tree ? [tree] : [] };
-      P.mount(this.container, vdom);
-      P.syncFormState(this.container, vdom, { controlledOnly: true });
-      this.vdom = vdom;
-      this.mounted = true;
-      // effect 단계 자리 (다음 작업에서 채움)
-      this.report('mount', start, 0, [], 0);
+      this.phase = 'commit';
+      try {
+        P.mount(this.container, vdom);
+        P.syncFormState(this.container, vdom, { controlledOnly: true });
+        this.vdom = vdom;
+        this.mounted = true;
+        const errors = this.runEffects();
+        this.report('mount', start, 0, [], 0);
+        this.finishCommit(errors);
+      } finally {
+        this.phase = 'idle';
+      }
+      this.flushPending();
+    }
+
+    /* 모은 effect 를 훅 순서대로 (이전 cleanup → 실행 → 새 cleanup 저장) 돌리고 던진 예외를 목록으로 돌려주는 함수 */
+    runEffects() {
+      const errors = [];
+      const list = this.pendingEffects;
+      this.pendingEffects = [];
+      for (const { slot, fn, deps } of list) {
+        try {
+          const old = slot.cleanup;
+          slot.cleanup = undefined;
+          if (typeof old === 'function') old();
+          slot.deps = deps;
+          const result = fn();
+          slot.cleanup = typeof result === 'function' ? result : undefined;
+        } catch (err) {
+          errors.push(err);
+        }
+      }
+      return errors;
+    }
+
+    /* effect 예외가 하나면 그대로, 여럿이면 AggregateError 로 던지는 함수 */
+    finishCommit(errors) {
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'effect 여러 개에서 예외가 났습니다');
+    }
+
+    /* 커밋 중 setState 로 밀린 갱신을 update 한 번씩으로 처리하는 함수 (연쇄 50 번 넘으면 에러) */
+    flushPending() {
+      let chain = 0;
+      while (this.pendingUpdate && !this.destroyed) {
+        this.pendingUpdate = false;
+        chain += 1;
+        if (chain > 50) throw new Error('update loop');
+        this.updateOnce();
+      }
     }
 
     /* 훅 번호를 0 으로 되돌려 함수를 한 번 실행하고 Hook 개수를 확인하는 함수 */
@@ -97,15 +143,25 @@
     /* render 단계로 함수를 실행해 펼친 트리를 돌려주는 함수 (끝나면 phase 를 idle 로) */
     renderTree() {
       this.phase = 'render';
+      this.pendingEffects = [];
       try {
         return expand(this.run());
+      } catch (err) {
+        this.pendingEffects = [];
+        throw err;
       } finally {
         this.phase = 'idle';
       }
     }
 
-    /* 다시 렌더해 diff 한 patch 만 적용하고 보고하는 함수 (렌더 예외면 undo 로 값을 되돌리고, patch 실패 시 새 vdom 으로 다시 mount) */
+    /* 한 번 갱신하고 커밋 중 밀린 setState 가 있으면 이어서 갱신하는 함수 */
     update(undo) {
+      this.updateOnce(undo);
+      this.flushPending();
+    }
+
+    /* 다시 렌더해 diff 한 patch 만 적용하고 effect 를 돌린 뒤 보고하는 함수 (렌더 예외면 undo 로 값을 되돌리고, patch 실패 시 새 vdom 으로 다시 mount) */
+    updateOnce(undo) {
       const start = performance.now();
       let tree;
       try {
@@ -120,24 +176,37 @@
       let recovered = false;
       this.phase = 'commit';
       try {
-        P.applyPatches(this.container, patches);
-        P.syncFormState(this.container, vdom, { controlledOnly: true });
-      } catch (err) {
-        P.mount(this.container, vdom);
-        P.syncFormState(this.container, vdom, { controlledOnly: true });
-        recovered = true;
+        try {
+          P.applyPatches(this.container, patches);
+          P.syncFormState(this.container, vdom, { controlledOnly: true });
+        } catch (err) {
+          P.mount(this.container, vdom);
+          P.syncFormState(this.container, vdom, { controlledOnly: true });
+          recovered = true;
+        }
+        this.vdom = vdom;
+        const errors = this.runEffects();
+        this.report('update', start, stats.compared, patches, stats.eventOnly, recovered);
+        this.finishCommit(errors);
       } finally {
         this.phase = 'idle';
       }
-      this.vdom = vdom;
-      // effect 단계 자리 (다음 작업에서 채움)
-      this.report('update', start, stats.compared, patches, stats.eventOnly, recovered);
     }
 
-    /* 컴포넌트를 정리하는 함수 (구독 해제만, effect 정리는 다음 작업) */
+    /* 모든 effect cleanup 을 훅 순서로 실행하고 컨테이너를 비우는 함수 (cleanup 예외는 모아서 마지막에 던진다) */
     destroy() {
+      if (this.destroyed) return;
       this.destroyed = true;
       this.listeners = [];
+      const errors = [];
+      for (const hook of this.hooks) {
+        if (hook.kind !== 'effect' || typeof hook.cleanup !== 'function') continue;
+        const cleanup = hook.cleanup;
+        hook.cleanup = undefined;
+        try { cleanup(); } catch (err) { errors.push(err); }
+      }
+      this.container.innerHTML = '';
+      this.finishCommit(errors);
     }
 
     /* 커밋 보고를 받을 콜백을 등록하고 구독 해제 함수를 돌려주는 함수 */

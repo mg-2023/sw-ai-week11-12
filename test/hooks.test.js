@@ -6,7 +6,7 @@ const { h } = require('../src/vdom');
 const { useState, useMemo, getCurrent, depsChanged } = require('../src/hooks');
 const { FunctionComponent } = require('../src/component');
 
-// update() 는 다음 작업이라, 다시 렌더는 내부 run() 을 직접 불러 흉내 낸다
+// 다시 렌더는 내부 run() 을 직접 불러 흉내 낸다 (update() 는 M3 에서 구현됨)
 function mountComp(fn) {
   const { rootEl } = setup();
   const comp = new FunctionComponent(fn, {}, rootEl);
