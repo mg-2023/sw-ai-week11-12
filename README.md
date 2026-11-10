@@ -12,65 +12,57 @@ Mini React/Redis/RDBMS 구현 팀 레포지토리
   - 각자 입맛에 맞는 태그를 더 추가해서 넣어도 됩니다
 - 개인별로 이슈를 프로젝트에 등록할 때 **Assignee를 자기 자신으로 꼭 설정**해주세요!
 
-# Phase 1 Flow
-## 첫 실행 시
-```html
-<div class="card" id="profile">
-    <h2 class="title">Virtual DOM 연습</h2>
-    <p class="desc">조회수: <b>10</b> 회</p>
-    <ul class="list">
-	    <li>React</li>
-	    <li class="done">Virtual DOM</li>
-	    <li>Diff 알고리즘</li>
-    </ul>
-    <button class="btn" disabled>저장</button>
-</div>
+---
+
+# React 1 + 2 Flow
+## 1. 주요 기능 (5줄 요약)
+- **HTML 편집 → Patch**: 테스트 영역의 HTML로 새 VDOM을 만들고 이전 VDOM과 Diff해서, 달라진 부분만 실제 영역에 반영한 뒤 결과가 목표 VDOM과 같은지 검증
+- **컴포넌트 모드**: `h()`로 작성한 함수 컴포넌트(`App`)를 실제 영역에 마운트하면, 카드 맨 아래에 `조회수 +1` 버튼이 생김
+- **useState 훅**: 훅 배열 + 커서로 state를 관리하고, setter가 호출되면 즉시 리렌더 → Diff → Patch가 일어남
+- **이벤트 위임**: `#real-root`에 click 리스너 하나만 두고, 클릭된 노드의 경로로 최신 VDOM에서 핸들러를 찾아 실행 (핸들러를 DOM에 붙이지 않음)
+- **State History**: Patch / 렌더 기록을 저장하고, HTML 편집 모드에서는 뒤로 / 앞으로 / 항목 클릭으로 이동 가능, 컴포넌트 모드에서는 보기 전용
+
+## 2. 각 모듈별 기능 (표)
+| 모듈 | 구분 | 주요 함수 | 역할 |
+|---|---|---|---|
+| `src/vdom.js` | 기존 | `domToVdom`, `containerToVdom`<br>`parseHtmlToVdom`, `serializeRoot`<br>`vdomEqual` | 실제 DOM / HTML 문자열 ↔ VDOM 변환<br>두 VDOM 비교 |
+| `src/diff.js` | 기존 | `diff`, `diffProps` | 두 VDOM을 같은 위치끼리 비교해 패치 목록<br>(`CREATE` / `REMOVE` / `REPLACE` / `TEXT` / `PROPS`) 생성 |
+| `src/patch.js` | 기존 | `applyPatches`, `patchFromHtml`<br>`patchToVdom`, `normalizeDom` | 패치를 실제 DOM에 적용하고<br>결과 DOM이 목표 VDOM과 같은지 검증 |
+| `src/history.js` | 수정 | `createHistory`<br>→ `push(vdom, patches, label)`, `goTo` | State History 저장 / 이동<br>(`label` 인자 추가, 없으면 `Patch N`) |
+| `src/compo.js` | 추가 | `h`, `expand` | VNode 생성(`on*` 함수는 `events`로 분리)<br>함수 컴포넌트를 일반 VNode 트리로 펼침 |
+| `src/hooks.js` | 추가 | `useState`, `beginRender`<br>`resetHooks`, `onStateChange` | 훅 배열 + 커서로 state 관리, setter 호출 시 리렌더 요청 |
+| `src/events.js` | 추가 | `pathOf`, `delegate` | DOM 노드 → 인덱스 경로 계산<br>경로로 VDOM에서 핸들러를 찾는 위임 리스너 등록 / 해제 |
+| `src/root.js` | 추가 | `createRoot` → `mount`, `unmount` | 리렌더 → `patchToVdom` → `onCommit` 흐름 담당 |
+| `demo/App.js` | 추가 | `App`, `ViewCount`, `PlusButton` | 조회수 +1 예제 컴포넌트 |
+| `app.js` | 수정 | `doPatch`, `goTo`, `toggleMode`<br>`onCommit` | 화면 갱신, 모드 토글, 깜빡임 / 로그 / History 표시 |
+
+## 3. 조회수 +1 버튼을 눌렀을 때의 흐름
+```
+클릭 → 경로 [0, 4] → events.click 실행 → setViews(10 → 11) → App() 재실행 → Diff → TEXT [0, 1, 1, 0] "11" → DOM 1건 변경
+```
+1. **클릭 감지**: `#real-root`에 하나만 등록된 click 리스너가 이벤트를 받는다
+2. **경로 계산**: 클릭된 DOM 노드에서 `#real-root`까지 올라가며 `childNodes` 인덱스를 모은다. 버튼이면 `[0, 4]`
+3. **핸들러 찾기**: 최신 VDOM을 그 경로대로 내려가 해당 VNode의 `events.click`을 찾는다. 없으면 부모 쪽으로 올라가며 찾는다
+4. **핸들러 실행**: `() => setViews(v => v + 1)`이 실행된다
+5. **state 변경**: 훅 배열의 값이 10에서 11로 바뀐다. 값이 같으면(`Object.is`) 여기서 끝난다
+6. **리렌더**: 훅 커서를 0으로 되돌리고 `App()`을 다시 실행한다. 자식 컴포넌트까지 펼쳐 `#root`로 감싼 새 VDOM을 만든다
+7. **Diff**: `patchToVdom(실제 영역, 이전 VDOM, 새 VDOM)`을 호출하면 `TEXT [0, 1, 1, 0] "11"` 패치 하나가 나온다
+8. **Patch와 검증**: `<b>` 안 텍스트 노드의 값만 바꾸고, 결과 DOM이 새 VDOM과 같은지 확인한다
+9. **커밋**: 새 VDOM을 "이전 VDOM"으로 저장하고 `onCommit`으로 `app.js`에 넘긴다. `app.js`는 숫자 부분을 깜빡이고, State History에 `렌더 N`을 저장하고, 로그를 출력한다
+
+핸들러는 DOM이 아니라 VDOM에 있으므로, 렌더마다 함수가 새로 만들어져도 패치가 생기지 않는다
+
+## 4. 기능 테스트 결과
+팀 통합 테스트 케이스 55개 중 55개 전부 통과
+
+## 5. 실행 시 주의사항
+반드시 **이 디렉토리 안에서** 파이썬으로 로컬 서버를 열어야 동작합니다!
+```python
+python -m http.server 8000
+```
+그리고 다음 링크로 들어가서 시연을 해주세요
+```
+http://localhost:8000/virtual-dom-diff-verifier.html
 ```
 
-이 html 코드가 맨 처음 불러와지면서 첫 히스토리를 만든다
-
-왼쪽의 실제 영역에는 이 html 코드가 실제로 렌더링되고, 오른쪽 테스트 영역에는 위 코드가 그대로 들어가서 사용자가 편집할 수 있게 되어있다
-
-## 테스트 영역을 고치면
-단순히 테스트 영역을 편집한다고 해서 왼쪽이 새로 렌더링되는 것이 아니다
-
-대신 위에 제공된 **Patch** 버튼을 눌러서 실제 영역을 갱신해야 한다
-### Patch를 누른 직후
-들어가기 앞서, DOM이란 **D**ocument **O**bject **M**odel으로 html 요소를 객체로 표현한 것을 의미하고, 자바스크립트 내에서 이걸 JSON 형식으로 만들어 놓은 걸 Virtual DOM, VDOM이라고 한다
-
-Patch 버튼을 누르면 원본 코드와 새로 입력한 코드를 기준으로 **Virtual DOM**이라는 걸 만든다
-
-두 VDOM을 비교해서 다른 점만 찾는데, 이번에 사용한 코딩 에이전트는 다른 점을 어떤 기준에 의해서 찾는 게 아니라 **단순 위치를 비교해서 다른 점을 찾았다**. 그리고는 달라진 점을 인덱스 번호로 표시해줬다
-
-### 달라진 HTML의 반영
-처음 나왔던 html 코드를 이렇게 바꿨다고 해보자
-```html
-<div class="card" id="profile">
-    <h1 class="title">Virtual DOM 연습</h1>
-    <p class="desc">조회수: <b>11</b></p>
-    <ul class="list">
-	    <li>React</li>
-	    <li>Virtual DOM</li>
-	    <li>Diff 알고리즘</li>
-	    <li>Phase 2 구현 예정</li>
-    </ul>
-    <button class="btn" disabled>저장</button>
-</div>
-```
-
-두 VDOM을 루트부터 타고 내려가면서 원본과 달라진 점을 찾는데, 5가지 핵심 케이스를 중심으로 차이점을 찾게 된다
-
-#### 1. CREATE
-"Phase 2 구현 예정"이라는 li 태그를 가지는 노드가 추가되었다.
-VDOM 트리 입장에서는 `[0, 2, 3]`번 인덱스가 추가된 것이므로 `CREATE [0, 2, 3]`을 로그에 찍는다, 그리고 상세 로그에 `<li>...</li>`를 추가한다
-#### 2. DELETE
-"회"라는 텍스트가 삭제되었고, `DELETE [0, 1, 2]`를 로그에 찍는다
-#### 3. REPLACE
-루트 바로 아래의 h2 태그가 h1 태그로 대체되어서, `REPLACE [0, 0]`을 로그에 찍는다
-상세 로그에는 `<h1>...</h1>`이 추가된다
-#### 4. PROPS
-Virtual DOM이 들어있는 li 태그의 class 속성이 없어졌다
-`PROPS [0, 2, 1]`을 로그에 찍고, 상세 로그에 class 속성이 done에서 (없음)이 찍힌다
-#### 5. TEXT
-b 태그 안의 텍스트 10이 11로 바뀌었다
-`TEXT [0, 1, 1]`을 로그에 찍고, 상세 로그에 10에서 11로 바뀌었다고 추가한다
+---

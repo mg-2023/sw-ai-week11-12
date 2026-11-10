@@ -43,6 +43,7 @@ header p{margin:0;color:var(--muted)}
 .tb:disabled{opacity:.4;cursor:not-allowed}
 .tb.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .tb.primary:hover:not(:disabled){filter:brightness(1.1);color:#fff}
+.tb[aria-pressed="true"]{background:var(--purple-soft);border-color:var(--purple);color:var(--purple)}
 .status{margin-left:auto;font-size:13.5px;color:var(--muted);display:flex;gap:10px;align-items:center}
 .status b{color:var(--text)}
 
@@ -73,6 +74,10 @@ header p{margin:0;color:var(--muted)}
 #test-src{display:block;flex:1;width:100%;min-height:250px;border:0;resize:vertical;padding:14px 18px;font-size:13px;line-height:1.6;tab-size:2;
   background:var(--bg);color:var(--text);outline:2px solid transparent;outline-offset:-2px;transition:outline-color .15s}
 #test-src:focus{outline-color:var(--accent)}
+#test-src[readonly]{color:var(--muted);cursor:default}
+#test-src[readonly]:focus{outline-color:transparent}
+.canvas .btn:not([disabled]){cursor:pointer}
+.compo-mode #real-root{box-shadow:inset 0 0 0 2px var(--purple-soft)}
 .hint{font-size:12.5px;color:var(--muted);padding:8px 14px;border-top:1px solid var(--border);margin-top:auto}
 
 /* 하단: 로그 + 히스토리 */
@@ -94,7 +99,8 @@ header p{margin:0;color:var(--muted)}
 .badge.PROPS{background:var(--purple-soft);color:var(--purple)}
 .hist{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto}
 .hist-item{font:inherit;text-align:left;font-size:13px;padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);cursor:pointer;line-height:1.5}
-.hist-item:hover{border-color:var(--accent)}
+.hist-item:hover:not(:disabled){border-color:var(--accent)}
+.hist-item:disabled{cursor:default}
 .hist-item.current{border-color:var(--accent);background:var(--accent-soft);font-weight:600}
 .hist-item.future{opacity:.5}
 .hist-item small{display:block;color:var(--muted);font-weight:400}
@@ -111,9 +117,9 @@ pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg)
 
 <header>
   <h1>Virtual DOM · Diff 검증기</h1>
-  <p>테스트 영역에서 HTML을 수정하고 Patch를 누르면, 달라진 부분만 실제 영역에 반영됩니다.</p>
+  <p>테스트 영역에서 HTML을 수정하고 Patch를 누르면, 달라진 부분만 실제 영역에 반영됩니다. 컴포넌트 모드에서는 버튼 클릭 → state 변경 → 리렌더가 같은 Diff / Patch를 거칩니다.</p>
   <div class="flow">
-    <span>실제 영역 HTML</span><span class="arr">→</span><span>Virtual DOM</span><span class="arr">→</span><span>테스트 영역에 HTML 표시</span><span class="arr">→</span><span>사용자가 HTML 수정</span><span class="arr">→</span><span>Patch = 새 VDOM + Diff</span><span class="arr">→</span><span>실제 영역에 변경분만 반영</span><span class="arr">→</span><span>State History</span>
+    <span>실제 영역 HTML</span><span class="arr">→</span><span>Virtual DOM</span><span class="arr">→</span><span>테스트 영역에 HTML 표시</span><span class="arr">→</span><span>사용자가 HTML 수정</span><span class="arr">→</span><span>Patch 또는 setState → 새 VDOM + Diff</span><span class="arr">→</span><span>실제 영역에 변경분만 반영</span><span class="arr">→</span><span>State History</span>
   </div>
 </header>
 
@@ -121,13 +127,14 @@ pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg)
   <button class="tb primary" id="btn-patch" type="button">Patch</button>
   <button class="tb" id="btn-back" type="button">◀ 뒤로</button>
   <button class="tb" id="btn-fwd" type="button">앞으로 ▶</button>
+  <button class="tb" id="btn-mode" type="button" aria-pressed="false">컴포넌트 모드</button>
   <div class="status"><span>State <b id="st-pos">1 / 1</b></span><span class="badge ok" id="st-dirty">Patch 완료</span></div>
 </div>
 
 <div class="areas">
   <!-- ───────── 실제 영역: 이 안의 HTML 이 "샘플 HTML" 이다 ───────── -->
   <section class="panel">
-    <div class="panel-head"><h2>실제 영역 (Real)</h2><span class="badge">Patch로만 갱신</span></div>
+    <div class="panel-head"><h2>실제 영역 (Real)</h2><span class="badge">Patch / 렌더로만 갱신</span></div>
     <div class="canvas" id="real-root" inert>
       <div class="card" id="profile">
         <h2 class="title">Virtual DOM 연습</h2>
@@ -140,16 +147,16 @@ pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg)
         <button class="btn" disabled>저장</button>
       </div>
     </div>
-    <div class="hint">여기는 직접 수정·조작할 수 없어요(inert). Patch / 뒤로(앞으로)의 결과만 보입니다.</div>
+    <div class="hint" id="real-hint">여기는 직접 수정·조작할 수 없어요(inert). Patch / 뒤로(앞으로)의 결과만 보입니다.</div>
   </section>
 
   <!-- ───────── 테스트 영역: 자유롭게 수정 ───────── -->
   <section class="panel">
     <div class="panel-head">
-      <h2>테스트 영역 (Test)</h2><span class="badge warn">HTML 소스를 자유롭게 수정</span>
+      <h2>테스트 영역 (Test)</h2><span class="badge warn" id="test-badge">HTML 소스를 자유롭게 수정</span>
     </div>
     <textarea id="test-src" spellcheck="false" aria-label="테스트 영역 HTML 소스"></textarea>
-    <div class="hint">HTML 코드를 직접 고친 뒤 Patch를 누르세요. 뒤로(앞으로) 이동하면 Patch하지 않은 수정은 사라집니다.</div>
+    <div class="hint" id="test-hint">HTML 코드를 직접 고친 뒤 Patch를 누르세요. 뒤로(앞으로) 이동하면 Patch하지 않은 수정은 사라집니다.</div>
   </section>
 </div>
 
@@ -163,7 +170,7 @@ pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg)
     <details><summary>현재 State의 Virtual DOM (JSON)</summary><pre class="json" id="vdom-json"></pre></details>
   </section>
   <section class="card2">
-    <h2>State History <small style="font-weight:400;color:var(--muted)">(클릭하면 해당 State로 이동)</small></h2>
+    <h2>State History <small id="hist-note" style="font-weight:400;color:var(--muted)">(클릭하면 해당 State로 이동)</small></h2>
     <div class="hist" id="hist"></div>
   </section>
 </div>
@@ -173,7 +180,9 @@ pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg)
   <ol>
     <li>테스트 영역의 HTML 코드를 직접 고칩니다. (예: <code>&lt;li&gt;</code> 추가, <code>class="done"</code> 부여, <code>&lt;p&gt;</code> → <code>&lt;h3&gt;</code>, 글자 수정)</li>
     <li><b>Patch</b>: 테스트 영역의 HTML → 새 Virtual DOM → 이전 VDOM과 Diff → 변경된 부분만 실제 영역에 반영(노란 깜빡임) → State History에 저장.</li>
-    <li><b>뒤로 / 앞으로</b>: 저장된 VDOM으로 이동. 실제 영역은 두 State 사이의 Diff 패치로 바뀌고, 테스트 영역은 해당 VDOM의 HTML 코드로 바뀝니다.</li>
+    <li><b>컴포넌트 모드</b>: <code>App</code> 컴포넌트를 마운트하고 실제 영역 카드 아래에 <code>조회수 +1</code> 버튼이 생깁니다. 버튼을 누르면 <code>setViews</code> → 리렌더 → 이전 VDOM과 Diff → <code>TEXT</code> 패치 하나만 반영됩니다. 이 모드에서는 Patch · 뒤로 / 앞으로 · History 이동이 꺼지고 테스트 영역은 렌더 결과를 보여 주는 읽기 전용이 됩니다.</li>
+    <li><b>뒤로 / 앞으로</b> (HTML 편집 모드): 저장된 VDOM으로 이동. 실제 영역은 두 State 사이의 Diff 패치로 바뀌고, 테스트 영역은 해당 VDOM의 HTML 코드로 바뀝니다. State History 항목을 눌러도 같은 방식으로 이동해요.</li>
+    <li>컴포넌트 모드에서는 State History를 보기만 할 수 있어요. state는 훅 배열이 관리하므로, VDOM만 되돌리면 화면과 state가 어긋나기 때문입니다.</li>
   </ol>
   <p class="msg" style="margin:4px 0 10px">이 구현은 key 없이 “같은 위치끼리” 비교합니다. 보안을 위해 <code>script/style/iframe</code> 등과 <code>on*</code> 속성, <code>javascript:</code> 링크는 VDOM 변환에서 제외돼요.</p>
 </div>

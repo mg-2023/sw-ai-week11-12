@@ -1,9 +1,10 @@
 /* ======================================================================
- * history.js — Patch 기록(State History) 관리
+ * history.js — Patch / 렌더 기록(State History) 관리
  *
  *   State : { vdom, label, summary, time }
- *   - 초기 State 하나로 시작하고, Patch 할 때마다 push 한다.
+ *   - 초기 State 하나로 시작하고, Patch / 렌더할 때마다 push 한다.
  *   - 뒤로 간 상태에서 push 하면 그 뒤의 기록(future)은 버린다.
+ *   - 이동(goTo)을 허용할지는 호출하는 쪽이 정한다. (컴포넌트 모드에서는 state 가 훅에 있으므로 막는다)
  *
  *   DOM/UI 를 전혀 다루지 않는다.
  * ====================================================================== */
@@ -29,10 +30,10 @@ export function createHistory(initialVdom) {
     get canBack() { return cur > 0; },
     get canForward() { return cur < states.length - 1; },
 
-    /** 새 VDOM 을 현재 State 뒤에 저장하고 그 State 로 이동한다 (이후 기록은 버림) */
-    push(vdom, patches) {
+    /** 새 VDOM 을 현재 State 뒤에 저장하고 그 State 로 이동한다 (이후 기록은 버림). label 이 없으면 'Patch N' */
+    push(vdom, patches, label) {
       states.length = cur + 1;
-      states.push({ vdom, label: 'Patch ' + states.length, summary: summarize(patches), time: now() });
+      states.push({ vdom, label: label || 'Patch ' + states.length, summary: summarize(patches), time: now() });
       cur = states.length - 1;
       return states[cur];
     },
