@@ -15,7 +15,9 @@ Virtual DOM, Diff, Patch와 함수형 컴포넌트, Hooks를 프레임워크 없
 
 실제로 같은 저장소의 세 구현은 이름이 비슷해도 형식이 서로 다릅니다. 그래서 이름만 바꿔서는 붙지 않습니다.
 
-| 형식 | 이 구현 | `feat-mg-2023` | `feat-Jongeume` |  ***( 11.10,오후 1시 34분의 push를 기준 )***
+
+***( 11.10,오후 1시 34분의 push를 기준 )***
+| 형식 | 이 구현 | `feat-mg-2023` | `feat-Jongeume` |  
 |---|---|---|---|
 | 노드 | `{ kind, tag, props, children, key }` | `{ type, props, children }` | `{ type, props, children }` |
 | 글자 노드 | `{ kind: 'text', text }` | 문자열 그대로 | `{ type, props: { nodeValue } }` |
