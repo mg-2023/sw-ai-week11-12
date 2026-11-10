@@ -39,14 +39,17 @@
     return current.hooks[i];
   }
 
-  /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 무시, 렌더 예외면 update 가 값을 되돌림) */
+  /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 화면 입력값만 다시 맞추고, 렌더 예외면 update 가 값을 되돌림) */
   function makeSetter(hook, comp) {
     return (next) => {
       if (comp.phase === 'render') throw new Error('렌더 중에는 setState 를 부를 수 없습니다 (렌더 중 setState)');
       if (comp.destroyed) return;
       const prev = hook.value;
       const value = typeof next === 'function' ? next(prev) : next;
-      if (Object.is(prev, value)) return;
+      if (Object.is(prev, value)) {
+        comp.resyncForms();
+        return;
+      }
       hook.value = value;
       if (comp.phase === 'commit') {
         if (!comp.queued.some((q) => q.hook === hook)) comp.queued.push({ hook, prev });

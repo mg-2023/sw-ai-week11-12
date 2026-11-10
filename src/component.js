@@ -94,13 +94,17 @@
       const list = this.pendingEffects;
       this.pendingEffects = [];
       for (const { slot, fn, deps } of list) {
+        if (this.destroyed) break;
         try {
           const old = slot.cleanup;
           slot.cleanup = undefined;
           if (typeof old === 'function') old();
+          // deps 를 fn 보다 먼저 갱신한다: 던진 effect 는 같은 deps 로 다시 시도하지 않는다 (의도)
           slot.deps = deps;
           const result = fn();
-          slot.cleanup = typeof result === 'function' ? result : undefined;
+          const cleanup = typeof result === 'function' ? result : undefined;
+          // effect 안에서 destroy 가 불렸다면 이 cleanup 은 저장되지 못하니 바로 실행한다
+          if (this.destroyed) { if (cleanup) cleanup(); } else slot.cleanup = cleanup;
         } catch (err) {
           errors.push(err);
         }
@@ -108,10 +112,10 @@
       return errors;
     }
 
-    /* effect 예외가 하나면 그대로, 여럿이면 AggregateError 로 던지는 함수 */
+    /* 커밋 중 예외(effect · onCommit · destroy cleanup)가 하나면 그대로, 여럿이면 AggregateError 로 던지는 함수 */
     finishCommit(errors) {
       if (errors.length === 1) throw errors[0];
-      if (errors.length > 1) throw new AggregateError(errors, 'effect 여러 개에서 예외가 났습니다');
+      if (errors.length > 1) throw new AggregateError(errors, '커밋 중 예외 여러 개');
     }
 
     /* 커밋 중 setState 로 밀린 갱신을 먼저 처리한 뒤 붙잡아 둔 effect · onCommit 예외를 던지는 함수 (갱신 자체의 예외가 이기고, 붙잡은 예외는 heldErrors 에 붙인다) */
@@ -177,6 +181,7 @@
 
     /* 한 번 갱신하고 커밋 중 밀린 setState 가 있으면 이어서 갱신하는 함수 */
     update(undo) {
+      // undo 는 내부용 선택 인자다 (공개 사용은 update())
       this.settle(this.updateOnce(undo));
     }
 
@@ -201,9 +206,16 @@
           P.applyPatches(this.container, patches);
           P.syncFormState(this.container, vdom, { controlledOnly: true });
         } catch (err) {
-          P.mount(this.container, vdom);
-          P.syncFormState(this.container, vdom, { controlledOnly: true });
-          recovered = true;
+          try {
+            this.swapChildren(vdom);
+            recovered = true;
+          } catch (err2) {
+            // 새 vdom 도 못 그리면 직전 vdom 으로 화면을 맞추고 값을 되돌린 뒤 다시 던진다
+            // (사용자가 비제어 input 에 친 글자는 통째로 다시 만들어지므로 남지 않는다)
+            this.swapChildren(this.vdom);
+            if (undo) undo();
+            throw err2;
+          }
         }
         this.vdom = vdom;
         errors = this.runEffects().concat(this.report('update', start, stats.compared, patches, stats.eventOnly, recovered));
@@ -211,6 +223,24 @@
         this.phase = 'idle';
       }
       return errors;
+    }
+
+    /* vdom 의 자식을 먼저 조각(fragment)에 다 만든 뒤에야 컨테이너와 바꿔 끼우는 함수 (만들다 던지면 화면은 그대로) */
+    swapChildren(vdom) {
+      const doc = this.container.ownerDocument;
+      const target = this.container.localName === 'template' && this.container.content ? this.container.content : this.container;
+      const ns = V.childNamespace(this.container);
+      const fragment = doc.createDocumentFragment();
+      for (const child of vdom.children) fragment.appendChild(V.render(child, doc, ns));
+      while (target.firstChild) target.removeChild(target.firstChild);
+      target.appendChild(fragment);
+      P.syncFormState(this.container, vdom, { controlledOnly: true });
+    }
+
+    /* 상태가 그대로인 setState 뒤 제어 입력의 화면 값을 지금 vdom 대로 되돌리는 함수 (렌더 · 보고 없음) */
+    resyncForms() {
+      if (!this.mounted || this.destroyed || this.phase !== 'idle') return;
+      P.syncFormState(this.container, this.vdom, { controlledOnly: true });
     }
 
     /* 모든 effect cleanup 을 훅 순서로 실행하고 컨테이너를 비우는 함수 (cleanup 예외는 모아서 마지막에 던진다) */
@@ -241,7 +271,7 @@
     report(kind, start, compared, patches, eventOnly, recovered = false) {
       const report = {
         kind,
-        ms: performance.now() - start,
+        ms: performance.now() - start, // effect 실행 시간 포함
         compared,
         eventOnly,
         patches: countPatches(patches),

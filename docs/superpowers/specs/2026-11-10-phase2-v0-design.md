@@ -56,7 +56,11 @@ new FunctionComponent(fn, props, container)
   hooks      : []        // 상태 저장 (R2-04)
   hookIndex  : 0         // 렌더마다 0 으로
   vdom       : null      // 지난번 그린 트리 (컨테이너로 감싼 것)
-  pending    : []        // 이번 렌더에서 실행할 effect
+  pendingEffects : []    // 이번 렌더에서 실행할 effect
+  queued · pendingUpdate : 커밋 중 setState 로 밀린 갱신
+  phase      : 'idle' | 'render' | 'commit'
+  destroyed  : false
+  hookCount  : null      // 첫 렌더에서 정해지는 Hook 개수
   mount()                // 처음 렌더링 (R2-05)
   update()               // 상태 변경 뒤 다시 렌더링 (R2-06)
   destroy()              // cleanup 전부 실행, 화면 비움
@@ -146,6 +150,8 @@ new FunctionComponent(fn, props, container)
 | 9 | `mount()` 두 번 · 컨테이너 없음 | 둘 다 에러 | 조용히 넘어가면 원인 찾기 어렵다 |
 | 10 | 엣지 케이스 묶음 수 어긋남 | 6 절은 워크플로 「엣지 케이스」 **1 ~ 8** 전부 (8 = 테스트 페이지) | 문서 일치 |
 | 11 | `setProp` 의 `setAttribute('value')` 가 MutationObserver 기록을 남김 | 그대로 둔다. "DOM 변경 수" 에 속성 쓰기도 포함된다고 측정 기준에 적는다 | 측정 정의를 분명히 |
+
+(측정 참고 : 보고의 `ms` 는 effect 실행 시간까지 포함한다.)
 
 ## 8. 빌더에게 맡기는 것
 

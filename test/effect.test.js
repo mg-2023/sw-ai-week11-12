@@ -256,7 +256,30 @@ test('update loop 에러 뒤에도 일반 setState 를 받는다', () => {
   }, {}, env.rootEl);
   assert.throws(() => comp.mount(), /update loop/);
   assert.equal(comp.pendingUpdate, false);
+  // 에러 뒤 훅 값과 화면 값이 같아야 한다
+  assert.equal(env.rootEl.textContent, comp.inspect().hooks[0].value + '/0');
   assert.doesNotThrow(() => setT(1));
   assert.equal(env.rootEl.textContent.endsWith('/1'), true);
   assert.equal(comp.pendingUpdate, false);
+});
+
+test('D: effect 가 destroy 를 부르면 뒤 effect 는 돌지 않고, 부른 effect 의 cleanup 은 바로 실행된다', () => {
+  const env = setup();
+  let counter = 0;
+  let set;
+  let comp;
+  comp = new FunctionComponent(() => {
+    const [n, setN] = H.useState(0);
+    set = setN;
+    H.useEffect(() => { if (n === 1) { comp.destroy(); return () => { counter += 100; }; } });
+    H.useEffect(() => { counter += 1; return () => { counter -= 1; }; });
+    return h('p', null, String(n));
+  }, {}, env.rootEl);
+  comp.mount();
+  assert.equal(counter, 1);
+  set(1);
+  // 1) 첫 effect 의 이전 cleanup 없음, 2) destroy 가 둘째 effect 의 cleanup(-1) 실행 → 0, 3) 첫 effect 의 cleanup(+100) 즉시 실행
+  assert.equal(counter, 100);
+  comp.destroy();
+  assert.equal(counter, 100);
 });

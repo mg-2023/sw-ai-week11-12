@@ -26,7 +26,7 @@
 
   /* 입력칸과 추가 버튼을 그리는 자식 (props 만 받는다) */
   function TodoInput({ text, onText, onAdd }) {
-    return h('form', { onsubmit: (e) => { e.preventDefault(); onAdd(); } },
+    return h('form', { onSubmit: (e) => { e.preventDefault(); onAdd(); } },
       h('input', { type: 'text', value: text, placeholder: '할 일을 입력', onInput: (e) => onText(e.target.value) }),
       h('button', { type: 'submit' }, '추가'));
   }
@@ -36,7 +36,7 @@
     return h('li', { class: todo.done ? 'done' : null },
       h('input', { type: 'checkbox', checked: todo.done, onChange: onToggle }),
       h('span', null, todo.text),
-      h('button', { type: 'button', onclick: onRemove }, '삭제'));
+      h('button', { type: 'button', onClick: onRemove }, '삭제'));
   }
 
   /* 할 일 목록을 그리는 자식 (key 없이 위치로 비교하는 v0 기준선) */

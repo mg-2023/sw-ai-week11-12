@@ -166,3 +166,82 @@ test('onCommit 리스너가 던져도 값은 새 값 그대로, 이어서 새 �
   assert.equal(rootEl.innerHTML, '<p>2</p>');
   assert.equal(comp.inspect().hooks[0].value, 2);
 });
+
+// ---- 최종 수정 파동 (A~D) ----
+
+test('A: 입력한 값이 곧 상태라 PROPS patch 가 와도 input.value 를 다시 대입하지 않는다 (커서 · IME 보호)', () => {
+  const { rootEl, window } = start(() => {
+    const [v, setV] = H.useState('a');
+    return h('input', { type: 'text', value: v, onInput: (e) => setV(e.target.value) });
+  });
+  const input = rootEl.querySelector('input');
+  const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+  let count = 0;
+  Object.defineProperty(input, 'value', {
+    configurable: true,
+    get() { return desc.get.call(this); },
+    set(x) { count += 1; desc.set.call(this, x); },
+  });
+  desc.set.call(input, 'ab');
+  input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(input.getAttribute('value'), 'ab');
+  assert.equal(count, 0);
+});
+
+test('B: patch 실패 뒤 재mount 도 실패하면 직전 vdom 으로 화면과 훅 값을 되돌리고 다시 던진다', () => {
+  let setS;
+  const { rootEl, comp, reports } = start(() => {
+    const [s, set] = H.useState(0);
+    setS = set;
+    return s === 1 ? h('invalid tag') : h('div', null, h('input', { type: 'text' }), h('b', null, 'ok' + s));
+  });
+  const before = comp.inspect().vdom;
+  const html = rootEl.innerHTML;
+  assert.throws(() => setS(1));
+  // 입력창에 사용자가 친 글자는 통째로 다시 만들어지므로 살아남지 못한다 (구조만 확인)
+  assert.equal(rootEl.innerHTML, html);
+  assert.equal(comp.inspect().hooks[0].value, 0);
+  assert.deepEqual(comp.inspect().vdom, before);
+  assert.equal(reports.length, 1);
+  assert.doesNotThrow(() => setS(2));
+  assert.equal(comp.inspect().hooks[0].value, 2);
+  assert.equal(rootEl.textContent, 'ok2');
+});
+
+test('B2: 커밋 중 밀린 갱신이 재mount 까지 실패하면 그 묶음의 값을 되돌리고 화면은 직전 vdom 이다', () => {
+  const env = setup();
+  let setS;
+  const comp = new FunctionComponent(() => {
+    const [s, set] = H.useState(0);
+    setS = set;
+    return s === 0 ? h('div', null, h('input', { type: 'text' })) : h('invalid tag');
+  }, {}, env.rootEl);
+  comp.onCommit(() => { if (comp.vdom && comp.inspect().hooks[0].value === 0) setS(1); });
+  assert.throws(() => comp.mount());
+  assert.equal(comp.inspect().hooks[0].value, 0);
+  assert.equal(env.rootEl.innerHTML, '<div><input type="text"></div>');
+  assert.equal(comp.pendingUpdate, false);
+});
+
+test('C: 대문자로 바꾸는 입력은 상태가 같아도 화면 값을 상태로 되돌린다 (보고 없음)', () => {
+  const { rootEl, window, reports } = start(() => {
+    const [v, setV] = H.useState('A');
+    return h('input', { type: 'text', value: v, onInput: (e) => setV(e.target.value.toUpperCase()) });
+  });
+  const input = rootEl.querySelector('input');
+  input.value = 'a';
+  input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(input.value, 'A');
+  assert.equal(reports.length, 1);
+});
+
+test('C2: 입력을 거절(setState(prev))하면 화면 값이 이전 상태로 돌아온다', () => {
+  const { rootEl, window } = start(() => {
+    const [v, setV] = H.useState('12');
+    return h('input', { type: 'text', value: v, onInput: (e) => setV(/^\d*$/.test(e.target.value) ? e.target.value : v) });
+  });
+  const input = rootEl.querySelector('input');
+  input.value = '12x';
+  input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(input.value, '12');
+});
