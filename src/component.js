@@ -5,7 +5,7 @@
  *   update : updateOnce → settle (밀린 setState 가 있으면 updateOnce 를 되풀이)
  *   updateOnce : 시작 시각 → 렌더(renderOrUndo) → diff → 커밋(applyOrRecover → effect → 보고)
  *   실패 처리 : 렌더 예외는 undo, patch 예외는 새 vdom 으로 복구(그것도 실패하면 직전 vdom + undo)
- *   파일 순서 : 펼치기 → 정상 흐름 → 실패 처리 → 측정
+ *   파일 순서 : 펼치기 → 정상 흐름 → 커밋 뒤 마무리 · 실패 처리 → 측정 (파일 끝의 countPatches 도 측정)
  */
 (function (root) {
   'use strict';
@@ -112,7 +112,7 @@
       return { type: this.container.localName, props: {}, children: tree ? [tree] : [] };
     }
 
-    /* phase 를 commit 으로 두고 fn 을 실행한 뒤 (예외여도) idle 로 되돌리는 함수 */
+    /* phase 를 commit 으로 두고 fn 을 실행해 그 결과를 돌려주는 함수 (예외여도 idle 로 되돌린다) */
     inCommitPhase(fn) {
       this.phase = 'commit';
       try {
@@ -198,7 +198,7 @@
       this.finishCommit(errors);
     }
 
-    // ───────── 3. 실패 처리 : 되돌리기 · 복구 · 밀린 갱신 · 예외 모으기 ─────────
+    // ───────── 3. 커밋 뒤 마무리 · 실패 처리 : 밀린 갱신 이어 하기 · 되돌리기 · 복구 · 예외 모으기 · 입력값 맞추기 ─────────
 
     /* 렌더하다 던지면 undo 로 값을 되돌리고 같은 예외를 다시 던지는 함수 */
     renderOrUndo(undo) {
