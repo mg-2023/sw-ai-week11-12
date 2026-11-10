@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
 const { h } = require('../src/vdom');
-const { useState, getCurrent } = require('../src/hooks');
+const { useState, useMemo, getCurrent, depsChanged } = require('../src/hooks');
 const { FunctionComponent } = require('../src/component');
 
 // update() 는 다음 작업이라, 다시 렌더는 내부 run() 을 직접 불러 흉내 낸다
@@ -108,4 +108,90 @@ test('렌더 중 에러가 나도 현재 컴포넌트가 비워진다', () => {
   comp.hooks[0].kind = 'memo';
   assert.throws(() => comp.run());
   assert.throws(() => useState(0), /컴포넌트/);
+});
+
+// useMemo 테스트용: 렌더 횟수를 세는 컴포넌트를 만들고 setState 로 다시 그린다
+function memoHarness(getDeps) {
+  let calls = 0;
+  let set;
+  let result;
+  const { comp } = mountComp(() => {
+    const [n, s] = useState(0);
+    set = s;
+    result = useMemo(() => { calls += 1; return n; }, getDeps(n));
+    return null;
+  });
+  return { comp, calls: () => calls, rerender: (v) => set(v), result: () => result };
+}
+
+test('useMemo: deps 가 없으면 매 렌더 계산한다', () => {
+  const m = memoHarness(() => undefined);
+  m.rerender(1);
+  assert.equal(m.calls(), 2);
+});
+
+test('useMemo: deps [] 는 한 번만 계산한다', () => {
+  const m = memoHarness(() => []);
+  m.rerender(1);
+  m.rerender(2);
+  assert.equal(m.calls(), 1);
+});
+
+test('useMemo: 같은 deps 면 계산을 건너뛰고 이전 값을 돌려준다', () => {
+  const m = memoHarness(() => ['same']);
+  m.rerender(1);
+  assert.equal(m.calls(), 1);
+  assert.equal(m.result(), 0);
+});
+
+test('useMemo: deps 하나라도 다르면 다시 계산한다', () => {
+  const m = memoHarness((n) => ['x', n]);
+  m.rerender(1);
+  assert.equal(m.calls(), 2);
+  assert.equal(m.result(), 1);
+});
+
+test('useMemo: deps 길이가 바뀌면 다시 계산한다', () => {
+  const m = memoHarness((n) => (n === 0 ? [1] : [1, 2]));
+  m.rerender(1);
+  assert.equal(m.calls(), 2);
+});
+
+test('useMemo: 결과가 undefined 여도 저장해 다시 계산하지 않는다', () => {
+  let calls = 0;
+  let set;
+  mountComp(() => {
+    const [, s] = useState(0);
+    set = s;
+    useMemo(() => { calls += 1; return undefined; }, []);
+    return null;
+  });
+  set(1);
+  assert.equal(calls, 1);
+});
+
+test('useMemo: deps [NaN] 은 같다고 본다', () => {
+  const m = memoHarness(() => [NaN]);
+  m.rerender(1);
+  assert.equal(m.calls(), 1);
+});
+
+test('depsChanged: undefined · 길이 · Object.is 규칙', () => {
+  assert.equal(depsChanged([1], undefined), true);
+  assert.equal(depsChanged(undefined, undefined), true);
+  assert.equal(depsChanged([1], [1, 2]), true);
+  assert.equal(depsChanged([1], [2]), true);
+  assert.equal(depsChanged([NaN], [NaN]), false);
+  assert.equal(depsChanged([], []), false);
+});
+
+test('Hook 순서가 바뀌면 에러 (useState → useMemo 가 useMemo → useState 로)', () => {
+  let swap = false;
+  const { comp } = mountComp(() => {
+    if (!swap) { useState(0); useMemo(() => 1, []); }
+    else { useMemo(() => 1, []); useState(0); }
+    return null;
+  });
+  swap = true;
+  assert.throws(() => comp.run(), /종류/);
 });

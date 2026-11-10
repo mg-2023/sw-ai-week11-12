@@ -62,9 +62,25 @@
     return [slot.value, slot.setter];
   }
 
-  /* 값 기억 훅 자리 (다음 작업에서 구현) */
-  function useMemo() {
-    throw new Error('useMemo: not implemented yet');
+  /* 이전 deps 와 새 deps 가 다른지 알려 주는 함수 (deps 없음 · 길이 다름 · Object.is 다름이면 true) */
+  function depsChanged(prev, next) {
+    if (prev === undefined || next === undefined) return true;
+    if (prev.length !== next.length) return true;
+    return next.some((dep, i) => !Object.is(dep, prev[i]));
+  }
+
+  /* 계산 결과를 기억하고 deps 가 같으면 계산을 건너뛰는 훅 */
+  function useMemo(fn, deps) {
+    let created = false;
+    const slot = nextSlot('memo', () => {
+      created = true;
+      return { kind: 'memo', value: fn(), deps };
+    });
+    if (!created && depsChanged(slot.deps, deps)) {
+      slot.value = fn();
+      slot.deps = deps;
+    }
+    return slot.value;
   }
 
   /* 부수 효과 훅 자리 (다음 작업에서 구현) */
@@ -72,7 +88,7 @@
     throw new Error('useEffect: not implemented yet');
   }
 
-  const api = { getCurrent, setCurrent, setInChild, nextSlot, useState, useMemo, useEffect };
+  const api = { getCurrent, setCurrent, setInChild, nextSlot, depsChanged, useState, useMemo, useEffect };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MiniReact = Object.assign(root.MiniReact || {}, api);
