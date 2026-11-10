@@ -14,9 +14,30 @@
     current = component;
   }
 
-  /* 상태 훅 자리 (다음 작업에서 구현) */
-  function useState() {
-    throw new Error('useState: not implemented yet');
+  /* 지금 컴포넌트의 다음 훅 자리를 종류 검사와 함께 돌려주는 함수 (없으면 만든다) */
+  function nextSlot(kind, make) {
+    if (current === null) throw new Error('Hook 은 컴포넌트 함수 안에서만 부를 수 있습니다 (컴포넌트 밖 호출)');
+    const i = current.hookIndex;
+    if (current.hookCount !== null && i >= current.hookCount) {
+      throw new Error('Hook 개수가 이전 렌더와 다릅니다 (조건문 · 반복문 안에서 Hook 을 부르지 마세요)');
+    }
+    current.hookIndex += 1;
+    if (i >= current.hooks.length) {
+      current.hooks.push(make());
+    } else if (current.hooks[i].kind !== kind) {
+      throw new Error('Hook 종류가 이전 렌더와 다릅니다 (' + i + '번째: ' + current.hooks[i].kind + ' → ' + kind + ')');
+    }
+    return current.hooks[i];
+  }
+
+  /* 상태를 기억하고 [값, 바꾸는 함수] 를 돌려주는 훅 (값 저장까지, 다시 그리기는 다음 작업) */
+  function useState(init) {
+    const slot = nextSlot('state', () => {
+      const hook = { kind: 'state', value: typeof init === 'function' ? init() : init };
+      hook.setter = (next) => { hook.value = typeof next === 'function' ? next(hook.value) : next; };
+      return hook;
+    });
+    return [slot.value, slot.setter];
   }
 
   /* 값 기억 훅 자리 (다음 작업에서 구현) */
@@ -29,7 +50,7 @@
     throw new Error('useEffect: not implemented yet');
   }
 
-  const api = { getCurrent, setCurrent, useState, useMemo, useEffect };
+  const api = { getCurrent, setCurrent, nextSlot, useState, useMemo, useEffect };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MiniReact = Object.assign(root.MiniReact || {}, api);

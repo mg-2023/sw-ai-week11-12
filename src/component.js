@@ -41,6 +41,8 @@
       this.container = container;
       this.vdom = null;
       this.hooks = [];
+      this.hookIndex = 0;
+      this.hookCount = null;
       this.mounted = false;
       this.listeners = [];
     }
@@ -60,12 +62,15 @@
       this.report('mount', start, 0, [], 0);
     }
 
-    /* 컴포넌트 함수를 현재 컴포넌트로 등록한 채 한 번 실행하는 함수 */
+    /* 훅 번호를 0 으로 되돌려 함수를 한 번 실행하고 Hook 개수를 확인하는 함수 */
     run() {
+      this.hookIndex = 0;
       H.setCurrent(this);
       try {
         const result = this.fn(this.props);
         if (Array.isArray(result)) throw new Error('FunctionComponent: 루트가 배열을 돌려줄 수 없습니다 (하나의 요소로 감싸세요)');
+        if (this.hookCount === null) this.hookCount = this.hookIndex;
+        else if (this.hookIndex !== this.hookCount) throw new Error('Hook 개수가 이전 렌더와 다릅니다 (조건문 · 반복문 안에서 Hook 을 부르지 마세요)');
         return result;
       } finally {
         H.setCurrent(null);
