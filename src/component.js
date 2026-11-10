@@ -4,6 +4,7 @@
  *   mount  : renderTree(run → expand) → 컨테이너로 감싸기 → 커밋(P.mount → effect → 보고) → settle
  *   update : updateOnce → settle (밀린 setState 가 있으면 updateOnce 를 되풀이)
  *   updateOnce : 시작 시각 → 렌더(renderOrUndo) → diff → 커밋(applyOrRecover → effect → 보고)
+ *   펼칠 때 on* 핸들러를 batch 로 감싼다 (한 클릭의 setter 들이 한 번만 갱신)
  *   실패 처리 : 렌더 예외는 undo, patch 예외는 새 vdom 으로 복구(그것도 실패하면 직전 vdom + undo)
  *   파일 순서 : 펼치기 → 정상 흐름 → 커밋 뒤 마무리 · 실패 처리 → 측정 (파일 끝의 countPatches 도 측정)
  */
@@ -34,6 +35,25 @@
     }
   }
 
+  const wrapped = new WeakMap();
+
+  /* 핸들러를 H.batch 로 감싼 함수를 돌려주는 함수 (같은 함수에는 같은 결과 — Diff 가 PROPS 변화로 보지 않게) */
+  function wrapHandler(fn) {
+    if (!wrapped.has(fn)) {
+      wrapped.set(fn, function (...args) { return H.batch(() => fn.apply(this, args)); });
+    }
+    return wrapped.get(fn);
+  }
+
+  /* on* 이면서 함수인 칸만 감싼 새 props 를 만드는 함수 (원래 props 는 고치지 않음) */
+  function wrapProps(props) {
+    const out = { ...props };
+    for (const key of Object.keys(out)) {
+      if (key.startsWith('on') && typeof out[key] === 'function') out[key] = wrapHandler(out[key]);
+    }
+    return out;
+  }
+
   /* 값 하나를 펼쳐 vnode 목록(배열·null 은 풀거나 뺌)으로 돌려주는 함수 */
   function expandAll(node) {
     if (Array.isArray(node)) return node.flatMap(expandAll);
@@ -41,7 +61,7 @@
     if (vnode === null) return [];
     if (typeof vnode.type === 'function') return expandAll(callChild(vnode));
     const children = vnode.children.flatMap(expandAll);
-    return [{ type: vnode.type, props: vnode.props, children }];
+    return [{ type: vnode.type, props: wrapProps(vnode.props), children }];
   }
 
   /* vnode 트리를 훑어 자식 컴포넌트를 부르고 null · 불리언 · 글자를 정리한 새 트리를 만드는 함수 */

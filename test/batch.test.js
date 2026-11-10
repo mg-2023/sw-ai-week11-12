@@ -167,3 +167,45 @@ test('batch 핸들러는 정상인데 컴포넌트 둘의 렌더가 던지면 �
   assert.deepEqual(a.comp.inspect().hooks.map((x) => x.value), [0]);
   assert.deepEqual(b.comp.inspect().hooks.map((x) => x.value), [0]);
 });
+
+/* 버튼에 클릭 이벤트를 보내는 도우미 */
+function click(win, el) {
+  el.dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+}
+
+test('클릭 핸들러에서 setter 두 개 → 커밋 1회', () => {
+  const { window, rootEl, reports } = start(() => {
+    const [a, setA] = H.useState(0);
+    const [b, setB] = H.useState(0);
+    return h('button', { onClick: () => { setA(a + 1); setB(b + 1); } }, a + '/' + b);
+  });
+  click(window, rootEl.querySelector('button'));
+  assert.equal(rootEl.textContent, '1/1');
+  assert.equal(reports.length, 2);
+});
+
+test('같은 핸들러 함수를 다시 넘긴 렌더는 PROPS 패치가 없다', () => {
+  const handler = () => {};
+  let setN;
+  const { reports } = start(() => {
+    const [n, s] = H.useState(0);
+    setN = s;
+    return h('button', { onClick: handler }, String(n));
+  });
+  setN(1);
+  assert.equal(reports[reports.length - 1].patches.PROPS, 0);
+});
+
+test('effect 가 엔진 버튼을 click() 해도 다시 들어가 그리지 않는다', () => {
+  let setN;
+  const { window, rootEl } = start(() => {
+    const [n, s] = H.useState(0);
+    setN = s;
+    H.useEffect(() => {
+      if (n === 1) click(window, rootEl.querySelector('button'));
+    }, [n]);
+    return h('button', { onClick: () => s(10) }, String(n));
+  });
+  assert.doesNotThrow(() => setN(1));
+  assert.equal(rootEl.textContent, '10');
+});
