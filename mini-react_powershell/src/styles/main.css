@@ -1,0 +1,1276 @@
+:root {
+  /* 계속 켜져 있는 표시의 색입니다. 두 테마가 같은 초록을 씁니다. */
+  --selected: #177a53;
+  --on-selected: #ffffff;
+  --selected-text: #a8f0cf;
+  --focus-row: #d3ecdf;
+  --gutter: #d6dde9;
+  --page-width: 1480px;
+  --paper: #e7ecf4;
+  --sheet: #ffffff;
+  --ink: #18213d;
+  --ink-soft: #4f5a75;
+  --line: #c3cdde;
+  --cell: #d3dbe9;
+  --cobalt: #2342e6;
+  --cobalt-deep: #1a32b8;
+  --cobalt-bright: #3f5bf2;
+  --marker: #ffe45c;
+
+  --on-ink: #ffffff;
+  --on-cobalt: #ffffff;
+  --on-marker: #18213d;
+  --on-op: #ffffff;
+  --muted: #6a7590;
+  --code-bg: #f6f8fc;
+  --note-bg: #f0f3f9;
+  --urgent-bg: #ffe7ec;
+  --urgent-ink: #8f1c33;
+  --nav-mark-start: 90%;
+
+  /* Patch 버튼은 윗면과 두께의 색 차이가 커야 입체로 보여서 두 테마가 같은 색을 씁니다. */
+  --patch-face: #8ea2ff;
+  --patch-face-hover: #a9baff;
+  --patch-edge: #3f55c4;
+  --on-patch: #10162a;
+
+  --op-insert: #0a7a57;
+  --op-remove: #c42b47;
+  --op-replace: #a85a00;
+  --op-props: #0b6fa4;
+  --op-text: #6f3bc4;
+  --op-move: #a3228f;
+
+  --font-body: 'IBM Plex Sans KR', 'Malgun Gothic', 'Apple SD Gothic Neo', system-ui, sans-serif;
+  --font-code: 'IBM Plex Mono', Consolas, 'D2Coding', monospace;
+}
+
+/* 버튼으로 고른 값이 있으면 그 값을, 없으면 운영체제 설정을 따릅니다. 두 블록의 값은 같습니다. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --focus-row: #1d3b34;
+    --gutter: #0b0f1b;
+    --paper: #121828;
+    --sheet: #1b2338;
+    --ink: #e8ecf6;
+    --ink-soft: #a9b3cb;
+    --line: #36415e;
+    --cell: #323d5a;
+    --cobalt: #8ea2ff;
+    --cobalt-deep: #3f55c4;
+    --cobalt-bright: #a9baff;
+    --on-ink: #121828;
+    --on-cobalt: #10162a;
+    --on-op: #10162a;
+    --muted: #8791a8;
+    --code-bg: #161d31;
+    --note-bg: #232c45;
+    --urgent-bg: #4a1f2c;
+    --urgent-ink: #ffb3c1;
+    --op-insert: #4fd1a5;
+    --op-remove: #ff8fa3;
+    --op-replace: #f0b35c;
+    --op-props: #6cc4f2;
+    --op-text: #c3a4ff;
+    --op-move: #f08ee0;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --focus-row: #1d3b34;
+  --gutter: #0b0f1b;
+  --paper: #121828;
+  --sheet: #1b2338;
+  --ink: #e8ecf6;
+  --ink-soft: #a9b3cb;
+  --line: #36415e;
+  --cell: #323d5a;
+  --cobalt: #8ea2ff;
+  --cobalt-deep: #3f55c4;
+  --cobalt-bright: #a9baff;
+  --on-ink: #121828;
+  --on-cobalt: #10162a;
+  --on-op: #10162a;
+  --muted: #8791a8;
+  --code-bg: #161d31;
+  --note-bg: #232c45;
+  --urgent-bg: #4a1f2c;
+  --urgent-ink: #ffb3c1;
+  --op-insert: #4fd1a5;
+  --op-remove: #ff8fa3;
+  --op-replace: #f0b35c;
+  --op-props: #6cc4f2;
+  --op-text: #c3a4ff;
+  --op-move: #f08ee0;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* 가운데 작업 공간만 밝게 두고 양옆 여백은 살짝 다른 색으로 시선을 가운데로 모읍니다. */
+#app {
+  max-width: var(--page-width);
+  min-height: 100vh;
+  margin: 0 auto;
+  background: var(--paper);
+}
+
+body {
+  margin: 0;
+  background: var(--gutter);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.6;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+h1,
+h2,
+p,
+ol,
+ul,
+dl,
+dd {
+  margin: 0;
+  padding: 0;
+}
+
+ol,
+ul {
+  list-style: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 3px solid var(--cobalt);
+  outline-offset: 2px;
+}
+
+/* 안쪽에 남는 스크롤바는 내용을 가리지 않게 얇게 그립니다. */
+.area-body,
+.code-editor,
+.timeline,
+.vdom-json {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+/* 머리글 */
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  max-width: var(--page-width);
+  margin: 0 auto;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.wordmark {
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 1.125rem;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+}
+
+/* 파워셀 버전의 표시입니다. 제목 표시줄과 같은 번개 아이콘을 글자 앞에 놓습니다. */
+.wordmark {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.wordmark::before {
+  width: 20px;
+  height: 20px;
+  background: url('/favicon.svg') center / contain no-repeat;
+  content: '';
+}
+
+.topnav {
+  display: flex;
+  gap: 20px;
+  margin-left: auto;
+}
+
+.topnav a {
+  padding: 2px 4px;
+  color: var(--ink-soft);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.topnav a:hover {
+  color: var(--ink);
+}
+
+/* 지금 페이지에는 밑줄을 긋습니다. */
+.topnav a[aria-current='page'] {
+  color: var(--ink);
+  background: linear-gradient(transparent var(--nav-mark-start), var(--selected) var(--nav-mark-start));
+}
+
+.page {
+  max-width: var(--page-width);
+  margin: 0 auto;
+  padding: 28px 24px 56px;
+}
+
+.page-head {
+  margin-bottom: 24px;
+}
+
+.page-head h1 {
+  font-size: clamp(1.75rem, 3.2vw, 2.5rem);
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.03em;
+}
+
+.page-head p {
+  max-width: 62ch;
+  margin-top: 6px;
+  color: var(--ink-soft);
+}
+
+/* 실험실: 실제 영역과 테스트 영역 사이에 Patch 기둥이 있습니다. */
+
+.lab-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 148px minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.area {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 480px;
+  background: var(--sheet);
+}
+
+.area-real {
+  border: 2px solid var(--ink);
+}
+
+/* 테스트 영역은 아직 확정되지 않은 초안이라 점선으로 그립니다. */
+.area-test {
+  border: 2px dashed var(--cobalt);
+}
+
+.area-title {
+  padding: 10px 16px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.area-real .area-title {
+  background: var(--ink);
+  color: var(--on-ink);
+}
+
+.area-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding-right: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.area-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 20px;
+}
+
+/* 실제 영역은 높이가 고정입니다. 내용이 길면 참가 신청을 밀지 않고 영역 안에서 스크롤합니다. */
+.area-real .area-body {
+  flex: 1 1 0;
+  height: 0;
+  overflow: auto;
+}
+
+.area-test .area-body {
+  max-height: 342px;
+  overflow: auto;
+}
+
+/* 참가 신청은 영역 바닥의 고정 부품입니다. 목록이 늘어도 버튼 자리는 그대로입니다. */
+.area-foot {
+  padding: 0 20px 20px;
+}
+
+.area-foot .sample-button {
+  margin-top: 0;
+}
+
+.mode-switch {
+  display: flex;
+  gap: 4px;
+}
+
+.mode-switch button {
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+}
+
+.mode-switch button[aria-pressed='true'] {
+  background: var(--cobalt);
+  color: var(--on-cobalt);
+}
+
+.code-editor {
+  flex: 1;
+  width: 100%;
+  min-height: 320px;
+  padding: 16px;
+  border: 0;
+  resize: none;
+  background: var(--code-bg);
+  font-family: var(--font-code);
+  font-size: 0.875rem;
+  line-height: 1.65;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow: hidden auto;
+}
+
+.code-editor:focus-visible,
+.visual-editor:focus-visible {
+  outline-offset: -3px;
+}
+
+.scenarios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.chip {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--sheet);
+  font-size: 0.875rem;
+}
+
+.chip:hover:not(:disabled, [aria-pressed='true']) {
+  border-color: var(--cobalt);
+  color: var(--cobalt);
+}
+
+.chip[aria-pressed='true'] {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--on-ink);
+}
+
+.chip:disabled {
+  opacity: 0.5;
+}
+
+.spine {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding: 44px 14px 0;
+}
+
+/* 키보드 키처럼 아래에 두께를 줍니다. 떼면 천천히 돌아와서 짧게 눌러도 눌린 표시가 보입니다. */
+.patch-button {
+  height: 56px;
+  margin-bottom: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--patch-face);
+  box-shadow: 0 8px 0 var(--patch-edge);
+  color: var(--on-patch);
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  transition:
+    transform 320ms ease-out,
+    box-shadow 320ms ease-out,
+    background-color 320ms ease-out,
+    color 320ms ease-out;
+}
+
+.patch-button:hover {
+  background: var(--patch-face-hover);
+  box-shadow:
+    0 8px 0 var(--patch-edge),
+    0 8px 0 4px var(--selected),
+    0 0 0 4px var(--selected);
+}
+
+.patch-button:active {
+  background: var(--selected);
+  box-shadow: 0 0 0 4px var(--patch-edge);
+  color: var(--on-selected);
+  transform: translateY(8px);
+  transition-duration: 0ms;
+}
+
+.history-buttons {
+  display: grid;
+  gap: 6px;
+}
+
+.quiet-button {
+  padding: 5px 10px;
+  border: 1px solid var(--ink);
+  border-radius: 3px;
+  background: transparent;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.quiet-button:hover:not(:disabled) {
+  background: var(--ink);
+  color: var(--on-ink);
+}
+
+.quiet-button:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+.timeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.timeline-step {
+  min-width: 34px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--cell);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.timeline-step[aria-current='step'] {
+  background: var(--selected);
+  color: var(--on-selected);
+  font-weight: 700;
+}
+
+.lab-status {
+  min-height: 1.6em;
+  margin-top: 14px;
+  font-weight: 500;
+}
+
+/* 보고서 */
+
+.report {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  gap: 32px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 2px solid var(--ink);
+}
+
+.report h2,
+.inspector h2 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.map-caption {
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+}
+
+.node-map {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 12px 0;
+}
+
+.cell {
+  width: 18px;
+  height: 18px;
+  background: var(--cell);
+}
+
+.is-element {
+  border-radius: 2px;
+}
+
+.is-text-node {
+  border-radius: 50%;
+}
+
+.cell-insert {
+  background: var(--op-insert);
+}
+
+.cell-remove {
+  background: var(--op-remove);
+}
+
+.cell-replace {
+  background: var(--op-replace);
+}
+
+.cell-props {
+  background: var(--op-props);
+}
+
+.cell-text {
+  background: var(--op-text);
+}
+
+.cell-move {
+  background: var(--op-move);
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px 16px;
+}
+
+.metrics dt {
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+}
+
+.metrics dd {
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.op-list {
+  margin-top: 10px;
+}
+
+.op-list:empty::before {
+  content: '바뀐 노드가 없습니다.';
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+}
+
+.op-row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.9375rem;
+}
+
+.op-badge {
+  padding: 0 6px;
+  border-radius: 2px;
+  color: var(--on-op);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.op-insert {
+  background: var(--op-insert);
+}
+
+.op-remove {
+  background: var(--op-remove);
+}
+
+.op-replace {
+  background: var(--op-replace);
+}
+
+.op-props {
+  background: var(--op-props);
+}
+
+.op-text {
+  background: var(--op-text);
+}
+
+.op-move {
+  background: var(--op-move);
+}
+
+.op-path {
+  color: var(--ink-soft);
+  font-family: var(--font-code);
+  font-size: 0.8125rem;
+}
+
+.vdom-details {
+  margin-top: 14px;
+}
+
+.vdom-details summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.vdom-json {
+  max-height: 320px;
+  margin: 8px 0 0;
+  padding: 12px;
+  overflow: auto;
+  background: var(--sheet);
+  font-family: var(--font-code);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+/* 샘플 문서: 실제 영역과 화면 편집이 같은 모습을 갖습니다. */
+
+.sample-card h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.sample-lead {
+  margin-top: 6px;
+}
+
+.sample-list {
+  margin: 14px 0;
+  padding-left: 1.25em;
+  list-style: disc;
+}
+
+.sample-note {
+  padding: 8px 12px;
+  background: var(--note-bg);
+}
+
+.sample-note.is-urgent {
+  background: var(--urgent-bg);
+  color: var(--urgent-ink);
+  font-weight: 600;
+}
+
+.sample-button {
+  margin-top: 14px;
+  padding: 6px 16px;
+  border: 1px solid var(--ink);
+  border-radius: 3px;
+  background: transparent;
+  transition:
+    background-color 320ms ease-out,
+    color 320ms ease-out;
+}
+
+.sample-button:hover {
+  background: var(--selected);
+  color: var(--on-selected);
+}
+
+/* 샘플 버튼은 눌린 모습만 보여 주고 다른 동작은 없습니다. */
+.sample-button:active {
+  background: var(--ink);
+  color: var(--on-ink);
+  transition-duration: 0ms;
+}
+
+/* 화면 편집에서도 버튼은 글자 입력 칸이 되지 않습니다. 글자는 HTML 코드에서 바꿉니다. */
+.visual-editor button {
+  -webkit-user-modify: read-only;
+  user-select: none;
+}
+
+mark {
+  background: var(--marker);
+  color: var(--on-marker);
+}
+
+/* 집중 보드 */
+
+/*
+ * 삭제 기록은 상태가 FocusBoard에 있어서 컴포넌트 안에 있지만, 화면에서는 렌더 기록 밑에 놓입니다.
+ * 감싸는 두 요소를 display: contents로 지워서 안쪽 요소를 이 격자에 바로 올립니다.
+ */
+.board-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(340px, 30%, 420px);
+  grid-template-rows: auto 1fr;
+  gap: 0 40px;
+  align-items: start;
+}
+
+[data-role='board-root'],
+.board {
+  display: contents;
+}
+
+.board-main {
+  display: grid;
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  gap: 22px;
+  min-width: 0;
+}
+
+.trash {
+  display: grid;
+  grid-column: 2;
+  grid-row: 2;
+  gap: 14px;
+  align-self: stretch;
+  align-content: start;
+  padding: 18px 0 0 24px;
+  border-left: 2px solid var(--ink);
+}
+
+.trash h2 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.trash-box {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-height: 186px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--sheet);
+}
+
+.trash-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+
+.trash-head h3 {
+  margin: 0 auto 0 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.trash-list {
+  display: grid;
+  gap: 2px;
+}
+
+.trash-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.trash-title {
+  overflow: hidden;
+  font-size: 0.9375rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trash-empty,
+.trash-note {
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+}
+
+.board-progress {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.board-count,
+.board-focused {
+  font-size: 0.9375rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.board-focused {
+  color: var(--ink-soft);
+}
+
+.progress-track {
+  height: 10px;
+  background: var(--cell);
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--cobalt);
+  transition: width 180ms ease-out;
+}
+
+.timer {
+  display: grid;
+  padding: 18px 20px;
+  border: 2px solid var(--ink);
+  background: var(--sheet);
+}
+
+.timer-task {
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+
+.timer-clock {
+  font-size: clamp(3.25rem, 8vw, 5rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.timer-clock.is-over {
+  color: var(--op-replace);
+}
+
+.timer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.timer-lengths {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.timer-warning {
+  margin-top: 10px;
+  color: var(--op-remove);
+  font-weight: 600;
+}
+
+.solid-button {
+  padding: 6px 16px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--cobalt);
+  color: var(--on-cobalt);
+  font-weight: 600;
+  transition:
+    background-color 320ms ease-out,
+    color 320ms ease-out;
+}
+
+.solid-button:hover:not(:disabled) {
+  background: var(--cobalt-deep);
+  color: var(--selected-text);
+}
+
+/* 떼면 천천히 돌아와서 짧게 눌러도 눌린 표시가 보입니다. */
+.solid-button:active:not(:disabled) {
+  background: var(--selected);
+  color: var(--on-selected);
+  transition-duration: 0ms;
+}
+
+.solid-button:disabled {
+  background: var(--cell);
+  color: var(--muted);
+}
+
+.field-note {
+  grid-column: 1 / -1;
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+}
+
+.minutes-field {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.minutes-field .field {
+  width: 72px;
+}
+
+.composer-input,
+.field {
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--ink);
+  border-radius: 3px;
+  background: var(--sheet);
+}
+
+.toolbar {
+  display: grid;
+  gap: 8px;
+}
+
+.toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar-search {
+  flex: 1 1 180px;
+}
+
+.task-list {
+  border-top: 2px solid var(--ink);
+}
+
+.task {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-main {
+  display: flex;
+  flex: 1 1 220px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 제목을 누르면 그 자리에서 이름을 고칩니다. */
+.task-title {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: text;
+}
+
+.task-title:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.task-title-input {
+  flex: 1;
+  padding: 1px 6px;
+}
+
+.task-main input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--cobalt);
+}
+
+/* 제목이 길어져도 체크박스와 수정하기는 제 크기를 지킵니다. */
+.task-main input[type='checkbox'],
+.task-main .text-button {
+  flex: none;
+}
+
+.task-main .text-button {
+  white-space: nowrap;
+}
+
+.task.is-done .task-title {
+  color: var(--ink-soft);
+  text-decoration: line-through;
+}
+
+.task.is-focus {
+  background: var(--focus-row);
+}
+
+.task-plan {
+  color: var(--ink-soft);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 계획 시간은 글자로, 실제로 한 시간은 칸으로 그려서 한눈에 구별합니다. */
+.task-minutes {
+  padding: 0 8px;
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--on-ink);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.priority {
+  min-width: 48px;
+  padding: 0 8px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: transparent;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.priority-high {
+  color: var(--op-remove);
+}
+
+.priority-normal {
+  color: var(--op-props);
+}
+
+.priority-low {
+  color: var(--ink-soft);
+}
+
+.text-button {
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--cobalt);
+  font-size: 0.875rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.text-button:disabled {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.text-button[aria-pressed='true'] {
+  background: var(--selected);
+  color: var(--on-selected);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.board-empty {
+  padding: 28px 0;
+  border-top: 2px solid var(--ink);
+  color: var(--ink-soft);
+}
+
+.inspector {
+  display: grid;
+  grid-column: 2;
+  grid-row: 1;
+  gap: 10px;
+  padding-left: 24px;
+  border-left: 2px solid var(--ink);
+}
+
+.inspector .op-list {
+  margin-top: 0;
+}
+
+.inspector .op-row {
+  grid-template-columns: 52px minmax(0, 1fr);
+}
+
+.inspector .op-path {
+  display: none;
+}
+
+/* 좁은 화면 */
+
+@media (max-width: 960px) {
+  .lab-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .area-test {
+    min-height: 0;
+  }
+
+  .spine {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 12px 0;
+  }
+
+  .patch-button {
+    grid-column: 1 / -1;
+    height: 52px;
+  }
+
+  .history-buttons {
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .timeline {
+    grid-column: 1 / -1;
+  }
+
+  .report,
+  .board-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+
+  .board-grid {
+    grid-template-rows: none;
+  }
+
+  .board-main,
+  .inspector,
+  .trash {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .inspector {
+    order: 1;
+    padding: 16px 0 0;
+    border-top: 2px solid var(--ink);
+    border-left: 0;
+  }
+
+  .trash {
+    order: 2;
+    padding: 0;
+    border-left: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .topbar,
+  .page {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .composer {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  }
+
+  .composer-input {
+    grid-column: 1 / -1;
+  }
+
+  .task-main {
+    flex-basis: 100%;
+  }
+
+  .board-progress {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .progress-track {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .timer-lengths {
+    margin-left: 0;
+  }
+
+  .op-row {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .op-path {
+    grid-column: 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill {
+    transition: none;
+  }
+
+  /* 움직임은 빼고 색만 서서히 돌아옵니다. 이 색까지 끄면 짧은 클릭이 보이지 않습니다. */
+  .patch-button {
+    transition-property: background-color, color;
+  }
+}
+
+/* 상단 메뉴 바로 아래 오른쪽에 놓는 테스트용 버튼입니다. */
+.board-page {
+  position: relative;
+}
+
+.test-timer {
+  position: absolute;
+  top: 12px;
+  right: 24px;
+}
+
+/* 처음으로는 타이머 칸의 오른쪽 위 모서리에 둡니다. */
+.timer {
+  position: relative;
+}
+
+.timer-reset {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+}
+
+.timer-task {
+  padding-right: 96px;
+}
+
+/* 계획 시간에 도달했거나 넘긴 시간은 두 테마 모두 밝은 초록으로 표시합니다. */
+.task-minutes.is-plan-met {
+  background: #4ade80;
+  color: #0f2a1c;
+}

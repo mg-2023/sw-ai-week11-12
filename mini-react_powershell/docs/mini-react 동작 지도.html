@@ -1,0 +1,2182 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini-react 동작 지도</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+<style>
+  /* 레이아웃: mini-react 화면과 같은 색과 글꼴을 쓰고, 페이지 1, 페이지 2, 페이지 1 + 2, 보고서를 위에서 아래로 놓습니다. */
+  :root {
+    --paper: #e7ecf4;
+    --sheet: #ffffff;
+    --ink: #18213d;
+    --ink-soft: #4f5a75;
+    --line: #c3cdde;
+    --tint: #f1f4fa;
+    --cobalt: #2342e6;
+    --on-cobalt: #ffffff;
+    --marker: #ffe45c;
+    --on-marker: #18213d;
+    --op-insert: #0a7a57;
+    --op-remove: #c42b47;
+    --op-replace: #a85a00;
+    --op-props: #0b6fa4;
+    --op-text: #6f3bc4;
+    --op-move: #a3228f;
+    --font-body: 'IBM Plex Sans KR', 'Malgun Gothic', 'Apple SD Gothic Neo', system-ui, sans-serif;
+    --font-code: 'IBM Plex Mono', Consolas, 'D2Coding', monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #121828;
+      --sheet: #1b2338;
+      --ink: #e8ecf6;
+      --ink-soft: #a9b3cb;
+      --line: #36415e;
+      --tint: #232c45;
+      --cobalt: #8ea2ff;
+      --on-cobalt: #10162a;
+      --op-insert: #4fd1a5;
+      --op-remove: #ff8fa3;
+      --op-replace: #f0b35c;
+      --op-props: #6cc4f2;
+      --op-text: #c3a4ff;
+      --op-move: #f08ee0;
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #121828;
+    --sheet: #1b2338;
+    --ink: #e8ecf6;
+    --ink-soft: #a9b3cb;
+    --line: #36415e;
+    --tint: #232c45;
+    --cobalt: #8ea2ff;
+    --on-cobalt: #10162a;
+    --op-insert: #4fd1a5;
+    --op-remove: #ff8fa3;
+    --op-replace: #f0b35c;
+    --op-props: #6cc4f2;
+    --op-text: #c3a4ff;
+    --op-move: #f08ee0;
+    color-scheme: dark;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 1rem;
+    line-height: 1.65;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+
+  h1, h2, h3, h4, p, ol, ul, dl, dd { margin: 0; padding: 0; }
+  ol, ul { list-style: none; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+  code { font-family: var(--font-code); font-size: 0.92em; }
+  :focus-visible { outline: 3px solid var(--cobalt); outline-offset: 2px; }
+
+  .wrap {
+    display: grid;
+    gap: 56px;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding-block: 40px 72px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+
+  section { display: grid; gap: 16px; min-width: 0; }
+
+  h1 {
+    font-size: clamp(1.75rem, 4.5vw, 2.5rem);
+    font-weight: 700;
+    line-height: 1.25;
+    letter-spacing: -0.03em;
+    text-wrap: balance;
+  }
+
+  h2 {
+    font-size: 1.375rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+
+  .lead { max-width: 62ch; color: var(--ink-soft); }
+  header { display: grid; gap: 12px; }
+
+  .terms {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 28px;
+    margin-top: 6px;
+  }
+
+  .terms div { display: flex; gap: 8px; align-items: baseline; }
+  .terms dt { font-weight: 600; }
+  .terms dd { color: var(--ink-soft); }
+
+  /* 전체 그림 */
+  .map-scroll {
+    overflow-x: auto;
+    border: 2px solid var(--ink);
+    background: var(--sheet);
+  }
+
+  .map { display: block; width: 100%; min-width: 760px; height: auto; }
+  .map rect { fill: var(--tint); stroke: var(--line); stroke-width: 1.5; }
+  .map .box-real rect { fill: var(--sheet); stroke: var(--ink); stroke-width: 2.5; }
+  .map .box-test rect { fill: var(--sheet); stroke: var(--cobalt); stroke-width: 2; stroke-dasharray: 7 5; }
+  .map .box-diff rect { fill: var(--cobalt); stroke: var(--cobalt); }
+  .map .box-diff text { fill: var(--on-cobalt); }
+  .map .box-history rect { fill: var(--marker); stroke: var(--marker); }
+  .map .box-history text { fill: var(--on-marker); }
+  .map text { fill: var(--ink); font-family: var(--font-body); }
+  .map .name { font-size: 16px; font-weight: 700; text-anchor: middle; }
+  .map .fn { font-family: var(--font-code); font-size: 13px; text-anchor: middle; }
+  .map .edge-label { fill: var(--ink-soft); font-size: 13px; }
+  .map .edge { fill: none; stroke: var(--ink); stroke-width: 2; }
+  .map .head { fill: var(--ink); }
+
+  /* 예시로 따라가기 */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+  .chip {
+    padding: 4px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--sheet);
+    font-size: 0.875rem;
+  }
+
+  .rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+
+  .step {
+    display: grid;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--sheet);
+    color: var(--ink-soft);
+    font-size: 0.875rem;
+    text-align: left;
+  }
+
+  .step b { font-family: var(--font-code); font-weight: 500; }
+  .step.is-done { color: var(--ink); }
+  .step[aria-current="step"] { border-color: var(--cobalt); background: var(--cobalt); color: var(--on-cobalt); font-weight: 600; }
+
+  .nav { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+  .solid, .quiet {
+    padding: 6px 16px;
+    border-radius: 3px;
+    font-weight: 600;
+  }
+
+  .solid { border: 1px solid var(--cobalt); background: var(--cobalt); color: var(--on-cobalt); }
+  .quiet { border: 1px solid var(--ink); background: transparent; }
+  .solid:disabled, .quiet:disabled { border-color: var(--line); background: transparent; color: var(--ink-soft); }
+
+  .panels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+
+  .panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 268px;
+    border: 2px solid var(--line);
+    background: var(--sheet);
+  }
+
+  .panel.is-active { border-color: var(--cobalt); }
+  .panel h4 { padding: 6px 12px; border-bottom: 1px solid var(--line); font-size: 0.9375rem; font-weight: 600; }
+  .panel.is-active h4 { background: var(--cobalt); color: var(--on-cobalt); }
+  .panel-body { flex: 1; min-width: 0; padding: 10px 12px; overflow-x: auto; }
+  .empty { color: var(--ink-soft); font-size: 0.9375rem; }
+
+  .code, .tree { font-family: var(--font-code); font-size: 0.8125rem; line-height: 1.8; }
+  .code li { white-space: pre; }
+  .tree li { display: flex; justify-content: space-between; gap: 12px; white-space: nowrap; }
+  .tree .path { color: var(--ink-soft); }
+  .is-marked { background: var(--marker); color: var(--on-marker); }
+  .is-marked .path { color: var(--on-marker); }
+
+  .ops { display: grid; gap: 8px; }
+  .op { display: grid; gap: 2px; }
+  .op-head { display: flex; gap: 8px; align-items: center; font-family: var(--font-code); font-size: 0.8125rem; }
+
+  .badge {
+    padding: 0 6px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-family: var(--font-code);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .op-TEXT { color: var(--op-text); }
+  .op-PROPS { color: var(--op-props); }
+  .op-INSERT { color: var(--op-insert); }
+  .op-REMOVE { color: var(--op-remove); }
+  .op-REPLACE { color: var(--op-replace); }
+  .op-MOVE { color: var(--op-move); }
+
+  .real { display: grid; gap: 6px; font-size: 0.9375rem; }
+  .real h4 { margin: 0; font-size: 1.0625rem; }
+  .real ul { padding-left: 18px; list-style: disc; }
+  .real p.is-urgent { padding: 2px 8px; border: 1px solid var(--op-remove); color: var(--op-remove); }
+  .real mark { background: var(--marker); color: var(--on-marker); }
+  .real .is-marked { outline: 3px solid var(--marker); }
+
+  .versions { display: flex; gap: 6px; align-items: center; font-family: var(--font-code); }
+
+  .version {
+    padding: 2px 10px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+  }
+
+  .version.is-current { border-color: var(--marker); background: var(--marker); color: var(--on-marker); font-weight: 500; }
+  .history-note { margin-top: 10px; color: var(--ink-soft); font-size: 0.9375rem; }
+
+  /* 시점별 순서 */
+  .moments { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+  .moment { display: grid; align-content: start; gap: 8px; min-width: 0; padding-top: 10px; border-top: 2px solid var(--ink); }
+  .moment h4 { font-size: 1.0625rem; }
+  .moment ol { display: grid; gap: 6px; counter-reset: order; }
+  .moment li { display: grid; grid-template-columns: 22px minmax(0, 1fr); counter-increment: order; }
+  .moment li::before { content: counter(order); color: var(--ink-soft); font-family: var(--font-code); }
+  .moment small { display: block; color: var(--ink-soft); font-size: 0.875rem; }
+
+  /* 비교 규칙 */
+  .rules { background: var(--sheet); border: 2px solid var(--ink); }
+  .rule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 16px; padding: 10px 14px; }
+  .rule + .rule { border-top: 1px solid var(--line); }
+  .rule-result { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .note { color: var(--ink-soft); max-width: 68ch; }
+
+  .view { display: grid; gap: 56px; min-width: 0; }
+
+  /* 페이지 2 */
+  .rail-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 8px; font-family: var(--font-code); font-size: 0.75rem; line-height: 1.7; }
+  .slot { display: flex; gap: 6px; padding: 0 4px; white-space: nowrap; }
+  .slot b { min-width: 16px; color: var(--ink-soft); font-weight: 400; text-align: right; }
+  .slot.is-marked b { color: var(--on-marker); }
+  .slot-note { margin-top: 8px; font-size: 0.875rem; color: var(--ink-soft); }
+  .mini { display: grid; gap: 4px; font-size: 0.875rem; }
+  .mini-clock { font-size: 1.75rem; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .mini-button { justify-self: start; padding: 0 10px; border-radius: 3px; background: var(--cobalt); color: var(--on-cobalt); font-weight: 600; }
+  .mini ul { display: grid; gap: 2px; }
+  .mini li.is-done { color: var(--ink-soft); text-decoration: line-through; }
+  .mini .is-marked { background: var(--marker); color: var(--on-marker); }
+  .record { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .record dt { color: var(--ink-soft); font-size: 0.875rem; }
+  .record dd { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .compare { width: 100%; border-collapse: collapse; background: var(--sheet); }
+  .compare-scroll { overflow-x: auto; border: 2px solid var(--ink); }
+  .compare th, .compare td { padding: 8px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .compare tr:last-child th, .compare tr:last-child td { border-bottom: 0; }
+  .compare th { font-weight: 600; }
+  .map .frame { fill: none; stroke: var(--cobalt); stroke-width: 2; stroke-dasharray: 7 5; }
+  .map .lane { fill: var(--ink-soft); font-size: 14px; font-weight: 600; }
+
+  /* 움직임 */
+  .map .dot { stroke: var(--ink); stroke-width: 2; }
+  .map .dot-new { fill: var(--marker); }
+  .map .dot-old { fill: var(--op-insert); }
+  .map .is-lit rect { stroke: var(--op-replace); stroke-width: 4; stroke-dasharray: none; }
+
+  .fly {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 5;
+    background: var(--sheet);
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 900px) {
+    .panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .moments { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  @media (max-width: 620px) {
+    .panels, .rule { grid-template-columns: minmax(0, 1fr); }
+    .panel { min-height: 0; }
+    .rail, .rail-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  /* 세 구역: 페이지 1, 페이지 2, 페이지 1 + 2를 위에서 아래로 놓습니다. */
+  .part-title { padding-top: 20px; border-top: 4px solid var(--ink); font-size: clamp(1.5rem, 3.5vw, 1.875rem); scroll-margin-top: 16px; }
+  .section-title { font-size: 1.375rem; font-weight: 700; letter-spacing: -0.02em; text-wrap: balance; }
+  .page-toc { display: flex; flex-wrap: wrap; gap: 4px 24px; margin-top: 6px; padding-left: 20px; list-style: decimal; }
+  .page-toc li { padding-right: 8px; }
+  .page-toc a, .report-toc a { color: var(--ink); }
+  .header-tools { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 8px; }
+
+  /* 전체 그림의 설명: 지금 지나는 줄만 색이 바뀌고, 글은 전부 보입니다. */
+  .flow-list { display: grid; grid-auto-flow: column; grid-template-rows: repeat(4, auto); grid-auto-columns: minmax(0, 1fr); gap: 4px 28px; padding-left: 22px; list-style: decimal; color: var(--ink-soft); }
+  .flow-list li { padding: 1px 8px; border-left: 3px solid transparent; }
+  .flow-list .is-on { border-left-color: var(--op-replace); background: var(--tint); color: var(--ink); font-weight: 600; }
+
+  /* 예시: 칩과 단계는 지금 위치를 알려 주는 표시입니다. 누르는 곳이 아닙니다. */
+  .chip[aria-current="true"] { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+  .rail li { display: grid; min-width: 0; }
+  .step { align-content: start; }
+  .step code { color: var(--cobalt); font-size: 0.8125rem; font-weight: 500; overflow-wrap: anywhere; }
+  .step small { font-size: 0.8125rem; line-height: 1.5; }
+  .step-name { font-weight: 600; }
+  .step[aria-current="step"] code { color: inherit; }
+  .scenario-heading { margin-top: 8px; font-size: 1.0625rem; font-weight: 600; }
+  .scenario-table { min-width: 760px; }
+  .scenario-table th[scope="row"] { color: var(--ink); white-space: normal; }
+  .cell-code { display: block; color: var(--ink-soft); font-size: 0.8125rem; font-weight: 400; overflow-wrap: anywhere; white-space: normal !important; }
+  .op-line { display: block; }
+  .op-line + .op-line { margin-top: 2px; }
+
+  /* 코드 실행 경로: 단계마다 설명과 실제 코드를 나란히 펼칩니다. */
+  .trace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 40px; min-width: 0; }
+  .trace-flow { display: grid; gap: 8px; min-width: 0; }
+  .trace-flow h4 { font-size: 1.125rem; font-weight: 700; }
+  .trace-rows { display: grid; min-width: 0; margin-top: 4px; }
+  .trace-row { display: grid; grid-template-columns: minmax(0, 330px) minmax(0, 1fr); gap: 16px; min-width: 0; padding: 12px 0; border-top: 1px solid var(--line); }
+  .trace-info { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-content: start; min-width: 0; }
+  .trace-num { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 3px; background: var(--sheet); font-family: var(--font-code); font-size: 0.875rem; font-weight: 500; }
+  .trace-fn { font-weight: 700; overflow-wrap: anywhere; }
+  .trace-where { color: var(--cobalt); font-family: var(--font-code); font-size: 0.8125rem; overflow-wrap: anywhere; }
+  .trace-text { margin-top: 4px; font-size: 0.9375rem; }
+  .trace-lines { min-width: 0; padding: 8px 0; overflow-x: auto; border: 1px solid var(--line); background: var(--sheet); font-family: var(--font-code); font-size: 0.8125rem; line-height: 1.6; }
+  .trace-lines li { display: grid; grid-template-columns: 48px max-content; min-width: max-content; padding-right: 12px; }
+  .trace-ln { padding-right: 12px; color: var(--ink-soft); text-align: right; user-select: none; }
+  .trace-lines code { font-size: inherit; white-space: pre; }
+  .trace-lines .is-target { background: var(--tint); box-shadow: inset 4px 0 0 var(--cobalt); font-weight: 500; }
+  .trace-row.is-current .trace-num { border-color: var(--cobalt); background: var(--cobalt); color: var(--on-cobalt); }
+  .trace-row.is-current .trace-lines { border-color: var(--cobalt); }
+
+  /* 신호: 날아가는 글자표와 지나간 길에 남는 색 선입니다. */
+  .fly { position: absolute; }
+  .fly.badge { padding: 3px 12px; border: 2px solid var(--paper); background: var(--ink); color: var(--paper); font-size: 1rem; font-weight: 600; box-shadow: 0 2px 10px rgb(0 0 0 / 0.4); }
+  #signal-layer { position: absolute; top: 0; left: 0; z-index: 4; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+  .signal-line { fill: none; stroke: currentColor; stroke-width: 4; stroke-linecap: round; filter: drop-shadow(0 0 2px var(--paper)); }
+  .map .signal-path { fill: none; stroke-linecap: round; }
+  .map .signal-case { stroke: var(--ink); stroke-width: 8; }
+  .map .signal-core { stroke-width: 4; }
+  .map .signal-core.is-new { stroke: var(--marker); }
+  .map .signal-core.is-old { stroke: var(--op-insert); }
+  .map .signal-core.is-go { stroke: var(--op-move); }
+  .map .edge-go { stroke: var(--op-move); stroke-dasharray: 7 6; }
+  .map .head-go { fill: var(--op-move); }
+  .map .dot-go { fill: var(--op-move); }
+  .map .label-go { fill: var(--op-move); font-weight: 600; }
+
+  /* 보고서 */
+  .report-toc { columns: 3 220px; column-gap: 24px; margin-top: 10px; padding-left: 24px; list-style: decimal; font-size: 0.9375rem; }
+  .report-toc li { break-inside: avoid; padding: 2px 0; }
+  .report-part { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; scroll-margin-top: 16px; }
+  .report-part ol { display: grid; gap: 4px; max-width: 72ch; padding-left: 24px; list-style: decimal; }
+  .report-part pre { margin: 0; padding: 10px 12px; overflow-x: auto; background: var(--tint); font-family: var(--font-code); font-size: 0.8125rem; line-height: 1.6; }
+  .report-part pre code { white-space: pre; }
+  .report-sheet { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; padding: 28px clamp(16px, 4vw, 40px); border: 2px solid var(--ink); background: var(--sheet); scroll-margin-top: 16px; }
+  .report-head { display: grid; gap: 6px; padding-bottom: 16px; border-bottom: 2px solid var(--ink); }
+  .report-part h3 { font-size: 1.125rem; font-weight: 700; }
+  .report-part h4 { margin: 8px 0 0; font-size: 1rem; font-weight: 600; }
+  .report-part p { max-width: 72ch; }
+  .report-part ul { display: grid; gap: 6px; max-width: 72ch; padding-left: 20px; list-style: disc; }
+  .report-table-wrap { overflow-x: auto; }
+  .report-table { width: 100%; border-collapse: collapse; font-size: 0.9375rem; }
+  .report-table th, .report-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .report-table th { color: var(--ink-soft); font-weight: 600; white-space: nowrap; }
+  .report-table .num { font-variant-numeric: tabular-nums; text-align: right; }
+  .report-table code { white-space: nowrap; }
+
+  @media (max-width: 900px) {
+    .trace-row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+    .rail, .rail-6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  @media (max-width: 620px) {
+    .rail, .rail-6 { grid-template-columns: minmax(0, 1fr); }
+    .flow-list { grid-auto-flow: row; grid-template-rows: none; grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<main class="wrap">
+  <header>
+    <h1>바뀐 곳만 실제 화면에 반영되는 과정</h1>
+    <p class="lead">mini-react는 화면을 통째로 다시 그리지 않습니다. 새 설계도를 만들고, 이전 설계도와 비교해서, 달라진 곳만 실제 화면에서 공사합니다. 페이지 1은 사람이 Patch를 눌러서, 페이지 2는 상태가 바뀌어서 이 과정이 시작됩니다.</p>
+    <dl class="terms">
+      <div><dt>DOM</dt><dd>진짜 집</dd></div>
+      <div><dt>Virtual DOM</dt><dd>설계도</dd></div>
+      <div><dt>Diff</dt><dd>설계도 비교</dd></div>
+      <div><dt>Patch 연산</dt><dd>공사 지시서</dd></div>
+      <div><dt>hooks 배열</dt><dd>신발장</dd></div>
+    </dl>
+    <ol class="page-toc" aria-label="이 페이지의 순서">
+      <li><a href="#part-lab">페이지 1: Diff 실험실</a></li>
+      <li><a href="#part-board">페이지 2: 집중 보드</a></li>
+      <li><a href="#part-link">페이지 1 + 2: 연동</a></li>
+      <li><a href="#report">구현 보고서</a></li>
+    </ol>
+    <div class="header-tools">
+      <button class="quiet" id="motion" type="button">움직임 끄기</button>
+      <p class="note">그림과 예시는 화면에 들어오면 저절로 재생됩니다. 코드 실행 경로는 스크롤로 화면 가운데에 온 단계에 불이 들어오고, 앞 단계의 실행 줄에서 신호 선이 이어집니다.</p>
+    </div>
+  </header>
+
+  <div class="view" id="part-lab">
+    <h2 class="part-title">페이지 1: Diff 실험실</h2>
+  <section aria-labelledby="map-title">
+    <h3 class="section-title" id="map-title">전체 그림</h3>
+    <div class="map-scroll">
+      <svg class="map" viewBox="0 0 940 300" role="img" aria-label="테스트 영역을 읽어 새 설계도를 만들고, 기록의 이전 설계도와 비교한 지시서를 실제 영역에 반영한 뒤 새 설계도를 기록에 저장하는 흐름">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path class="head" d="M0 0 L10 5 L0 10 Z"></path>
+          </marker>
+          <marker id="arrow-go" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <path class="head-go" d="M0 0 L10 5 L0 10 Z"></path>
+          </marker>
+        </defs>
+
+        <g class="box-test" id="box-test"><rect x="10" y="30" width="150" height="84" rx="3"></rect>
+          <text class="name" x="85" y="66">테스트 영역</text><text class="fn" x="85" y="90">사용자가 고침</text></g>
+        <g id="box-new"><rect x="200" y="30" width="150" height="84" rx="3"></rect>
+          <text class="name" x="275" y="66">새 설계도</text><text class="fn" x="275" y="90">htmlToVdom</text></g>
+        <g class="box-diff" id="box-diff"><rect x="390" y="30" width="150" height="84" rx="3"></rect>
+          <text class="name" x="465" y="66">비교</text><text class="fn" x="465" y="90">diff</text></g>
+        <g id="box-ops"><rect x="580" y="30" width="150" height="84" rx="3"></rect>
+          <text class="name" x="655" y="66">공사 지시서</text><text class="fn" x="655" y="90">Patch[]</text></g>
+        <g class="box-real" id="box-real"><rect x="770" y="30" width="160" height="84" rx="3"></rect>
+          <text class="name" x="850" y="66">실제 영역</text><text class="fn" x="850" y="90">브라우저 DOM</text></g>
+        <g class="box-history" id="box-history"><rect x="390" y="200" width="150" height="84" rx="3"></rect>
+          <text class="name" x="465" y="236">기록</text><text class="fn" x="465" y="260">v1 → v2 → v3</text></g>
+
+        <path class="edge" id="edge-read" marker-end="url(#arrow)" d="M160 72 H198"></path>
+        <path class="edge" id="edge-compare" marker-end="url(#arrow)" d="M350 72 H388"></path>
+        <path class="edge" id="edge-order" marker-end="url(#arrow)" d="M540 72 H578"></path>
+        <path class="edge" id="edge-apply" marker-end="url(#arrow)" d="M730 72 H768"></path>
+        <path class="edge" id="edge-previous" marker-end="url(#arrow)" d="M465 200 V116"></path>
+        <path class="edge" id="edge-save" marker-end="url(#arrow)" d="M275 114 V242 H388"></path>
+        <path class="edge edge-go" id="edge-go" marker-end="url(#arrow-go)" d="M850 114 V180 H320 V116"></path>
+
+        <text class="edge-label" x="477" y="162">이전 설계도를 꺼냄</text>
+        <text class="edge-label" x="287" y="232">반영한 뒤 저장</text>
+        <text class="edge-label label-go" x="620" y="172">반영이 끝나면 출발 신호</text>
+        <text class="edge-label" x="735" y="22" >applyPatches</text>
+
+        <circle class="dot dot-new" id="dot-new" r="9" visibility="hidden"></circle>
+        <circle class="dot dot-old" id="dot-old" r="9" visibility="hidden"></circle>
+        <circle class="dot dot-go" id="dot-go" r="9" visibility="hidden"></circle>
+      </svg>
+    </div>
+    <p class="note">노란 점은 새 설계도, 초록 점은 기록에서 꺼낸 이전 설계도, 분홍 점은 반영이 끝났다는 출발 신호입니다. 신호가 지나간 길은 점과 같은 색 선으로 남습니다.</p>
+    <ol class="flow-list" id="map-status"></ol>
+  </section>
+
+  <section aria-labelledby="player-title">
+    <h3 class="section-title" id="player-title">예시로 따라가기</h3>
+    <p class="note">아래 예시는 프로젝트의 실제 <code>diff()</code>가 돌려준 연산입니다. 예시 8개가 차례로 재생되고, 전체 내용은 아래 표에 있습니다.</p>
+    <div class="chips" id="scenarios" role="group" aria-label="예시"></div>
+    <ol class="rail" id="rail" aria-label="단계"></ol>
+    <div class="panels">
+      <div class="panel" id="panel-test"><h4 id="title-test">테스트 영역</h4><div class="panel-body" id="body-test"></div></div>
+      <div class="panel" id="panel-old"><h4 id="title-old">이전 설계도</h4><div class="panel-body" id="body-old"></div></div>
+      <div class="panel" id="panel-new"><h4 id="title-new">새 설계도</h4><div class="panel-body" id="body-new"></div></div>
+      <div class="panel" id="panel-ops"><h4>공사 지시서</h4><div class="panel-body" id="body-ops"></div></div>
+      <div class="panel" id="panel-real"><h4>실제 영역</h4><div class="panel-body" id="body-real"></div></div>
+      <div class="panel" id="panel-history"><h4>기록</h4><div class="panel-body" id="body-history"></div></div>
+    </div>
+    <h4 class="scenario-heading">예시 전체</h4>
+    <div class="report-table-wrap"><table class="report-table scenario-table">
+      <thead><tr><th scope="col">예시</th><th scope="col">고친 내용</th><th scope="col">diff가 찾은 차이</th><th scope="col">연산</th></tr></thead>
+      <tbody id="scenario-rows"></tbody>
+    </table></div>
+  </section>
+
+  <section aria-labelledby="lab-trace-title">
+    <h3 class="section-title" id="lab-trace-title">코드 실행 경로</h3>
+    <p class="note">소스 파일의 실제 줄 번호와 코드입니다. 파란 표시가 그 단계에서 실행되는 줄입니다.</p>
+    <div class="trace" data-flows="lab-open,lab-patch,lab-back"></div>
+  </section>
+
+  <section aria-labelledby="moments-title">
+    <h3 class="section-title" id="moments-title">언제 무엇이 실행되나</h3>
+    <div class="moments">
+      <div class="moment">
+        <h4>페이지를 열 때</h4>
+        <ol>
+          <li><span>샘플 HTML을 실제 영역에 넣음</span></li>
+          <li><span>DOM을 읽어 첫 설계도를 만듦<small><code>childrenToVdom</code></small></span></li>
+          <li><span>설계도대로 실제 영역을 다시 만듦<small><code>createDom</code>, 들여쓰기 공백이 빠져 주소가 맞음</small></span></li>
+          <li><span>같은 내용을 테스트 영역에 그림<small><code>testArea.write</code></small></span></li>
+          <li><span>기록에 v1 저장<small><code>createLabControls</code></small></span></li>
+        </ol>
+      </div>
+      <div class="moment">
+        <h4>Patch를 누를 때</h4>
+        <ol>
+          <li><span>테스트 영역을 읽어 새 설계도를 만듦<small><code>readTestArea</code></small></span></li>
+          <li><span>지금 설계도와 비교<small><code>diff</code></small></span></li>
+          <li><span>연산이 있으면 실제 영역에 반영<small><code>applyPatches</code></small></span></li>
+          <li><span>연산이 있으면 새 버전 저장<small><code>history.push</code></small></span></li>
+          <li><span>노드 지도와 연산 목록 갱신<small><code>renderReport</code></small></span></li>
+        </ol>
+      </div>
+      <div class="moment">
+        <h4>뒤로가기를 누를 때</h4>
+        <ol>
+          <li><span>기록의 현재 위치를 옮김<small><code>history.back</code></small></span></li>
+          <li><span>이동 전과 이동 후 설계도를 비교<small><code>diff</code></small></span></li>
+          <li><span>실제 영역에 반영<small><code>applyPatches</code></small></span></li>
+          <li><span>테스트 영역도 그 버전으로 다시 씀<small><code>writeTestArea</code></small></span></li>
+          <li><span>새 버전은 만들지 않음</span></li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="rules-title">
+    <h3 class="section-title" id="rules-title">diff가 두 노드를 비교하는 순서</h3>
+    <p class="note">위에서부터 차례로 묻습니다. 자식이 있으면 남은 자식마다 같은 질문을 처음부터 다시 합니다.</p>
+    <div class="rules">
+      <div class="rule"><span>둘 다 글자 노드인가?</span><span class="rule-result"><span class="badge op-TEXT">TEXT</span> 내용이 다르면 글자만 바꿈</span></div>
+      <div class="rule"><span>노드 종류, 태그, key 중 하나라도 다른가?</span><span class="rule-result"><span class="badge op-REPLACE">REPLACE</span> 통째로 교체</span></div>
+      <div class="rule"><span>속성이 다른가?</span><span class="rule-result"><span class="badge op-PROPS">PROPS</span> 달라진 속성만 바꿈</span></div>
+      <div class="rule"><span>자식 목록이 다른가?</span><span class="rule-result"><span class="badge op-INSERT">INSERT</span><span class="badge op-REMOVE">REMOVE</span><span class="badge op-MOVE">MOVE</span> 추가, 삭제, 이동</span></div>
+    </div>
+    <p class="note">과제의 5가지 케이스는 <code>INSERT</code>, <code>REMOVE</code>, <code>REPLACE</code>, <code>PROPS</code>, <code>TEXT</code>입니다. <code>MOVE</code>는 순서만 바뀐 노드를 새로 만들지 않고 옮기려고 추가했습니다.</p>
+  </section>
+  </div>
+
+  <div class="view" id="part-board">
+    <h2 class="part-title">페이지 2: 집중 보드</h2>
+    <section aria-labelledby="board-map-title">
+      <h3 class="section-title" id="board-map-title">전체 그림</h3>
+      <div class="map-scroll">
+        <svg class="map" viewBox="0 0 940 300" role="img" aria-label="사용자 동작이 상태를 바꾸면 hooks 배열에 값이 저장되고, 렌더를 예약해 컴포넌트를 다시 실행한 뒤 Diff와 Patch로 화면을 고치고 effect를 실행하는 흐름">
+          <defs><marker id="arrow-board" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="head" d="M0 0 L10 5 L0 10 Z"></path></marker></defs>
+          <g class="box-test" id="b-user"><rect x="10" y="30" width="130" height="84" rx="3"></rect>
+            <text class="name" x="75" y="66">사용자 동작</text><text class="fn" x="75" y="90">클릭, 입력</text></g>
+          <g id="b-set"><rect x="168" y="30" width="130" height="84" rx="3"></rect>
+            <text class="name" x="233" y="66">상태 변경</text><text class="fn" x="233" y="90">setState</text></g>
+          <g id="b-micro"><rect x="326" y="30" width="130" height="84" rx="3"></rect>
+            <text class="name" x="391" y="66">렌더 예약</text><text class="fn" x="391" y="90">queueMicrotask</text></g>
+          <g id="b-render"><rect x="484" y="30" width="130" height="84" rx="3"></rect>
+            <text class="name" x="549" y="66">함수 재실행</text><text class="fn" x="549" y="90">FocusBoard()</text></g>
+          <g class="box-diff" id="b-patch"><rect x="642" y="30" width="130" height="84" rx="3"></rect>
+            <text class="name" x="707" y="66">비교와 반영</text><text class="fn" x="707" y="90">diff, Patch</text></g>
+          <g class="box-real" id="b-effect"><rect x="800" y="30" width="130" height="84" rx="3"></rect>
+            <text class="name" x="865" y="66">effect 실행</text><text class="fn" x="865" y="90">useEffect</text></g>
+          <g class="box-history" id="b-hooks"><rect x="326" y="200" width="130" height="84" rx="3"></rect>
+            <text class="name" x="391" y="236">hooks 배열</text><text class="fn" x="391" y="260">칸마다 값을 보관</text></g>
+
+          <path class="edge" id="b-e1" marker-end="url(#arrow-board)" d="M140 72 H166"></path>
+          <path class="edge" id="b-e2" marker-end="url(#arrow-board)" d="M298 72 H324"></path>
+          <path class="edge" id="b-e3" marker-end="url(#arrow-board)" d="M456 72 H482"></path>
+          <path class="edge" id="b-e4" marker-end="url(#arrow-board)" d="M614 72 H640"></path>
+          <path class="edge" id="b-e5" marker-end="url(#arrow-board)" d="M772 72 H798"></path>
+          <path class="edge" id="b-store" marker-end="url(#arrow-board)" d="M233 114 V242 H324"></path>
+          <path class="edge" id="b-read" marker-end="url(#arrow-board)" d="M456 242 H549 V116"></path>
+
+          <text class="edge-label" x="245" y="232">값 저장</text>
+          <text class="edge-label" x="561" y="180">순서대로 값을 꺼냄</text>
+
+          <circle class="dot dot-new" id="b-dot" r="9" visibility="hidden"></circle>
+          <circle class="dot dot-old" id="b-dot-state" r="9" visibility="hidden"></circle>
+        </svg>
+      </div>
+      <p class="note">함수는 매번 새로 실행되지만, 값은 함수 바깥의 hooks 배열에 남습니다. 그래서 상태가 유지됩니다. 신호가 지나간 길은 점과 같은 색 선으로 남습니다.</p>
+    <ol class="flow-list" id="board-status"></ol>
+    </section>
+
+    <section aria-labelledby="board-player-title">
+      <h3 class="section-title" id="board-player-title">예시로 따라가기</h3>
+      <p class="note">연산과 렌더 기록 숫자는 실제 집중 보드를 조작해서 나온 값입니다. 화면과 설계도는 알아보기 쉽게 줄였습니다. 예시 8개가 차례로 재생되고, 전체 내용은 아래 표에 있습니다.</p>
+      <div class="chips" id="board-scenarios" role="group" aria-label="예시"></div>
+      <ol class="rail rail-6" id="board-rail" aria-label="단계"></ol>
+      <div class="panels">
+        <div class="panel" id="panel-hooks"><h4>hooks 배열</h4><div class="panel-body" id="body-hooks"></div></div>
+        <div class="panel" id="panel-bold"><h4>이전 설계도</h4><div class="panel-body" id="body-bold"></div></div>
+        <div class="panel" id="panel-bnew"><h4>새 설계도</h4><div class="panel-body" id="body-bnew"></div></div>
+        <div class="panel" id="panel-bops"><h4>공사 지시서</h4><div class="panel-body" id="body-bops"></div></div>
+        <div class="panel" id="panel-bdom"><h4>실제 DOM</h4><div class="panel-body" id="body-bdom"></div></div>
+        <div class="panel" id="panel-brecord"><h4>렌더 기록</h4><div class="panel-body" id="body-brecord"></div></div>
+      </div>
+      <h4 class="scenario-heading">예시 전체</h4>
+      <div class="report-table-wrap"><table class="report-table scenario-table">
+        <thead><tr><th scope="col">예시</th><th scope="col">일어나는 일</th><th scope="col">연산</th><th scope="col">effect</th><th scope="col">렌더 기록</th></tr></thead>
+        <tbody id="board-scenario-rows"></tbody>
+      </table></div>
+    </section>
+
+    <section aria-labelledby="board-trace-title">
+      <h3 class="section-title" id="board-trace-title">코드 실행 경로</h3>
+      <p class="note">소스 파일의 실제 줄 번호와 코드입니다. 파란 표시가 그 단계에서 실행되는 줄입니다.</p>
+      <div class="trace" data-flows="board-mount,board-update,board-timer,board-trash,board-search"></div>
+    </section>
+
+    <section aria-labelledby="board-moments-title">
+      <h3 class="section-title" id="board-moments-title">언제 무엇이 실행되나</h3>
+      <div class="moments">
+        <div class="moment">
+          <h4>처음 그릴 때</h4>
+          <ol>
+            <li><span>함수를 실행해 첫 설계도를 만듦<small><code>mount()</code></small></span></li>
+            <li><span>hooks 칸을 순서대로 만듦<small><code>claimSlot</code></small></span></li>
+            <li><span>설계도로 실제 DOM을 만듦<small><code>createDom</code></small></span></li>
+            <li><span>effect를 실행<small><code>flushEffects</code></small></span></li>
+          </ol>
+        </div>
+        <div class="moment">
+          <h4>상태가 바뀔 때</h4>
+          <ol>
+            <li><span>값이 같으면 여기서 끝<small><code>Object.is</code></small></span></li>
+            <li><span>렌더를 한 번만 예약<small><code>scheduleUpdate</code></small></span></li>
+            <li><span>함수를 다시 실행<small><code>update()</code></small></span></li>
+            <li><span>비교하고 반영<small><code>diff</code>, <code>applyPatches</code></small></span></li>
+            <li><span>정리 함수, effect 순서로 실행<small><code>flushEffects</code></small></span></li>
+          </ol>
+        </div>
+        <div class="moment">
+          <h4>화면에서 내릴 때</h4>
+          <ol>
+            <li><span>모든 정리 함수를 실행<small><code>unmount()</code></small></span></li>
+            <li><span>타이머 같은 작업이 멈춤<small><code>clearInterval</code></small></span></li>
+            <li><span>실제 DOM을 지움</span></li>
+          </ol>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="view" id="part-link">
+    <h2 class="part-title">페이지 1 + 2: 연동</h2>
+    <section aria-labelledby="link-title">
+      <h3 class="section-title" id="link-title">같은 코드를 쓰는 곳</h3>
+      <p class="note">입구만 다르고 뒤쪽은 같은 코드입니다. 점선 안의 <code>diff</code>와 <code>applyPatches</code>는 Phase 1에서 만든 함수를 Phase 2가 그대로 불러 씁니다.</p>
+      <div class="map-scroll">
+        <svg class="map" viewBox="0 0 940 300" role="img" aria-label="페이지 1의 테스트 영역과 페이지 2의 컴포넌트가 각각 새 설계도를 만들어 같은 diff와 applyPatches로 들어가는 흐름">
+          <defs><marker id="arrow-link" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="head" d="M0 0 L10 5 L0 10 Z"></path></marker></defs>
+          <text class="lane" x="10" y="22">페이지 1</text>
+          <text class="lane" x="10" y="196">페이지 2</text>
+          <text class="edge-label" x="400" y="92">Phase 1 코드, 두 페이지가 함께 씀</text>
+          <rect class="frame" x="386" y="100" width="550" height="108" rx="3"></rect>
+
+          <g class="box-test" id="k-test"><rect x="10" y="30" width="150" height="84" rx="3"></rect>
+            <text class="name" x="85" y="66">Patch 버튼</text><text class="fn" x="85" y="90">테스트 영역 읽기</text></g>
+          <g id="k-lab-tree"><rect x="200" y="30" width="150" height="84" rx="3"></rect>
+            <text class="name" x="275" y="66">새 설계도</text><text class="fn" x="275" y="90">htmlToVdom</text></g>
+          <g class="box-history" id="k-state"><rect x="10" y="204" width="150" height="84" rx="3"></rect>
+            <text class="name" x="85" y="240">상태 변경</text><text class="fn" x="85" y="264">setState</text></g>
+          <g id="k-board-tree"><rect x="200" y="204" width="150" height="84" rx="3"></rect>
+            <text class="name" x="275" y="240">새 설계도</text><text class="fn" x="275" y="264">FocusBoard()</text></g>
+          <g class="box-diff" id="k-diff"><rect x="400" y="112" width="150" height="84" rx="3"></rect>
+            <text class="name" x="475" y="148">비교</text><text class="fn" x="475" y="172">diff</text></g>
+          <g id="k-ops"><rect x="590" y="112" width="150" height="84" rx="3"></rect>
+            <text class="name" x="665" y="148">공사 지시서</text><text class="fn" x="665" y="172">Patch[]</text></g>
+          <g class="box-real" id="k-dom"><rect x="780" y="112" width="146" height="84" rx="3"></rect>
+            <text class="name" x="853" y="148">실제 DOM</text><text class="fn" x="853" y="172">applyPatches</text></g>
+
+          <path class="edge" id="k-e1" marker-end="url(#arrow-link)" d="M160 72 H198"></path>
+          <path class="edge" id="k-e2" marker-end="url(#arrow-link)" d="M160 246 H198"></path>
+          <path class="edge" id="k-e3" marker-end="url(#arrow-link)" d="M350 72 H372 V142 H398"></path>
+          <path class="edge" id="k-e4" marker-end="url(#arrow-link)" d="M350 246 H372 V166 H398"></path>
+          <path class="edge" id="k-e5" marker-end="url(#arrow-link)" d="M550 154 H588"></path>
+          <path class="edge" id="k-e6" marker-end="url(#arrow-link)" d="M740 154 H778"></path>
+
+          <circle class="dot dot-new" id="k-dot-lab" r="9" visibility="hidden"></circle>
+          <circle class="dot dot-old" id="k-dot-board" r="9" visibility="hidden"></circle>
+        </svg>
+      </div>
+      <p class="note">노란 점은 페이지 1, 초록 점은 페이지 2에서 만든 설계도입니다. 신호가 지나간 길은 점과 같은 색 선으로 남습니다.</p>
+    <ol class="flow-list" id="link-status"></ol>
+      <div class="compare-scroll">
+        <table class="compare">
+          <thead><tr><th scope="col"></th><th scope="col">페이지 1</th><th scope="col">페이지 2</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">시작</th><td>사람이 Patch를 누름</td><td>상태가 바뀌면 자동</td></tr>
+            <tr><th scope="row">새 설계도</th><td>테스트 영역의 HTML</td><td>컴포넌트 함수의 결과</td></tr>
+            <tr><th scope="row">비교</th><td colspan="2"><code>diff()</code> 같은 함수</td></tr>
+            <tr><th scope="row">반영</th><td colspan="2"><code>applyPatches()</code> 같은 함수</td></tr>
+            <tr><th scope="row">이전 설계도 보관</th><td>기록(History)</td><td><code>FunctionComponent</code>의 <code>vdom</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="link-trace-title">
+      <h3 class="section-title" id="link-trace-title">코드 실행 경로</h3>
+      <p class="note">두 페이지가 같은 함수로 만나는 줄입니다.</p>
+      <div class="trace" data-flows="link"></div>
+    </section>
+
+    <section aria-labelledby="ps-trace-title">
+      <h3 class="section-title" id="ps-trace-title">파워셀 폴더의 코드 실행 경로</h3>
+      <p class="note">mini-react ,powershell 폴더에만 있는 경로입니다. 줄 번호도 그 폴더 기준입니다.</p>
+      <div class="trace" data-flows="ps-start,ps-notify,ps-stop"></div>
+    </section>
+  </div>
+
+  <section class="report-sheet" id="report" aria-labelledby="report-title">
+    <header class="report-head">
+      <h2 id="report-title">mini-react 구현 보고서</h2>
+      <p class="note">바탕화면의 mini-react 폴더와 mini-react ,powershell 폴더의 코드를 기준으로 작성했습니다. 줄 번호는 mini-react 폴더 기준입니다.</p>
+      <ol class="report-toc" id="report-toc" aria-label="보고서 목차"></ol>
+    </header>
+
+    <div class="report-part">
+      <h3>1. 개요</h3>
+      <p>Virtual DOM, Diff, Patch와 함수형 컴포넌트, Hooks를 UI 프레임워크 없이 HTML, CSS, TypeScript로 직접 구현했습니다. Diff 실험실(페이지 1)에서 비교와 반영을 눈으로 확인하고, 집중 보드(페이지 2)에서 같은 코드가 상태 변경에 맞춰 자동으로 도는 것을 확인합니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>2. 과제 요구사항 대조</h3>
+      <p>과제의 필수 항목을 모두 구현했고, 선택 과제인 Batching도 포함했습니다.</p>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">요구사항</th><th scope="col">구현</th><th scope="col">위치</th></tr></thead>
+        <tbody>
+          <tr><td>DOM을 Virtual DOM으로 변환</td><td>domToVdom</td><td><code>phase1/dom-to-vdom.ts:40</code></td></tr>
+          <tr><td>두 Virtual DOM 비교</td><td>diff</td><td><code>phase1/diff.ts:11</code></td></tr>
+          <tr><td>로드하면 샘플을 트리로 바꾸고 테스트 영역 렌더링</td><td>createLabPage</td><td><code>app/lab-page.ts:335</code></td></tr>
+          <tr><td>Patch: 다시 읽기, 비교, 바뀐 곳만 반영, 기록 저장</td><td>createLabControls의 patch</td><td><code>app/controls.ts:43</code></td></tr>
+          <tr><td>뒤로가기, 앞으로가기로 두 영역 함께 이동</td><td>navigate</td><td><code>app/controls.ts:57</code></td></tr>
+          <tr><td>FunctionComponent, hooks 배열, mount, update</td><td>FunctionComponent 클래스</td><td><code>phase2/function-component.ts:100</code>, <code>phase2/function-component.ts:113</code></td></tr>
+          <tr><td>Hook은 최상위 컴포넌트에서만 사용</td><td>자식에서 부르면 오류</td><td><code>phase2/function-component.ts:52</code></td></tr>
+          <tr><td>자식은 props만 받는 순수 함수</td><td>자식 컴포넌트 8개</td><td><code>app/test-page.ts:225</code> 부터</td></tr>
+          <tr><td>useState, useEffect, useMemo</td><td>Hook 세 개</td><td><code>phase2/hooks/use-state.ts:12</code>, <code>phase2/hooks/use-effect.ts:19</code>, <code>phase2/hooks/use-memo.ts:13</code></td></tr>
+          <tr><td>상태가 바뀌면 화면 자동 갱신</td><td>scheduleUpdate</td><td><code>phase2/function-component.ts:168</code></td></tr>
+          <tr><td>다시 렌더링할 때 Phase 1 재사용</td><td>update 안의 diff, applyPatches</td><td><code>phase2/function-component.ts:120</code></td></tr>
+          <tr><td>입력과 클릭으로 바뀌는 테스트 페이지</td><td>집중 보드</td><td><code>app/test-page.ts:626</code></td></tr>
+          <tr><td>Vanilla, 외부 프레임워크 금지</td><td>런타임 의존성 없음</td><td><code>package.json</code></td></tr>
+          <tr><td>여러 상태 변경을 한 번에 처리(선택)</td><td>마이크로태스크로 렌더 예약</td><td><code>phase2/function-component.ts:171</code></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="report-part">
+      <h3>3. 두 폴더의 차이</h3>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">항목</th><th scope="col">mini-react</th><th scope="col">mini-react ,powershell</th></tr></thead>
+        <tbody>
+          <tr><td>여는 방법</td><td>mini-react.html 더블클릭</td><td>start-notify.bat 더블클릭, 전용 창으로 열림</td></tr>
+          <tr><td>시간 종료 표시</td><td>화면의 초과 시간 (+00:12)</td><td>초과 시간, Windows 알림, 아이콘 깜빡임 3번</td></tr>
+          <tr><td>끄기</td><td>브라우저 탭 닫기</td><td>검은 창에서 Ctrl+C, 전용 창이 같이 닫힘</td></tr>
+          <tr><td>사용 언어</td><td>HTML, CSS, JavaScript, TypeScript</td><td>왼쪽에 더해 PowerShell, 배치 파일</td></tr>
+          <tr><td>머리글의 mini-react</td><td>글자만</td><td>글자 앞에 보라 번개 아이콘</td></tr>
+          <tr><td>문서와 그림 파일</td><td>docs에 동작 지도 html만 있음</td><td>README, 학습 문서, 그림 파일 있음</td></tr>
+        </tbody>
+      </table></div>
+      <p>Diff 실험실과 집중 보드의 나머지 기능은 두 폴더가 같습니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>4. 코드 구조와 규모</h3>
+      <p>의존 방향은 app, phase2, phase1 순서로 한쪽입니다. phase1은 Hook을 모르고, phase2는 phase1을 가져다 쓰며, app은 두 페이지의 화면을 조립합니다.</p>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">영역</th><th scope="col">역할</th><th scope="col" class="num">mini-react</th><th scope="col" class="num">파워셀 폴더</th></tr></thead>
+        <tbody id="report-sizes"></tbody>
+      </table></div>
+    </div>
+
+    <div class="report-part">
+      <h3>5. 페이지 1: Diff 실험실의 실행 방향</h3>
+      <p>페이지를 열면 샘플을 실제 영역에 넣고 DOM을 읽어 첫 설계도를 만듭니다. Patch를 누르면 테스트 영역을 읽어 새 설계도를 만들고, 이전 설계도와 비교합니다. 달라진 곳만 연산으로 만들어 실제 DOM에 적용하고 새 버전을 저장합니다. 뒤로가기는 기록 위치를 옮긴 뒤 같은 비교와 반영을 거칩니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>6. 페이지 2: 집중 보드의 실행 방향</h3>
+      <p>상태 함수가 값을 바꾸면 렌더를 한 번 예약하고, 지금 작업이 끝난 직후 컴포넌트 함수를 다시 실행합니다. 새 설계도를 이전 설계도와 비교해 바뀐 곳만 반영한 뒤 effect를 실행합니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>7. 두 페이지의 연동과 부분 업데이트</h3>
+      <p>페이지 1은 사람이 Patch를 눌러서, 페이지 2는 상태가 바뀌어서 시작합니다. 새 설계도를 만드는 입구만 다르고, 뒤쪽의 diff와 applyPatches는 같은 함수입니다. 렌더 기록의 노드 지도도 두 페이지가 같은 recordTouch로 기록합니다.</p>
+      <p>과제의 목표인 "필요한 부분만 업데이트"를 실제 앱에서 쟀습니다. mini-react.html을 Edge로 열고 MutationObserver로 DOM 변경 기록을 센 값입니다.</p>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">동작</th><th scope="col" class="num">전체 노드</th><th scope="col" class="num">DOM 변경 기록</th></tr></thead>
+        <tbody>
+          <tr><td>페이지 1: 제목에 글자 하나를 붙이고 Patch</td><td class="num">21</td><td class="num">1</td></tr>
+          <tr><td>페이지 2: 새 할 일 칸에 입력</td><td class="num">158</td><td class="num">2</td></tr>
+          <tr><td>페이지 2: 할 일 추가</td><td class="num">158에서 175로</td><td class="num">6</td></tr>
+          <tr><td>페이지 2: 집중하기 누르기</td><td class="num">175</td><td class="num">4</td></tr>
+          <tr><td>페이지 2: 타이머 1초 지남</td><td class="num">175</td><td class="num">1</td></tr>
+          <tr><td>페이지 2: 검색어 입력</td><td class="num">175에서 107로</td><td class="num">5</td></tr>
+        </tbody>
+      </table></div>
+      <p>할 일을 추가할 때 새 줄의 노드 17개는 기록 1개로 들어갑니다. 입력 중에도 입력칸의 포커스가 유지됐고, 할 일을 추가한 뒤에도 기존 줄의 DOM 노드는 그대로였습니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>8. 주요 로직</h3>
+      <ul>
+        <li><b>주소:</b> 연산은 자식 번호의 배열로 위치를 가리킵니다. 그래서 설계도가 실제 DOM과 1:1로 맞아야 하고, 처음에 들여쓰기 공백을 뺀 DOM을 다시 만듭니다.</li>
+        <li><b>Hook 규칙:</b> 커서로 칸을 찾기 때문에 호출 순서가 바뀌면 안 됩니다. 순서나 개수가 어긋나거나 자식 컴포넌트에서 Hook을 부르면 오류를 냅니다.</li>
+        <li><b>effect:</b> 렌더 중에는 예약만 하고 화면 반영이 끝난 뒤 실행합니다. 이전 정리 함수를 먼저 돌려서 타이머가 겹치지 않습니다.</li>
+        <li><b>검색 렌더 규칙:</b> 검색 결과가 1개가 되면 글자를 더 쳐도 상태로 올리지 않아서 렌더가 없습니다. 지워서 2개 이상이 되면 다시 렌더합니다. 맞는 일이 없어지거나 다른 일로 바뀌면 화면이 달라지므로 렌더합니다.</li>
+        <li><b>실제 영역:</b> 내용 길이를 막지 않습니다. 높이는 고정이라 길면 영역 안에서 스크롤하고, 참가 신청은 밀리지 않습니다.</li>
+      </ul>
+    </div>
+
+    <div class="report-part">
+      <h3>9. 브라우저와 DOM</h3>
+      <h4>Document와 Window</h4>
+      <p><code>document</code>는 페이지의 노드 트리로 들어가는 입구입니다. <code>window</code>는 탭 하나를 나타내는 전역 객체로, 주소, 저장소, 미디어 쿼리처럼 문서 바깥의 기능을 가집니다. 이 프로젝트는 아래처럼 씁니다.</p>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">하는 일</th><th scope="col">브라우저 API</th><th scope="col">위치</th></tr></thead>
+        <tbody>
+          <tr><td>노드 만들기</td><td>document.createElementNS, createTextNode</td><td><code>phase1/patch.ts:100</code></td></tr>
+          <tr><td>HTML 글자를 노드로 읽기</td><td>template 요소</td><td><code>phase1/dom-to-vdom.ts:81</code></td></tr>
+          <tr><td>모든 노드 훑기</td><td>document.createTreeWalker</td><td><code>app/inspector.ts:106</code></td></tr>
+          <tr><td>페이지 전환</td><td>window.location.hash, hashchange</td><td><code>app/app.ts:15</code></td></tr>
+          <tr><td>다크 모드 기본값</td><td>window.matchMedia</td><td><code>app/theme.ts:26</code></td></tr>
+          <tr><td>할 일 저장</td><td>window.localStorage</td><td><code>app/test-page.ts:135</code></td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>DOM 변화를 감지하는 API</h4>
+      <p><code>MutationObserver</code>는 자식 추가와 삭제, 속성, 글자 변경을 지켜봅니다. 변경마다 바로 불리지 않고 기록을 모아 마이크로태스크로 전달합니다. 이 프로젝트는 <code>app/inspector.ts:29</code>에서 기록을 꺼내 화면의 "실제 DOM 변경" 숫자로 보여 줍니다. 코드가 낸 연산 수와 브라우저가 본 변경 수를 나란히 놓아서 비교할 수 있습니다. 입력칸의 글자 변경은 <code>input</code> 이벤트로 받습니다.</p>
+
+      <h4>실제 DOM이 느린 이유: Reflow와 Repaint</h4>
+      <p>브라우저는 스타일 계산, 레이아웃, 그리기 순서로 화면을 만듭니다. <b>Reflow</b>는 크기와 위치를 다시 계산하는 일입니다. 노드 추가나 너비 변경이 일으키고, 부모와 형제로 번질 수 있습니다. <b>Repaint</b>는 위치는 그대로 두고 색처럼 픽셀만 다시 칠하는 일입니다.</p>
+      <p>느려지는 이유는 변경 한 번이 아니라 뒤따르는 계산입니다. 브라우저는 변경을 모아서 한 번에 계산하려 하지만, 변경 직후 <code>offsetHeight</code> 같은 값을 읽으면 그 자리에서 Reflow를 해야 합니다. 1,000줄 목록으로 잰 값입니다.</p>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">작업</th><th scope="col" class="num">걸린 시간</th></tr></thead>
+        <tbody>
+          <tr><td>1,000줄 전체 다시 만들기</td><td class="num">5.4ms</td></tr>
+          <tr><td>한 줄의 글자만 바꾸기</td><td class="num">0.2ms</td></tr>
+          <tr><td>높이를 쓰고 바로 읽기를 1,000번 반복</td><td class="num">213.3ms</td></tr>
+          <tr><td>높이를 1,000번 쓴 뒤 한 번만 읽기</td><td class="num">2.4ms</td></tr>
+        </tbody>
+      </table></div>
+      <p class="note">이 PC의 Edge 157 headless에서 잰 중앙값입니다. 앞의 두 줄은 30회, 뒤의 두 줄은 15회 실행했습니다. 레이아웃 계산까지 포함하고 화면에 칠하는 시간은 포함하지 않습니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>10. Virtual DOM과 Diff</h3>
+      <h4>구조</h4>
+      <p>Virtual DOM은 화면을 설명하는 일반 JavaScript 객체입니다. 요소와 글자 두 종류뿐입니다(<code>phase1/types.ts:10</code>).</p>
+      <pre><code>{ kind: 'element', tag: 'li', props: { class: 'done' }, key: 'a',
+  children: [{ kind: 'text', text: '보고서 쓰기' }] }</code></pre>
+
+      <h4>필요한 이유</h4>
+      <p>화면을 상태로 전부 다시 설명하되, 브라우저 작업은 작게 유지하기 위해서입니다. 객체끼리 비교는 Reflow를 일으키지 않으므로, 바뀐 곳을 먼저 계산한 뒤 그만큼만 실제 DOM을 고칩니다. 개발자가 어디를 고칠지 직접 추적하지 않아도 됩니다.</p>
+      <p>다만 Virtual DOM이 항상 더 빠른 것은 아닙니다. 고칠 곳을 정확히 안다면 DOM을 직접 고치는 쪽이 비교 비용만큼 더 빠릅니다.</p>
+
+      <h4>Diff 동작 방식</h4>
+      <p>두 트리를 위에서 아래로 내려가며 묻습니다. 같은 객체인지 먼저 보고, 글자 노드 비교, 종류와 태그와 key 비교, 속성 비교, 자식 비교 순서로 진행합니다. 결과는 바로 고치지 않고 연산 목록으로 돌려줍니다. 그래서 브라우저 없이 테스트할 수 있고, 화면에 연산 목록을 보여 줄 수 있습니다.</p>
+
+      <h4>최소 변경을 찾기 위한 5가지 케이스와 실제 DOM 반영</h4>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">케이스</th><th scope="col">언제</th><th scope="col">연산</th><th scope="col">실제 DOM 반영</th></tr></thead>
+        <tbody>
+          <tr><td>추가</td><td>새 자식이 생김</td><td>INSERT</td><td>createDom 뒤 insertBefore</td></tr>
+          <tr><td>삭제</td><td>자식이 사라짐</td><td>REMOVE</td><td>remove</td></tr>
+          <tr><td>교체</td><td>태그나 key가 다름, 글자와 요소가 바뀜</td><td>REPLACE</td><td>createDom 뒤 replaceWith</td></tr>
+          <tr><td>속성 변경</td><td>태그는 같고 속성이 다름</td><td>PROPS</td><td>setAttribute, removeAttribute, value와 checked 프로퍼티</td></tr>
+          <tr><td>글자 변경</td><td>글자 내용이 다름</td><td>TEXT</td><td>nodeValue</td></tr>
+        </tbody>
+      </table></div>
+      <p>여기에 두 가지를 더했습니다. <b>MOVE</b>는 key가 같은 노드를 새로 만들지 않고 옮깁니다. 입력값과 포커스가 유지되는 이유입니다. <code>phase1/diff.ts:120</code>로 움직이지 않을 노드를 골라 이동 횟수를 줄입니다. <b>LISTENERS</b>는 이벤트 함수만 바꾸고 DOM은 건드리지 않습니다.</p>
+      <p>applyPatches(<code>phase1/patch.ts:128</code>)는 연산을 순서대로 실행합니다. 경로를 따라 노드를 찾고, 위 표의 DOM API를 부릅니다. 노드 내부를 고치는 연산이 먼저, 자식 목록을 바꾸는 연산이 나중에 나오므로 옛 트리의 번호가 끝까지 유효합니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>11. 실제 React가 DOM을 바꾸는 과정</h3>
+      <ul>
+        <li><b>Render 단계:</b> 컴포넌트 함수를 실행해 새 React 요소를 만들고, 이전 Fiber 트리와 비교해 바뀔 일을 표시합니다. DOM을 건드리지 않아서 중단했다가 다시 할 수 있습니다.</li>
+        <li><b>Commit 단계:</b> 표시된 변경을 실제 DOM에 한 번에 반영합니다. 중단되지 않습니다. 이어서 useLayoutEffect가 돌고, useEffect는 보통 화면을 그린 뒤 실행됩니다.</li>
+        <li><b>비교 규칙:</b> 타입이 다르면 그 아래를 통째로 교체하고, 같으면 속성만 고치며, 목록은 key로 짝을 찾습니다. 이 구현의 REPLACE, PROPS, key 짝 찾기가 같은 규칙입니다.</li>
+      </ul>
+      <p>이 구현의 render와 diff는 Render 단계에, applyPatches는 Commit 단계에 해당합니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>12. Component와 State</h3>
+      <h4>함수는 매번 새로 실행되는데, 상태는 어떻게 유지할까?</h4>
+      <p>함수의 지역 변수는 실행이 끝나면 사라집니다. 그래서 값은 함수 밖, FunctionComponent 객체의 hooks 배열에 둡니다. 렌더를 시작할 때 커서를 0으로 돌리고, Hook이 불릴 때마다 커서 위치의 칸을 내준 뒤 한 칸 옮깁니다(<code>phase2/function-component.ts:142</code>). 호출 순서가 같으면 같은 칸을 다시 받으므로 값이 유지됩니다.</p>
+      <pre><code>첫 렌더    useState('') → 0번 칸 생성     useState(0) → 1번 칸 생성
+다시 렌더  useState('') → 0번 칸 재사용   useState(0) → 1번 칸 재사용</code></pre>
+
+      <h4>UI를 Component로 나눈 기준</h4>
+      <p>화면에서 맡은 역할과 반복되는 단위로 나눴습니다. 여러 번 나오는 한 줄은 TaskRow로, 그 안에서 모드가 바뀌는 입력칸은 TitleEditor로 더 나눴습니다.</p>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">컴포넌트</th><th scope="col">맡은 일</th><th scope="col">위치</th></tr></thead>
+        <tbody>
+          <tr><td>FocusBoard</td><td>루트. 상태와 Hook을 모두 가짐</td><td><code>app/test-page.ts:626</code></td></tr>
+          <tr><td>Progress</td><td>진행 상황과 집중한 시간</td><td><code>app/test-page.ts:225</code></td></tr>
+          <tr><td>FocusTimer</td><td>타이머와 시간 추가</td><td><code>app/test-page.ts:265</code></td></tr>
+          <tr><td>Composer</td><td>새 할 일 입력</td><td><code>app/test-page.ts:320</code></td></tr>
+          <tr><td>Toolbar</td><td>보기, 검색, 정렬</td><td><code>app/test-page.ts:384</code></td></tr>
+          <tr><td>TaskList</td><td>목록과 빈 화면 안내</td><td><code>app/test-page.ts:556</code></td></tr>
+          <tr><td>TaskRow</td><td>할 일 한 줄</td><td><code>app/test-page.ts:485</code></td></tr>
+          <tr><td>TitleEditor</td><td>이름 수정 입력칸</td><td><code>app/test-page.ts:462</code></td></tr>
+          <tr><td>TrashBox</td><td>지운 일 기록과 복원</td><td><code>app/test-page.ts:592</code></td></tr>
+        </tbody>
+      </table></div>
+
+      <h4>State를 두는 곳</h4>
+      <p>과제 제약대로 모두 루트에 둡니다. FocusBoard에는 useState 14칸, useMemo 2칸, useEffect 6칸이 있습니다. 자식은 props로 값을 받고, 사용자 행동은 on으로 시작하는 함수로 올려 보냅니다(Lifting State Up). 여러 자식이 같은 값을 써도 어긋나지 않는 것이 장점입니다.</p>
+      <p>다른 값으로 계산할 수 있는 값은 상태로 두지 않습니다. 화면에 보이는 목록과 통계는 tasks에서 useMemo로 계산합니다. 대신 작은 변경에도 루트 함수 전체가 다시 돕니다. 타이머 1초마다 FocusBoard가 실행되지만, 7번 항목의 값처럼 DOM 변경은 1건입니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>13. setState와 Batching</h3>
+      <h4>setState가 상태 변경 외에 하는 일</h4>
+      <p>값만 바꾸면 화면은 그대로입니다. setState는 네 가지를 합니다(<code>phase2/hooks/use-state.ts:22</code>).</p>
+      <ol>
+        <li>새 값을 계산합니다. 함수를 받으면 이전 값으로 실행합니다.</li>
+        <li><code>Object.is</code>로 비교해 같으면 멈춥니다.</li>
+        <li>칸의 값을 바꿉니다.</li>
+        <li>다시 그리기를 예약합니다.</li>
+      </ol>
+      <p>setState 함수는 칸이 만들어질 때 한 번만 생기므로, 렌더가 반복돼도 같은 함수이고 언제 불러도 자기 칸을 찾아갑니다.</p>
+
+      <h4>여러 상태 변경을 한 번에 처리하는 방법</h4>
+      <p>예약 표시가 이미 켜져 있으면 다시 예약하지 않습니다. 첫 setState만 <code>queueMicrotask</code>로 렌더를 예약하고, 나머지는 칸의 값만 바꿉니다. 이벤트 처리가 끝난 직후 렌더가 한 번 돕니다.</p>
+      <p><code>setTimeout(0)</code>은 쓰지 않았습니다. 브라우저가 그 사이에 화면을 먼저 그려서 상태가 반만 바뀐 화면이 보일 수 있기 때문입니다. 마이크로태스크는 그리기 전에 실행됩니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>14. 이 구현과 실제 React의 차이</h3>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">항목</th><th scope="col">mini-react</th><th scope="col">실제 React</th></tr></thead>
+        <tbody>
+          <tr><td>렌더</td><td>재귀로 한 번에 끝냄</td><td>Fiber로 쪼개고 중단, 재개 가능</td></tr>
+          <tr><td>우선순위</td><td>없음</td><td>업데이트마다 우선순위가 다름</td></tr>
+          <tr><td>Hook 저장</td><td>배열과 커서</td><td>Fiber에 달린 연결 리스트</td></tr>
+          <tr><td>상태 위치</td><td>루트만</td><td>모든 컴포넌트</td></tr>
+          <tr><td>자식 컴포넌트</td><td>h()에서 바로 펼침</td><td>Fiber 노드로 따로 관리</td></tr>
+          <tr><td>상태 변경</td><td>호출 즉시 칸에 반영</td><td>큐에 쌓고 렌더할 때 계산</td></tr>
+          <tr><td>이벤트</td><td>요소마다 리스너와 표</td><td>루트에서 위임, SyntheticEvent</td></tr>
+          <tr><td>useEffect 시점</td><td>DOM 반영 직후 동기 실행</td><td>보통 화면을 그린 뒤 실행</td></tr>
+          <tr><td>목록 이동</td><td>LIS</td><td>lastPlacedIndex</td></tr>
+          <tr><td>반환값</td><td>노드 하나 또는 null</td><td>배열, Fragment, Portal 등</td></tr>
+          <tr><td>제어 컴포넌트</td><td>상태가 안 바뀌면 입력값을 되돌리지 않음</td><td>상태 값으로 되돌림</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="report-part">
+      <h3>15. 테스트 구성</h3>
+      <p>mini-react 폴더 기준 347개입니다. 마지막 전체 실행은 345개였고, 그 뒤 테스트를 고치면서 관련 파일만 돌려 통과했습니다. 아래는 코드에 적힌 테스트 선언 수입니다. 한 선언이 여러 번 도는 <code>it.each</code>가 있어서 합계 317개는 실행 개수보다 작습니다. 프레임워크 없이 Node 내장 <code>node:test</code>와 jsdom으로 돌립니다.</p>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">종류</th><th scope="col">대상</th><th scope="col">파일</th><th scope="col" class="num">선언 수</th></tr></thead>
+        <tbody>
+          <tr><td>단위</td><td>Virtual DOM 변환</td><td><code>phase1/dom-to-vdom.test.ts</code></td><td class="num">18</td></tr>
+          <tr><td>단위</td><td>설계도를 코드로 되돌리기</td><td><code>phase1/vdom-to-html.test.ts</code></td><td class="num">7</td></tr>
+          <tr><td>단위</td><td>Diff</td><td><code>phase1/diff.test.ts</code></td><td class="num">31</td></tr>
+          <tr><td>단위</td><td>Patch</td><td><code>phase1/patch.test.ts</code></td><td class="num">27</td></tr>
+          <tr><td>단위</td><td>State History</td><td><code>phase1/history.test.ts</code></td><td class="num">8</td></tr>
+          <tr><td>단위</td><td>h</td><td><code>phase2/h.test.ts</code></td><td class="num">19</td></tr>
+          <tr><td>단위</td><td>FunctionComponent</td><td><code>phase2/function-component.test.ts</code></td><td class="num">28</td></tr>
+          <tr><td>단위</td><td>useState</td><td><code>phase2/hooks/use-state.test.ts</code></td><td class="num">11</td></tr>
+          <tr><td>단위</td><td>useEffect</td><td><code>phase2/hooks/use-effect.test.ts</code></td><td class="num">15</td></tr>
+          <tr><td>단위</td><td>useMemo</td><td><code>phase2/hooks/use-memo.test.ts</code></td><td class="num">7</td></tr>
+          <tr><td>기능</td><td>Patch와 기록 이동</td><td><code>app/controls.test.ts</code></td><td class="num">8</td></tr>
+          <tr><td>기능</td><td>Diff 실험실 화면</td><td><code>app/lab-page.test.ts</code></td><td class="num">31</td></tr>
+          <tr><td>기능</td><td>집중 보드 화면</td><td><code>app/test-page.test.ts</code></td><td class="num">97</td></tr>
+          <tr><td>기능</td><td>앱 시작과 테마</td><td><code>app/app.test.ts</code></td><td class="num">7</td></tr>
+          <tr><td>기능</td><td>렌더 기록</td><td><code>app/inspector.test.ts</code></td><td class="num">3</td></tr>
+        </tbody>
+      </table></div>
+      <p>시드를 고정한 무작위 트리로도 대조합니다. 고유 key 1,000쌍과 중복 key 500쌍을 패치한 결과가 새로 만든 DOM과 같은지 확인합니다. 화면 배치는 jsdom에서 잴 수 없어서 실제 브라우저로 확인했습니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>16. 고려한 엣지 케이스</h3>
+      <div class="report-table-wrap"><table class="report-table">
+        <thead><tr><th scope="col">영역</th><th scope="col">상황</th></tr></thead>
+        <tbody>
+          <tr><td>입력 방어</td><td>script 태그, on으로 시작하는 속성, 대소문자와 제어 문자가 섞인 javascript: 주소, setAttribute가 거부할 속성 이름</td></tr>
+          <tr><td>HTML 구조</td><td>최상위 노드 여러 개, 빈 내용, tr처럼 문맥이 필요한 태그, 닫히지 않은 태그, 표와 SVG와 폼 요소 혼합, 줄이 꺾이지 않는 MathML 수식</td></tr>
+          <tr><td>Diff</td><td>중복 key, 자식 전부 삭제, constructor 같은 속성 이름, 루트 태그 교체</td></tr>
+          <tr><td>Patch</td><td>사용자가 입력한 뒤의 value, checked, 같은 값일 때 커서 유지, SVG 네임스페이스, foreignObject 안쪽</td></tr>
+          <tr><td>Hook</td><td>컴포넌트 밖 호출, 자식과 손자에서 호출, 순서 변경, 개수 증감, 렌더 중 상태 변경</td></tr>
+          <tr><td>렌더 안정성</td><td>effect가 상태를 계속 바꾸는 무한 렌더(한 틱에 50회까지), 렌더 실패 뒤 복구, 내린 뒤 상태 변경, 예약된 렌더 취소</td></tr>
+          <tr><td>입력 한도</td><td>할 일 20개, 계획 3분에서 90분, 집중 6시간, 지운 일 5칸, 기록 숫자 999+</td></tr>
+          <tr><td>긴 입력</td><td>100자가 넘는 제목, 긴 검색어, 줄 수가 많은 실제 영역</td></tr>
+          <tr><td>검색</td><td>결과 1개에서 더 입력, 맞는 일이 없어짐, 다른 일로 바뀜, 검색어를 다 지움</td></tr>
+          <tr><td>실험실 한도</td><td>버전 30개</td></tr>
+          <tr><td>저장</td><td>저장이 막혔을 때, 저장값이 깨졌을 때, 분 단위로 저장하던 옛 기록, 계획 시간이 없던 옛 기록</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="report-part">
+      <h3>17. 다른 구현과 다른 점</h3>
+      <ul>
+        <li><b>LIS 기반 이동:</b> 가장 긴 증가 부분 수열로 움직이지 않을 노드를 골라 이동을 줄입니다.</li>
+        <li><b>브라우저 교차 검증:</b> 연산 수와 MutationObserver가 본 변경 수를 나란히 보여 줍니다.</li>
+        <li><b>노드 지도:</b> 실제 DOM 노드마다 칸을 그려, 전체 중 어디가 바뀌었는지 보여 줍니다.</li>
+        <li><b>렌더 줄이기:</b> 검색 결과가 1개면 글자를 더 쳐도 렌더하지 않습니다.</li>
+        <li><b>규칙 강제:</b> 자식의 Hook 호출, 순서 변경, 무한 렌더를 조용히 넘기지 않고 알립니다.</li>
+        <li><b>무작위 대조 테스트:</b> 패치 결과를 새로 만든 DOM과 1,500쌍으로 비교합니다.</li>
+        <li><b>화면 기능:</b> 화면에서 바로 고치기, 지운 일 복원, 초과 시간 기록, 다크 모드가 있습니다.</li>
+        <li><b>설치 없는 실행:</b> 파일 하나를 더블클릭하면 서버 없이 열립니다.</li>
+      </ul>
+    </div>
+
+    <div class="report-part">
+      <h3>18. 파워셀 폴더의 추가 경로</h3>
+      <p>웹페이지는 Windows 기능을 직접 부를 수 없어서 notify-helper.ps1이 다리 역할을 합니다. 시간이 끝나면 페이지가 이 PC 안으로 요청을 보내고, 프로그램이 보낸 곳을 확인한 뒤 Windows 알림과 아이콘 깜빡임을 실행합니다. 페이지는 Chrome의 앱 모드 전용 창으로 열어서, 끌 때 다른 탭을 건드리지 않고 그 창만 닫습니다.</p>
+    </div>
+
+    <div class="report-part">
+      <h3>19. 일부러 뺀 것과 한계</h3>
+      <ul>
+        <li>Fiber, 우선순위 스케줄링, 이벤트 위임, Fragment는 구현하지 않았습니다.</li>
+        <li>상태가 루트에만 있어서 작은 변경에도 루트 함수 전체가 다시 실행됩니다.</li>
+        <li>실험실의 입력 방어는 script, on 속성, javascript: 주소를 막는 최소 수준입니다. 실제 서비스라면 검증된 sanitizer를 써야 합니다.</li>
+        <li>할 일은 이 브라우저의 localStorage에만 저장되어 다른 기기와 공유되지 않습니다.</li>
+      </ul>
+    </div>
+
+    <div class="report-part">
+      <h3>20. 사용 기술과 검증</h3>
+      <ul>
+        <li><b>앱 코드:</b> TypeScript, CSS, HTML. UI 프레임워크와 런타임 라이브러리는 없습니다.</li>
+        <li><b>개발 도구:</b> TypeScript, Vite(빌드), jsdom(테스트용 가짜 브라우저). 테스트 프레임워크 Vitest는 빼고 Node 내장 node:test로 옮겼습니다.</li>
+        <li><b>테스트:</b> mini-react 347개, 파워셀 폴더 350개입니다. 마지막 전체 실행은 345개, 348개가 통과했고, 그 뒤 테스트를 고치면서 관련 파일만 돌려 통과했습니다.</li>
+        <li><b>브라우저 확인:</b> 두 페이지의 주요 동작을 Edge에서, 파워셀 폴더의 요청 흐름을 Edge와 Chrome에서 확인했습니다. 전용 창과 Ctrl+C 종료는 실제로 사용해 확인했습니다.</li>
+        <li><b>확인하지 못한 것:</b> 파워셀 폴더에서 검은 창의 X 버튼으로 끄는 동작, 전용 창의 아이콘 깜빡임, Firefox에서의 동작, 실제 한글 입력기로 제목을 고치는 동작은 직접 확인하지 못했습니다.</li>
+      </ul>
+    </div>
+
+  </section>
+</main>
+
+<script id="trace-data" type="application/json">{"flows":[{"id":"lab-open","page":"lab","title":"페이지 열기","summary":"샘플 HTML을 실제 영역에 넣고, DOM을 읽어 첫 설계도를 만든 뒤 기록의 v1로 저장합니다.","steps":[{"folder":"mini-react","file":"src/main.ts","line":7,"start":4,"fn":"startApp","text":"`#app`을 찾아 앱을 시작합니다.","code":["const root = document.querySelector('#app')","if (!root) throw new Error('#app 요소를 찾지 못했습니다.')","","startApp(root)"]},{"folder":"mini-react","file":"src/app/app.ts","line":21,"start":20,"fn":"createLabPage","text":"두 페이지를 미리 만들고 주소의 # 값에 따라 하나만 보여 줍니다.","code":["  const pages: Record\u003cPageId, HTMLElement> = {","    lab: createLabPage(),","    board: createTestPage(),","  }","","  const header = createDom("]},{"folder":"mini-react","file":"src/app/lab-page.ts","line":331,"start":330,"fn":"샘플 넣기","text":"실제 영역에 샘플 HTML을 넣습니다. 브라우저가 DOM으로 바꿔 줍니다.","code":["  // 1) 실제 영역의 샘플 HTML을 Virtual DOM 트리로 바꿉니다.","  real.innerHTML = SAMPLE_HTML","  const initial = rootNode(childrenToVdom(real))","","  // 2) 들여쓰기 공백은 트리에서 빠졌으므로, 경로 번호가 맞도록 DOM을 트리 그대로 다시 만듭니다.","  real.replaceChildren(...initial.children.map((child) => createDom(child)))",""]},{"folder":"mini-react","file":"src/phase1/dom-to-vdom.ts","line":50,"start":49,"fn":"childrenToVdom","text":"실제 DOM 노드를 돌면서 객체 트리로 바꿉니다. 이것이 첫 설계도입니다.","code":[" */","export function childrenToVdom(parent: Node, keepWhitespace = false): VNode[] {","  const children: VNode[] = []","","  parent.childNodes.forEach((childNode) => {","    const child = domToVdom(childNode, keepWhitespace)","    if (!child) return","    if (child.kind === 'element') {","      children.push(child)","      return"]},{"folder":"mini-react","file":"src/app/lab-page.ts","line":338,"start":337,"fn":"testArea.write","text":"같은 설계도로 테스트 영역의 코드 칸과 화면 칸을 채웁니다.","code":["  // 3) 방금 만든 Virtual DOM으로 테스트 영역을 그립니다.","  testArea.write(initial)","","  const mutations = createMutationCounter(real)","  const touched: TouchedNodes = new Map()",""]},{"folder":"mini-react","file":"src/app/lab-page.ts","line":394,"start":393,"fn":"createLabControls","text":"Patch와 기록 이동 규칙을 만듭니다. 화면 함수는 인자로 넘겨서 규칙과 화면을 나눕니다.","code":["  const activeTestArea = testArea","  const active = createLabControls({","    realRoot: real,","    initial,","    readTestArea: activeTestArea.read,","    writeTestArea: activeTestArea.write,","    onApply: (patch, node) => recordTouch(touched, patch, node),","    onTransition: (transition) => renderReport(active, transition),","  })","  controls = active","  renderReport(active, null)"]},{"folder":"mini-react","file":"src/app/controls.ts","line":41,"start":39,"fn":"VdomHistory","text":"첫 설계도를 v1로 저장합니다. 다음 Patch의 비교 기준입니다.","code":["export function createLabControls(options: LabControlsOptions): LabControls {","  const { realRoot, readTestArea, writeTestArea, onApply, onTransition } = options","  const history = new VdomHistory\u003cVNode>(options.initial, MAX_VERSIONS)","","  function patch(): void {"]}]},{"id":"lab-patch","page":"lab","title":"Patch 누르기","summary":"테스트 영역을 읽어 새 설계도를 만들고, 이전 설계도와 비교해 달라진 곳만 고칩니다.","steps":[{"folder":"mini-react","file":"src/app/lab-page.ts","line":292,"start":291,"fn":"onPatch","text":"Patch 버튼의 클릭이 규칙 함수로 넘어갑니다.","code":["  const page = renderLayout({","    onPatch: () => controls?.patch(),","    onBack: () => controls?.back(),","    onForward: () => controls?.forward(),"]},{"folder":"mini-react","file":"src/app/controls.ts","line":43,"start":43,"fn":"patch","text":"Patch의 전체 순서가 이 함수 하나에 있습니다.","code":["  function patch(): void {","    const next = readTestArea()","","    const patches = diff(history.current, next)","","    // 아무것도 안 바뀌었으면 기록을 늘리지 않습니다. 뒤로가기가 헛돌지 않게 하기 위해서입니다.","    if (patches.length > 0) {","      applyPatches(realRoot, patches, onApply)","      history.push(next)","    }","    onTransition({ action: 'patch', patches, vdom: history.current })","  }","","  /** 기록 이동도 전체를 다시 그리지 않고 같은 Diff와 Patch를 거칩니다. */","  function navigate(action: LabAction, move: () => VNode | null): void {","    const previous = history.current"]},{"folder":"mini-react","file":"src/app/lab-page.ts","line":253,"start":252,"fn":"read","text":"코드 칸이면 HTML 글자를, 화면 칸이면 DOM을 읽어 새 설계도를 만듭니다.","code":["  function read(): VNode {","    return rootNode(mode === 'code' ? htmlToVdom(code.value) : childrenToVdom(visual))","  }"]},{"folder":"mini-react","file":"src/phase1/dom-to-vdom.ts","line":80,"start":79,"fn":"htmlToVdom","text":"`template`에 넣어 파싱합니다. 스크립트가 실행되지 않는 안전한 방식입니다.","code":[" */","export function htmlToVdom(html: string): VNode[] {","  const template = document.createElement('template')","  template.innerHTML = html","  return childrenToVdom(template.content)","}",""]},{"folder":"mini-react","file":"src/phase1/diff.ts","line":17,"start":17,"fn":"diffNode","text":"두 노드를 비교합니다. 글자, 교체, 속성, 자식 순서로 묻습니다.","code":["function diffNode(oldNode: VNode, newNode: VNode, path: Path, patches: Patch[]): void {","  // 같은 객체면 아래 전부가 같습니다. useMemo로 재사용한 트리는 여기서 바로 끝납니다.","  if (oldNode === newNode) return","","  if (oldNode.kind === 'text' && newNode.kind === 'text') {","    if (oldNode.text !== newNode.text) patches.push({ type: 'TEXT', path, text: newNode.text })","    return","  }","","  if (","    oldNode.kind === 'text' ||","    newNode.kind === 'text' ||","    oldNode.tag !== newNode.tag ||","    oldNode.key !== newNode.key","  ) {","    patches.push({ type: 'REPLACE', path, node: newNode })","    return","  }","","  diffProps(oldNode.props, newNode.props, path, patches)","  diffChildren(oldNode.children, newNode.children, path, patches)","}"]},{"folder":"mini-react","file":"src/phase1/diff.ts","line":40,"start":40,"fn":"diffProps","text":"속성 표를 비교해 달라진 속성만 `PROPS`에 담습니다.","code":["function diffProps(oldProps: Props, newProps: Props, path: Path, patches: Patch[]): void {","  const set: Props = {}","  const remove: string[] = []","  const setListeners: Record\u003cstring, EventHandler> = {}","  const removeListeners: string[] = []","","  for (const [name, value] of Object.entries(newProps)) {","    const oldValue = oldProps[name]","    if (Object.is(oldValue, value)) continue"]},{"folder":"mini-react","file":"src/phase1/diff.ts","line":145,"start":145,"fn":"diffChildren","text":"자식을 짝지어 비교하고 `INSERT`, `REMOVE`, `MOVE`를 만듭니다.","code":["function diffChildren(","  oldChildren: readonly VNode[],","  newChildren: readonly VNode[],","  path: Path,","  patches: Patch[],","): void {","  const sources = matchChildren(oldChildren, newChildren)","","  // 1단계: 짝끼리 내부를 비교합니다. 아직 자식 순서를 안 바꿨으므로 옛 번호가 유효합니다.","  sources.forEach((oldIndex, newIndex) => {","    if (oldIndex === NO_MATCH) return","    diffNode(oldChildren[oldIndex], newChildren[newIndex], [...path, oldIndex], patches)","  })"]},{"folder":"mini-react","file":"src/phase1/patch.ts","line":128,"start":128,"fn":"applyPatches","text":"연산을 차례로 실제 DOM에 적용합니다. 주소를 따라가 그 노드만 고칩니다.","code":["export function applyPatches(root: Node, patches: readonly Patch[], onApply?: PatchObserver): Node {","  let currentRoot = root","","  for (const patch of patches) {","    const target = resolve(currentRoot, patch.path)","    let touched: Node = target","","    switch (patch.type) {","      case 'TEXT':","        target.nodeValue = patch.text","        break","","      case 'PROPS':"]},{"folder":"mini-react","file":"src/phase1/history.ts","line":39,"start":39,"fn":"history.push","text":"새 설계도를 다음 버전으로 저장합니다. 앞으로가기 기록은 잘립니다.","code":["  push(entry: T): void {","    this.entries = this.entries.slice(0, this.cursor + 1)","    this.entries.push(entry)","    if (this.entries.length > this.limit) this.entries.shift()","    this.cursor = this.entries.length - 1","  }","","  back(): T | null {"]},{"folder":"mini-react","file":"src/app/lab-page.ts","line":374,"start":374,"fn":"renderReport","text":"노드 지도, 연산 목록, 숫자를 그립니다.","code":["  function renderReport(active: LabControls, transition: LabTransition | null): void {","    const patches = transition?.patches ?? []","    const { total } = renderNodeMap(required(page, '[data-role=\"map\"]'), real, touched)","    touched.clear()","","    required(page, '[data-role=\"patch-count\"]').textContent = String(domPatches(patches).length)","    required(page, '[data-role=\"mutation-count\"]').textContent = String(mutations.take())","    required(page, '[data-role=\"node-count\"]').textContent = String(total)","    required(page, '[data-role=\"json\"]').textContent = JSON.stringify(active.history.current, null, 2)"]}]},{"id":"lab-back","page":"lab","title":"뒤로가기","summary":"기록의 위치만 옮기고, Patch와 같은 diff와 applyPatches로 화면을 되돌립니다.","steps":[{"folder":"mini-react","file":"src/app/controls.ts","line":71,"start":69,"fn":"back","text":"뒤로가기와 앞으로가기, 버전 이동은 모두 navigate를 부릅니다.","code":["    history,","    patch,","    back: () => navigate('back', () => history.back()),","    forward: () => navigate('forward', () => history.forward()),","    jumpTo: (index) => navigate('jump', () => history.go(index)),"]},{"folder":"mini-react","file":"src/app/controls.ts","line":57,"start":56,"fn":"navigate","text":"이동 전 설계도와 이동 후 설계도를 비교합니다. 전체를 다시 그리지 않습니다.","code":["  /** 기록 이동도 전체를 다시 그리지 않고 같은 Diff와 Patch를 거칩니다. */","  function navigate(action: LabAction, move: () => VNode | null): void {","    const previous = history.current","    const target = move()","    if (!target) return","","    const patches = diff(previous, target)","    applyPatches(realRoot, patches, onApply)","    writeTestArea(target)","    onTransition({ action, patches, vdom: target })","  }"]},{"folder":"mini-react","file":"src/phase1/history.ts","line":46,"start":46,"fn":"history.back","text":"기록의 현재 위치만 한 칸 옮기고 그 설계도를 돌려줍니다.","code":["  back(): T | null {","    return this.go(this.cursor - 1)","  }","","  forward(): T | null {","    return this.go(this.cursor + 1)"]},{"folder":"mini-react","file":"src/app/lab-page.ts","line":256,"start":256,"fn":"testArea.write","text":"테스트 영역도 그 버전의 내용으로 다시 씁니다. 새 버전은 만들지 않습니다.","code":["  function write(vnode: VNode): void {","    const children = childrenOf(vnode)","    code.value = vdomToHtml(children)","    visual.replaceChildren(...children.map((child) => createDom(child)))","  }"]}]},{"id":"board-mount","page":"board","title":"처음 그리기","summary":"컴포넌트 함수를 실행해 첫 설계도를 만들고, hooks 칸을 순서대로 만들고, 실제 DOM을 붙입니다.","steps":[{"folder":"mini-react","file":"src/app/test-page.ts","line":958,"start":958,"fn":"new FunctionComponent","text":"함수 컴포넌트를 클래스로 감쌉니다. 이 객체가 hooks 배열을 들고 있습니다.","code":["  const component = new FunctionComponent(","    FocusBoard,","    { metrics },","    {","      onApply: (patch, node) => recordTouch(touched, patch, node),","      onCommit: report,","    },","  )","  component.mount(mount)"]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":100,"start":99,"fn":"mount","text":"설계도를 만들고 실제 DOM으로 바꿔 붙인 뒤 effect를 실행합니다.","code":["  /** 처음 렌더링: 트리를 만들어 container에 붙입니다. */","  mount(container: Element): void {","    if (this.status !== 'idle') throw new Error('이미 mount한 컴포넌트입니다.')","","    this.vdom = this.render()","    this.dom = createDom(this.vdom)","    container.append(this.dom)","    this.status = 'mounted'","","    this.flushEffects()","    this.options.onCommit?.({ phase: 'mount', patches: [], renderCount: this.renderCount })","  }"]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":198,"start":198,"fn":"render","text":"훅 커서를 0으로 돌리고 컴포넌트 함수를 실행합니다.","code":["  private render(): VNode {","    const previousOwner = currentOwner","    currentOwner = this","    this.cursor = 0","    this.effectQueue = []","","    try {","      const tree = this.component(this.props) ?? textNode('')","      if (this.status === 'mounted' && this.cursor !== this.hooks.length) {","        throw new Error('렌더링 사이에 Hook 개수가 줄었습니다. 조건문 안에서 Hook을 호출했는지 확인하세요.')","      }","      this.renderCount += 1","      return tree","    } finally {","      currentOwner = previousOwner","    }"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":626,"start":625,"fn":"FocusBoard","text":"루트 컴포넌트입니다. 상태와 Hook은 모두 여기에만 있습니다.","code":["","export function FocusBoard({ metrics }: FocusBoardProps): VNode {","  const [tasks, setTasks] = useState\u003cTask[]>(loadTasks)","  const [draft, setDraft] = useState('')","  const [draftPriority, setDraftPriority] = useState\u003cPriority>('normal')","  const [draftMinutes, setDraftMinutes] = useState(String(DEFAULT_FOCUS_MINUTES))","  const [filter, setFilter] = useState\u003cFilter>('all')","  const [query, setQuery] = useState('')"]},{"folder":"mini-react","file":"src/phase2/hooks/use-state.ts","line":15,"start":14,"fn":"useState","text":"이번 순서의 칸을 받습니다. 처음이면 만들고, 다음부터는 있던 칸을 돌려줍니다.","code":["","  const slot = owner.claimSlot\u003cStateSlot\u003cT>>('state', () => {","    const created: StateSlot\u003cT> = {","      kind: 'state',","      // 함수를 넘기면 첫 렌더에서만 실행합니다. 비싼 초기값 계산을 매번 하지 않기 위해서입니다.","      value: typeof initial === 'function' ? (initial as () => T)() : initial,","","      // 이 함수는 칸이 만들어질 때 한 번만 생기므로, 렌더가 반복돼도 같은 함수입니다."]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":142,"start":142,"fn":"claimSlot","text":"커서로 칸을 찾습니다. 함수가 다시 실행돼도 값이 남는 이유입니다.","code":["  claimSlot\u003cT extends HookSlot>(kind: T['kind'], create: () => T): T {","    const index = this.cursor","    this.cursor += 1","","    const existing = this.hooks[index]","    if (!existing) {","      if (this.status === 'mounted') throw new Error('렌더링 사이에 Hook 개수가 늘어났습니다.')","      const slot = create()","      this.hooks[index] = slot","      return slot","    }","","    if (existing.kind !== kind) {"]},{"folder":"mini-react","file":"src/phase2/h.ts","line":72,"start":72,"fn":"h","text":"함수면 자식 컴포넌트로 바로 실행하고, 글자면 요소 노드를 만듭니다.","code":["export function h(","  tag: string | Component\u003cRawProps>,","  rawProps?: RawProps | null,","  ...children: Child[]","): VNode {","  const raw = rawProps ?? {}","  const key = raw.key as Key | undefined | null","  const normalizedKey = key ?? undefined","  const normalizedChildren = normalizeChildren(children)","","  if (typeof tag === 'function') {","    const { key: _key, ...componentProps } = raw","    if (normalizedChildren.length > 0) componentProps.children = normalizedChildren","    return withKey(renderStateless(tag, componentProps), normalizedKey)","  }","","  return elementNode(tag, normalizeProps(raw), normalizedChildren, normalizedKey)"]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":217,"start":216,"fn":"flushEffects","text":"정리 함수를 먼저 돌리고 새 effect를 실행합니다.","code":["  /** 이번 커밋의 정리 함수를 모두 실행한 뒤 새 effect를 실행합니다. */","  private flushEffects(): void {","    const queue = this.effectQueue","    this.effectQueue = []","    for (const effect of queue) effect.cleanup()","    for (const effect of queue) effect.run()","  }"]}]},{"id":"board-update","page":"board","title":"상태 바꾸기","summary":"상태 함수가 값을 바꾸고 렌더를 한 번 예약합니다. 함수를 다시 실행해 페이지 1과 같은 Diff, Patch로 화면을 고칩니다.","steps":[{"folder":"mini-react","file":"src/app/test-page.ts","line":758,"start":758,"fn":"changeTask","text":"할 일을 바꾸는 입구입니다. 새 배열로 상태를 바꿉니다.","code":["  function changeTask(id: string, change: (task: Task) => Task): void {","    setTasks((list) => list.map((task) => (task.id === id ? change(task) : task)))","  }",""]},{"folder":"mini-react","file":"src/phase2/hooks/use-state.ts","line":22,"start":21,"fn":"setValue","text":"값이 같으면 여기서 끝납니다. 다르면 칸에 넣고 렌더를 예약합니다.","code":["      // 이 함수는 칸이 만들어질 때 한 번만 생기므로, 렌더가 반복돼도 같은 함수입니다.","      setValue(next) {","        const value = typeof next === 'function' ? (next as (previous: T) => T)(created.value) : next","        if (Object.is(value, created.value)) return","        created.value = value","        owner.scheduleUpdate()","      },"]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":168,"start":168,"fn":"scheduleUpdate","text":"이미 예약돼 있으면 넘어갑니다. 상태 여러 개가 렌더 한 번으로 합쳐지는 Batching입니다.","code":["  scheduleUpdate(): void {","    if (this.updateScheduled || this.status === 'unmounted') return","    this.updateScheduled = true","    queueMicrotask(() => this.flushScheduledUpdate())","  }",""]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":174,"start":174,"fn":"flushScheduledUpdate","text":"지금 작업이 끝난 직후 돌아갑니다. 무한 렌더도 여기서 막습니다.","code":["  private flushScheduledUpdate(): void {","    // 그사이 update()를 직접 불렀다면 이미 최신이므로 다시 그리지 않습니다.","    if (!this.updateScheduled) return","    this.updateScheduled = false","    if (this.status !== 'mounted') return","","    if (this.isUpdateLoop()) {","      console.error('렌더링이 끝없이 반복되어 멈췄습니다. useEffect의 setState와 deps를 확인하세요.')","      return","    }","    this.update()","  }"]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":113,"start":112,"fn":"update","text":"새 설계도를 만들고 비교해서 반영합니다. 그다음 effect를 실행합니다.","code":["  /** 다시 렌더링: 새 트리를 만들고 옛 트리와 비교해 바뀐 부분만 반영합니다. */","  update(nextProps: P = this.props): void {","    if (this.status !== 'mounted' || !this.vdom || !this.dom) return","","    this.updateScheduled = false","    this.props = nextProps","","    const nextVdom = this.render()","    const patches = diff(this.vdom, nextVdom)","    this.dom = applyPatches(this.dom, patches, this.options.onApply)","    this.vdom = nextVdom","","    this.flushEffects()","    this.options.onCommit?.({ phase: 'update', patches, renderCount: this.renderCount })","  }",""]},{"folder":"mini-react","file":"src/app/test-page.ts","line":643,"start":642,"fn":"useMemo","text":"deps가 그대로면 이전 결과를 돌려줘서 목록을 다시 계산하지 않습니다.","code":["  // 타이머가 1초마다 다시 그려도 tasks와 조건이 그대로면 목록은 재계산되지 않습니다.","  const visibleTasks = useMemo(() => {","    metrics.memoRuns += 1","    return selectTasks(tasks, filter, query, sortBy)","  }, [tasks, filter, query, sortBy])","  const stats = useMemo(() => summarize(tasks), [tasks])"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":945,"start":945,"fn":"report","text":"렌더 기록은 일부러 컴포넌트 밖에서 그립니다. 상태로 두면 렌더가 끝없이 이어지기 때문입니다.","code":["  function report(commit: Commit): void {","    const changes = domPatches(commit.patches)","    const { total, changed } = renderNodeMap(field('map'), mount as HTMLElement, touched)","    touched.clear()","","    field('render-count').textContent = formatCount(commit.renderCount)","    field('patch-count').textContent = String(changes.length)","    field('mutation-count').textContent = String(commit.phase === 'mount' ? 0 : mutations.take())","    field('memo-count').textContent = formatCount(metrics.memoRuns)","    field('map-caption').textContent = `전체 ${total}개 노드 중 ${changed}개를 건드렸습니다.`","    renderPatchList(field('ops'), commit.patches)","  }"]}]},{"id":"board-timer","page":"board","title":"타이머","summary":"effect가 1초 타이머를 걸고, 시간이 다 되면 멈추지 않고 넘긴 시간을 잽니다. 끝내기를 누르면 지난 시간이 쌓입니다.","steps":[{"folder":"mini-react","file":"src/app/test-page.ts","line":728,"start":728,"fn":"toggleTimer","text":"고른 일이 없고 테스트 타이머도 아니면 경고만 띄웁니다.","code":["  function toggleTimer(): void {","    if (!canControlTimer()) {","      setShowPickWarning(true)","      return","    }","    setRunning((value) => !value)","  }"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":667,"start":664,"fn":"setInterval","text":"running이 바뀔 때만 타이머를 겁니다. 정리 함수가 없으면 시간이 두 배로 줄어듭니다.","code":["  // 정리 함수가 없으면 멈춘 뒤에도 타이머가 살아남아 시간이 두 배로 줄어듭니다.","  useEffect(() => {","    if (!running) return","    const timer = setInterval(() => setSecondsLeft((seconds) => seconds - 1), 1000)","    return () => clearInterval(timer)","  }, [running])",""]},{"folder":"mini-react","file":"src/app/test-page.ts","line":176,"start":175,"fn":"formatClock","text":"0보다 작아지면 +를 붙여 넘긴 시간으로 보여 줍니다.","code":["/** 시간이 다 되면 멈추지 않고 넘긴 시간을 +로 셉니다. */","export function formatClock(secondsLeft: number): string {","  return secondsLeft \u003c 0 ? `+${formatTime(-secondsLeft)}` : formatTime(secondsLeft)","}"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":694,"start":693,"fn":"addTime","text":"전체 6시간을 넘지 않는 만큼만 더합니다.","code":["  /** 돌아가는 중에도 더할 수 있습니다. 한도를 넘게 누르면 한도까지만 더합니다. */","  function addTime(minutes: number): void {","    if (!canControlTimer()) {","      setShowPickWarning(true)","      return","    }","    const added = Math.min(minutes, MAX_FOCUS_MINUTES - focusMinutes)","    setFocusMinutes((total) => total + added)","    setSecondsLeft((seconds) => seconds + added * 60)","  }"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":722,"start":721,"fn":"finishFocus","text":"중간이든 넘긴 뒤든 지난 시간을 초 단위로 쌓고 계획 시간으로 돌아갑니다.","code":["  /** 중간에 끊어도, 시간을 넘겨도 실제로 지난 시간만큼 쌓고 타이머를 계획 시간으로 돌립니다. */","  function finishFocus(): void {","    const seconds = elapsedSeconds()","    if (focusId) changeTask(focusId, (task) => ({ ...task, focusedSeconds: task.focusedSeconds + seconds }))","    resetTimer()","  }"]}]},{"id":"board-trash","page":"board","title":"지운 일 복원","summary":"지운 일을 통째로 보관했다가 그대로 되돌립니다. 시간과 우선순위가 함께 돌아옵니다.","steps":[{"folder":"mini-react","file":"src/app/test-page.ts","line":763,"start":762,"fn":"removeTasks","text":"목록에서 빼고 기록 칸의 아래에 붙입니다. 칸이 차면 맨 위부터 사라집니다.","code":["  /** 새 기록은 아래에 붙고, 칸이 차면 맨 위의 오래된 기록부터 사라집니다. */","  function removeTasks(shouldRemove: (task: Task) => boolean, bin: TrashBin): void {","    const removed = tasks.filter(shouldRemove)","    if (removed.some((task) => task.id === focusId)) {","      setFocusId(null)","      resetTimer(DEFAULT_FOCUS_MINUTES)","    }","    setTasks((list) => list.filter((task) => !shouldRemove(task)))","    setTrash((current) => ({ ...current, [bin]: [...current[bin], ...removed].slice(-MAX_TRASH) }))","  }"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":774,"start":773,"fn":"restoreTasks","text":"목록에 남은 자리만큼만 돌려놓습니다.","code":["  /** 목록에 남은 자리만큼 위에서부터 돌려놓습니다. 못 돌아간 일은 기록에 남습니다. */","  function restoreTasks(bin: TrashBin, shouldRestore: (task: Task) => boolean): void {","    const restored = trash[bin].filter(shouldRestore).slice(0, MAX_TASKS - tasks.length)","    setTasks((list) => [...list, ...restored])","    setTrash((current) => ({ ...current, [bin]: current[bin].filter((task) => !restored.includes(task)) }))","  }"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":592,"start":592,"fn":"TrashBox","text":"상태 없이 받은 값만 그리는 자식 컴포넌트입니다.","code":["function TrashBox(props: TrashBoxProps): VNode {","  const { title, tasks, canRestore, onRestore, onForget, onRestoreAll, onForgetAll } = props","  const isEmpty = tasks.length === 0","","  return h(","    'section',","    { class: 'trash-box', 'aria-label': title },","    h(","      'div',","      { class: 'trash-head' },","      h('h3', null, `${title} ${tasks.length}/${MAX_TRASH}`),","      h('button', { type: 'button', class: 'text-button', disabled: isEmpty || !canRestore, onClick: onRestoreAll }, '전체 복원'),","      h('button', { type: 'button', class: 'text-button', disabled: isEmpty, onClick: onForgetAll }, '전체 삭제'),"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":676,"start":675,"fn":"기록 저장","text":"기록이 바뀌면 effect가 브라우저에 저장합니다.","code":["  useEffect(() => {","    save(TRASH_KEY, trash)","  }, [trash])"]}]},{"id":"board-search","page":"board","title":"검색","summary":"검색 결과가 1개가 되면 글자를 더 쳐도 렌더하지 않습니다. 지워서 2개 이상이 되면 다시 렌더합니다.","steps":[{"folder":"mini-react","file":"src/app/test-page.ts","line":736,"start":736,"fn":"changeQuery","text":"검색칸에 입력하면 이 함수가 먼저 받습니다. 첫 글자와 검색어를 다 지운 경우는 언제나 상태로 올립니다.","code":["  function changeQuery(next: string): void {","    const searching = query !== '' && next !== ''","    if (searching && keepsNarrowResult(visibleTasks, selectTasks(tasks, filter, next, sortBy))) return","    setQuery(next)","  }"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":141,"start":141,"fn":"selectTasks","text":"새 검색어로 나올 목록을 렌더 없이 미리 계산합니다.","code":["export function selectTasks(tasks: readonly Task[], filter: Filter, query: string, sortBy: SortBy): Task[] {","  const keyword = query.trim().toLowerCase()","  const visible = tasks.filter((task) => {","    if (filter === 'active' && task.done) return false","    if (filter === 'done' && !task.done) return false","    return task.title.toLowerCase().includes(keyword)","  })"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":207,"start":203,"fn":"keepsNarrowResult","text":"지금 결과와 새 결과가 둘 다 1개 이하이고 같은 일이면 참입니다. 맞는 일이 없어지거나 다른 일로 바뀌면 화면이 달라져서 거짓입니다.","code":[" * 검색 결과가 1개 이하로 좁혀지면 글자를 더 쳐도 보이는 목록이 그대로입니다."," * 이때는 상태로 올리지 않습니다. 상태가 그대로면 렌더도 일어나지 않습니다."," * 결과가 2개 이상으로 늘거나 보이는 일이 달라지면 다시 그립니다."," */","function keepsNarrowResult(shown: readonly Task[], next: readonly Task[]): boolean {","  return shown.length \u003c= 1 && next.length \u003c= 1 && shown[0]?.id === next[0]?.id","}"]},{"folder":"mini-react","file":"src/app/test-page.ts","line":739,"start":737,"fn":"setQuery","text":"결과가 달라질 때만 여기까지 옵니다. 상태가 바뀌어야 렌더가 예약됩니다.","code":["    const searching = query !== '' && next !== ''","    if (searching && keepsNarrowResult(visibleTasks, selectTasks(tasks, filter, next, sortBy))) return","    setQuery(next)","  }"]}]},{"id":"link","page":"board","title":"페이지 1, 2 연동","summary":"Phase 2의 컴포넌트가 Phase 1의 diff와 applyPatches를 그대로 부릅니다. 입구만 다르고 뒤쪽은 같은 코드입니다.","steps":[{"folder":"mini-react","file":"src/app/controls.ts","line":1,"start":1,"fn":"페이지 1의 import","text":"실험실 규칙이 Phase 1의 두 함수를 가져옵니다.","code":["import { diff } from '../phase1/diff.ts'","import { VdomHistory } from '../phase1/history.ts'","import { applyPatches } from '../phase1/patch.ts'"]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":1,"start":1,"fn":"페이지 2의 import","text":"컴포넌트 클래스도 같은 파일에서 같은 함수를 가져옵니다.","code":["import { diff } from '../phase1/diff.ts'","import { applyPatches, createDom } from '../phase1/patch.ts'","import type { PatchObserver } from '../phase1/patch.ts'"]},{"folder":"mini-react","file":"src/app/controls.ts","line":46,"start":45,"fn":"페이지 1의 호출","text":"새 설계도는 테스트 영역에서, 이전 설계도는 기록에서 옵니다.","code":["","    const patches = diff(history.current, next)","","    // 아무것도 안 바뀌었으면 기록을 늘리지 않습니다. 뒤로가기가 헛돌지 않게 하기 위해서입니다.","    if (patches.length > 0) {","      applyPatches(realRoot, patches, onApply)","      history.push(next)"]},{"folder":"mini-react","file":"src/phase2/function-component.ts","line":120,"start":119,"fn":"페이지 2의 호출","text":"새 설계도는 컴포넌트 함수에서, 이전 설계도는 this.vdom에서 옵니다.","code":["    const nextVdom = this.render()","    const patches = diff(this.vdom, nextVdom)","    this.dom = applyPatches(this.dom, patches, this.options.onApply)","    this.vdom = nextVdom",""]},{"folder":"mini-react","file":"src/phase1/diff.ts","line":11,"start":11,"fn":"diff","text":"두 페이지가 같은 입구로 들어옵니다.","code":["export function diff(oldNode: VNode, newNode: VNode): Patch[] {","  const patches: Patch[] = []","  diffNode(oldNode, newNode, [], patches)","  return patches","}",""]},{"folder":"mini-react","file":"src/phase1/patch.ts","line":128,"start":128,"fn":"applyPatches","text":"같은 함수가 지시서를 실제 DOM에 반영합니다.","code":["export function applyPatches(root: Node, patches: readonly Patch[], onApply?: PatchObserver): Node {","  let currentRoot = root","","  for (const patch of patches) {","    const target = resolve(currentRoot, patch.path)","    let touched: Node = target",""]},{"folder":"mini-react","file":"src/app/inspector.ts","line":35,"start":34,"fn":"recordTouch","text":"두 페이지 모두 바뀐 노드를 여기에 기록해 노드 지도에 칠합니다.","code":["/** 노드 지도에 칠할 노드를 모읍니다. 핸들러 교체는 DOM을 바꾸지 않으므로 뺍니다. */","export function recordTouch(touched: TouchedNodes, patch: Patch, node: Node): void {","  if (patch.type === 'LISTENERS') return","  touched.set(node, patch.type)","}"]}]},{"id":"ps-start","page":"board","title":"파워셀: 켜기","summary":"파워셀 폴더에만 있는 경로입니다. .bat이 알림 프로그램을 켜고, 프로그램이 전용 창을 엽니다.","steps":[{"folder":"mini-react ,powershell","file":"start-notify.bat","line":4,"start":1,"fn":"start-notify.bat","text":"PowerShell을 자기 창에서 켭니다. 그래서 Ctrl+C에 확인 창이 안 뜹니다.","code":["@echo off","rem Keep this file ASCII only. cmd loses its place in the file on multibyte lines.","rem PowerShell gets its own window, so Ctrl+C closes it without the batch job prompt.","start \"mini-react notify\" powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0notify-helper.ps1\""]},{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":171,"start":168,"fn":"HttpListener","text":"이 PC 안의 요청만 받는 작은 서버를 켭니다.","code":["$listener.Prefixes.Add(\"http://127.0.0.1:$Port/\")","","try {","  $listener.Start()","} catch {","  # 창이 바로 닫히면 이유를 볼 수 없어서 멈춰 둡니다.","  Write-Host \"알림 프로그램을 켜지 못했습니다. 이미 켜져 있는지 확인하세요: $($_.Exception.Message)\"","  Read-Host '닫으려면 Enter를 누르세요'","  exit 1","}",""]},{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":157,"start":156,"fn":"Open-PageWindow","text":"Chrome의 앱 모드로 주소창 없는 전용 창을 엽니다.","code":["# 전용 창은 주소창 없이 페이지 하나만 담아서, 닫아도 다른 탭에 영향이 없습니다.","function Open-PageWindow {","  $browser = $BrowserPaths | Where-Object { Test-Path $_ } | Select-Object -First 1","  if (-not $browser) {","    Write-Host 'Chrome이나 Edge를 찾지 못해 기본 브라우저로 엽니다. 이 경우 페이지는 직접 닫아야 합니다.'","    Start-Process $PagePath","    return","  }","  Start-Process $browser \"--app=$(([Uri]$PagePath).AbsoluteUri)\"","}"]}]},{"id":"ps-notify","page":"board","title":"파워셀: 알림","summary":"시간이 끝나면 페이지가 요청을 보내고, 알림 프로그램이 Windows 알림과 아이콘 깜빡임을 실행합니다.","steps":[{"folder":"mini-react ,powershell","file":"src/app/test-page.ts","line":673,"start":672,"fn":"notifyDesktop 호출","text":"시계가 0이 되는 순간 effect가 알림을 요청합니다.","code":["  useEffect(() => {","    if (secondsLeft === 0) notifyDesktop('집중 시간이 끝났습니다', focusTask?.title ?? TEST_TIMER_LABEL)","    if (elapsedSeconds() >= MAX_FOCUS_MINUTES * 60) finishFocus()","  }, [secondsLeft])"]},{"folder":"mini-react ,powershell","file":"src/app/notify.ts","line":7,"start":6,"fn":"notifyDesktop","text":"이 PC 안으로 요청을 보냅니다. 프로그램이 꺼져 있으면 조용히 넘어갑니다.","code":[" */","export function notifyDesktop(title: string, message: string): void {","  fetch(HELPER_URL, {","    method: 'POST',","    mode: 'no-cors',","    headers: { 'Content-Type': 'text/plain' },","    body: JSON.stringify({ title, message }),","  }).catch(() => {})","}"]},{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":127,"start":126,"fn":"Test-AllowedOrigin","text":"보낸 곳을 확인합니다. 다른 사이트의 요청은 거절합니다.","code":["# 파일로 연 페이지는 Origin이 null이고, 개발 서버는 localhost입니다. 다른 사이트의 요청은 받지 않습니다.","function Test-AllowedOrigin($origin) {","  return $origin -eq 'null' -or $origin -match '^http://(localhost|127\\.0\\.0\\.1)(:\\d+)?$'","}"]},{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":136,"start":136,"fn":"Receive-Notification","text":"요청을 읽어 알림과 깜빡임을 실행합니다.","code":["function Receive-Notification($context) {","  $request = $context.Request","","  if ($request.HttpMethod -ne 'POST' -or $request.Url.AbsolutePath -ne '/notify') {","    Send-Status $context 404","    return","  }","  if (-not (Test-AllowedOrigin $request.Headers['Origin']) -or $request.ContentLength64 -gt $MaxBodyLength) {","    Send-Status $context 403","    return","  }","","  $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)","  $body = $reader.ReadToEnd() | ConvertFrom-Json","","  Show-Toast (Get-SafeText $body.title) (Get-SafeText $body.message)","  [PageWindow]::Flash($FlashCount)","  Send-Status $context 204"]},{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":119,"start":119,"fn":"Show-Toast","text":"Windows 알림을 띄웁니다.","code":["function Show-Toast($title, $message) {","  $xml = New-Object Windows.Data.Xml.Dom.XmlDocument","  $xml.LoadXml(\"\u003ctoast>\u003cvisual>\u003cbinding template='ToastGeneric'>\u003ctext>$title\u003c/text>\u003ctext>$message\u003c/text>\u003c/binding>\u003c/visual>\u003c/toast>\")","  $toast = New-Object Windows.UI.Notifications.ToastNotification $xml","  [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($AppId).Show($toast)","}"]},{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":81,"start":81,"fn":"Flash","text":"전용 창의 작업표시줄 아이콘을 3번 깜빡입니다.","code":["  public static void Flash(uint count) {","    foreach (IntPtr hwnd in FindDedicatedWindows()) {","      FLASHWINFO info = new FLASHWINFO();","      info.cbSize = (uint)Marshal.SizeOf(info);","      info.hwnd = hwnd;","      info.dwFlags = FLASHW_ALL;","      info.uCount = count;","      FlashWindowEx(ref info);","    }","  }"]}]},{"id":"ps-stop","page":"board","title":"파워셀: 끄기","summary":"Ctrl+C나 X를 누르면 종료 신호를 받아 전용 창만 찾아서 닫습니다.","steps":[{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":99,"start":98,"fn":"CloseWithConsole","text":"종료 신호가 오면 전용 창을 닫게 등록합니다.","code":["  // Ctrl+C를 눌러도, 이 창의 X를 눌러도 전용 창을 함께 닫습니다.","  public static void CloseWithConsole() {","    closeHandler = delegate (uint signal) {","      Close();","      return false;","    };","    SetConsoleCtrlHandler(closeHandler, true);","  }"]},{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":60,"start":59,"fn":"FindDedicatedWindows","text":"제목이 mini-react로 끝나는 창만 찾습니다. 일반 Chrome 탭은 뒤에 이름이 붙어서 걸리지 않습니다.","code":["  // 전용 창의 제목은 \"... | mini-react\"로 끝납니다. 일반 탭은 뒤에 \" - Chrome\"이 붙어서 걸리지 않습니다.","  private static List\u003cIntPtr> FindDedicatedWindows() {","    List\u003cIntPtr> found = new List\u003cIntPtr>();","    EnumWindows(delegate (IntPtr hwnd, IntPtr lParam) {","      if (!IsWindowVisible(hwnd)) return true;","","      StringBuilder className = new StringBuilder(64);","      GetClassName(hwnd, className, className.Capacity);","      if (className.ToString() != BrowserClass) return true;","","      StringBuilder title = new StringBuilder(256);","      GetWindowText(hwnd, title, title.Capacity);","      if (title.ToString().EndsWith(TitleMark, StringComparison.Ordinal)) found.Add(hwnd);","      return true;","    }, IntPtr.Zero);","    return found;"]},{"folder":"mini-react ,powershell","file":"notify-helper.ps1","line":92,"start":92,"fn":"Close","text":"찾은 창에만 닫기 신호를 보냅니다.","code":["  public static void Close() {","    foreach (IntPtr hwnd in FindDedicatedWindows()) {","      PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);","    }","  }"]}]}],"sizes":{"M":{"phase1":{"files":6,"lines":654},"phase2":{"files":6,"lines":433},"app":{"files":6,"lines":1687},"styles":{"files":1,"lines":1263},"tests":{"files":15,"lines":3291}},"W":{"phase1":{"files":6,"lines":654},"phase2":{"files":6,"lines":433},"app":{"files":7,"lines":1704},"styles":{"files":1,"lines":1277},"tests":{"files":15,"lines":3328}}}}</script>
+
+<script>
+  const items = [
+    { key: 'dom', text: 'DOM 변환' },
+    { key: 'diff', text: '트리 비교' },
+    { key: 'patch', text: '바뀐 곳만 반영' },
+  ]
+  const BASE = { title: '이번 주 스터디', list: items, urgent: false, inline: 'em' }
+  const TITLE_CHANGED = { ...BASE, title: '다음 주 스터디' }
+
+  const SCENARIOS = [
+    {
+      label: '글자 바꾸기', before: BASE, after: TITLE_CHANGED, marks: ['title'],
+      edit: '제목의 "이번 주"를 "다음 주"로 고칩니다.',
+      why: 'h2 안의 글자 노드만 다릅니다. 주소 [0, 0, 0]은 첫째 자식의 첫째 자식의 첫째 자식이라는 뜻입니다.',
+      ops: [{ type: 'TEXT', path: '[0, 0, 0]', text: '글자를 "다음 주 스터디"로 바꿈' }],
+    },
+    {
+      label: '속성 바꾸기', before: BASE, after: { ...BASE, urgent: true }, marks: ['p'],
+      edit: 'p 태그의 class에 is-urgent를 추가합니다.',
+      why: 'p 태그는 그대로이고 class 값만 다릅니다. 안쪽 글자는 건드리지 않습니다.',
+      ops: [{ type: 'PROPS', path: '[0, 2]', text: 'class를 "note is-urgent"로 바꿈' }],
+    },
+    {
+      label: '노드 추가', before: BASE, after: { ...BASE, list: [...items, { key: 'new', text: '새 항목' }] }, marks: ['li-new'],
+      edit: '목록 끝에 li 한 줄을 추가합니다.',
+      why: '새 설계도의 ul에만 key가 new인 li가 있습니다. 기존 li 세 개는 그대로 둡니다.',
+      ops: [{ type: 'INSERT', path: '[0, 1]', text: '3번 자리에 <li> 추가' }],
+    },
+    {
+      label: '노드 삭제', before: BASE, after: { ...BASE, list: items.slice(0, 2) }, oldMarks: ['li-patch'], marks: [],
+      edit: '목록의 마지막 li를 지웁니다.',
+      why: '이전 설계도에만 key가 patch인 li가 있습니다. 주소는 부모인 ul을 가리키고, 지울 자식의 번호를 함께 적습니다.',
+      ops: [{ type: 'REMOVE', path: '[0, 1]', text: '2번 자식 삭제' }],
+    },
+    {
+      label: '태그 교체', before: BASE, after: { ...BASE, inline: 'mark' }, marks: ['inline'],
+      edit: 'em 태그를 mark 태그로 바꿉니다.',
+      why: '태그 이름이 다르면 안쪽을 비교하지 않고 노드를 통째로 교체합니다.',
+      ops: [{ type: 'REPLACE', path: '[0, 2, 1]', text: '<mark> 노드로 통째로 바꿈' }],
+    },
+    {
+      label: '순서 뒤집기', before: BASE, after: { ...BASE, list: items.toReversed() }, marks: ['li-diff', 'li-patch'],
+      edit: '목록의 li 세 개를 거꾸로 놓습니다.',
+      why: 'key가 같아서 같은 노드로 봅니다. DOM 변환 항목은 그대로 두고, 나머지 둘만 앞으로 옮기면 순서가 맞습니다.',
+      ops: [
+        { type: 'MOVE', path: '[0, 1]', text: '1번 자식을 0번 자리로 옮김' },
+        { type: 'MOVE', path: '[0, 1]', text: '2번 자식을 0번 자리로 옮김' },
+      ],
+    },
+    {
+      label: '고치지 않음', before: BASE, after: BASE, marks: [], kind: 'none',
+      edit: '아무것도 고치지 않고 Patch를 누릅니다.',
+      why: '두 설계도가 같아서 연산이 0개입니다.',
+      ops: [],
+    },
+    {
+      label: '뒤로가기', before: TITLE_CHANGED, after: BASE, marks: ['title'], kind: 'back',
+      edit: '',
+      why: '비교 방법은 Patch와 같습니다. 화면을 통째로 되돌리지 않고 글자 노드 하나만 바꿉니다.',
+      ops: [{ type: 'TEXT', path: '[0, 0, 0]', text: '글자를 "이번 주 스터디"로 바꿈' }],
+    },
+  ]
+
+  const STEP_NAMES = {
+    normal: ['고치기', '읽기', '비교', '반영', '저장'],
+    back: ['위치 이동', '꺼내기', '비교', '반영', '테스트 영역 쓰기'],
+  }
+
+  const ACTIVE_PANEL = {
+    normal: ['test', 'new', 'ops', 'real', 'history'],
+    back: ['history', 'new', 'ops', 'real', 'test'],
+  }
+
+  function captionFor(scenario, step) {
+    if (scenario.kind === 'back') {
+      return [
+        ['history.back()', '기록의 현재 위치를 v2에서 v1로 옮깁니다. 아직 화면은 그대로입니다.'],
+        ['history.current', 'v1 자리에 저장해 둔 설계도를 꺼냅니다. 테스트 영역은 읽지 않습니다.'],
+        ['diff(v2, v1)', scenario.why],
+        ['applyPatches(실제 영역, 연산)', '지시서에 적힌 곳만 실제 DOM에서 고칩니다.'],
+        ['writeTestArea(v1)', '테스트 영역도 v1 내용으로 다시 씁니다. 새 버전은 만들지 않습니다.'],
+      ][step]
+    }
+
+    const empty = scenario.ops.length === 0
+    return [
+      ['사용자 입력', `${scenario.edit} 이 단계에서 실제 영역은 그대로입니다.`],
+      ['htmlToVdom(code.value)', '테스트 영역의 글자를 읽어 객체 트리로 바꿉니다. 이 트리가 새 설계도입니다.'],
+      ['diff(이전 설계도, 새 설계도)', scenario.why],
+      empty
+        ? ['applyPatches 건너뜀', '연산이 없어서 실제 영역을 건드리지 않습니다.']
+        : ['applyPatches(실제 영역, 연산)', '지시서에 적힌 곳만 실제 DOM에서 고칩니다. 나머지 노드는 그대로입니다.'],
+      empty
+        ? ['history.push 건너뜀', '기록도 늘리지 않습니다. 그래서 뒤로가기가 같은 화면에서 헛돌지 않습니다.']
+        : ['history.push(새 설계도)', '새 설계도를 v2로 저장합니다. 다음 Patch 때 비교 기준이 됩니다.'],
+    ][step]
+  }
+
+  const escapeHtml = (text) => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+  const markClass = (id, marks) => (marks.includes(id) ? 'is-marked' : '')
+
+  function treeRows(state) {
+    return [
+      { id: 'article', depth: 0, label: '<article>', path: '[0]' },
+      { id: 'h2', depth: 1, label: '<h2>', path: '[0, 0]' },
+      { id: 'title', depth: 2, label: `"${state.title}"`, path: '[0, 0, 0]' },
+      { id: 'ul', depth: 1, label: '<ul>', path: '[0, 1]' },
+      ...state.list.map((item, index) => ({
+        id: `li-${item.key}`, depth: 2, label: `<li key=${item.key}>`, path: `[0, 1, ${index}]`,
+      })),
+      { id: 'p', depth: 1, label: state.urgent ? '<p class="note is-urgent">' : '<p class="note">', path: '[0, 2]' },
+      { id: 'inline', depth: 2, label: `<${state.inline}>`, path: '[0, 2, 1]' },
+    ]
+  }
+
+  function renderTree(state, marks) {
+    const rows = treeRows(state).map((row) =>
+      `<li class="${markClass(row.id, marks)}"><span>${'  '.repeat(row.depth).replaceAll(' ', '&nbsp;')}${escapeHtml(row.label)}</span><span class="path">${row.path}</span></li>`)
+    return `<ul class="tree">${rows.join('')}</ul>`
+  }
+
+  function renderCode(state, marks) {
+    const noteClass = state.urgent ? 'note is-urgent' : 'note'
+    const lines = [
+      { ids: [], text: '<article>' },
+      { ids: ['title'], text: `  <h2>${state.title}</h2>` },
+      { ids: [], text: '  <ul>' },
+      ...state.list.map((item) => ({ ids: [`li-${item.key}`], text: `    <li data-key="${item.key}">${item.text}</li>` })),
+      { ids: [], text: '  </ul>' },
+      { ids: ['p', 'inline'], text: `  <p class="${noteClass}">모임은 <${state.inline}>목요일</${state.inline}>에 시작</p>` },
+      { ids: [], text: '</article>' },
+    ]
+    const rows = lines.map((line) =>
+      `<li class="${line.ids.some((id) => marks.includes(id)) ? 'is-marked' : ''}">${escapeHtml(line.text)}</li>`)
+    return `<ol class="code">${rows.join('')}</ol>`
+  }
+
+  function renderReal(state, marks) {
+    const list = state.list.map((item) => `<li data-id="li-${item.key}" class="${markClass(`li-${item.key}`, marks)}">${item.text}</li>`).join('')
+    const pClass = [state.urgent ? 'is-urgent' : '', markClass('p', marks)].join(' ')
+    const inline = `<${state.inline} data-id="inline" class="${markClass('inline', marks)}">목요일</${state.inline}>`
+    return `<div class="real"><h4><span data-id="title" class="${markClass('title', marks)}">${state.title}</span></h4><ul>${list}</ul><p data-id="p" class="${pClass}">모임은 ${inline}에 시작</p></div>`
+  }
+
+  function renderOps(scenario) {
+    if (scenario.ops.length === 0) return '<p class="empty">연산 0개. 바꿀 곳이 없습니다.</p>'
+    const rows = scenario.ops.map((op) =>
+      `<li class="op"><span class="op-head"><span class="badge op-${op.type}">${op.type}</span><span>${op.path}</span></span><span>${escapeHtml(op.text)}</span></li>`)
+    return `<ol class="ops">${rows.join('')}</ol>`
+  }
+
+  function renderHistory(scenario, step) {
+    const isBack = scenario.kind === 'back'
+    const saved = !isBack && !scenario.kind && step >= 4
+    const versions = isBack || saved ? ['v1', 'v2'] : ['v1']
+    const current = isBack ? 'v1' : versions.at(-1)
+
+    const chips = versions.map((name) =>
+      `<span class="version ${name === current ? 'is-current' : ''}">${name}</span>`)
+
+    const note = isBack
+      ? 'v2는 지워지지 않아서 앞으로가기로 돌아갈 수 있습니다.'
+      : saved
+        ? '노란 칸이 지금 위치입니다. v1에서 고쳐 Patch하면 그 뒤 기록은 새 버전으로 바뀝니다.'
+        : '노란 칸이 지금 위치입니다.'
+    return `<div class="versions">${chips.join('')}</div><p class="history-note">${note}</p>`
+  }
+
+  const $ = (id) => document.getElementById(id)
+  let scenario = SCENARIOS[0]
+  let step = 0
+
+  /* 움직임: render()가 먼저 최종 화면을 그리고, 아래 코드는 그 위에 재생만 합니다. 중간에 끊겨도 화면은 맞습니다. */
+
+  let motionOn = true
+  const PACE = 1.8
+  let runId = 0
+  let flowId = 0
+
+  const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+  const settle = (animation) => animation.finished.catch(() => {})
+  const color = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+
+  function stopMotion() {
+    runId += 1
+    for (const element of document.querySelectorAll('.fly, .signal-line')) element.remove()
+    for (const panels of document.querySelectorAll('.panels')) {
+      for (const animation of panels.getAnimations({ subtree: true })) animation.cancel()
+    }
+  }
+
+  /* 신호: 지나간 길을 색 선으로 그립니다. 글자표와 선은 문서 좌표를 써서 스크롤해도 제자리에 붙어 있습니다. */
+
+  const SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
+  const FLY_MS = 700 * PACE
+  const FLY_STOPS = 32
+  const ARROW_GAP = 14
+  const SIGNAL_KINDS = { 'dot-new': 'is-new', 'dot-old': 'is-old', 'dot-go': 'is-go' }
+
+  function signalLayer() {
+    const layer = $('signal-layer')
+    if (layer) return layer
+
+    const created = document.createElementNS(SVG_NAMESPACE, 'svg')
+    created.id = 'signal-layer'
+    created.setAttribute('aria-hidden', 'true')
+    document.body.append(created)
+    return created
+  }
+
+  function pageCenter(element) {
+    const box = element.getBoundingClientRect()
+    return { x: box.left + scrollX + box.width / 2, y: box.top + scrollY + box.height / 2 }
+  }
+
+  /** 두 점을 곡선으로 잇습니다. 옆으로 가는 신호는 위로 휘고, 아래로 가는 신호는 side 쪽으로 휩니다. */
+  function curveBetween(start, end, side) {
+    const dx = end.x - start.x
+    const dy = end.y - start.y
+    const distance = Math.hypot(dx, dy) || 1
+    const bend = Math.min(distance * 0.35, 110) * side
+    const flip = -dx / distance > 0 ? -1 : 1
+    const controlX = (start.x + end.x) / 2 + (dy / distance) * flip * bend
+    const controlY = (start.y + end.y) / 2 + (-dx / distance) * flip * bend
+    return `M ${start.x} ${start.y} Q ${controlX} ${controlY} ${end.x} ${end.y}`
+  }
+
+  /** 글자표를 from에서 to까지 날리고, 그 뒤로 색 선이 따라 그려집니다. */
+  function fly(from, to, label, className, side = 1) {
+    const line = document.createElementNS(SVG_NAMESPACE, 'path')
+    line.setAttribute('class', `signal-line ${className}`)
+    line.setAttribute('d', curveBetween(pageCenter(from), pageCenter(to), side))
+    signalLayer().append(line)
+
+    const length = line.getTotalLength()
+    line.style.strokeDasharray = length
+
+    const badge = document.createElement('span')
+    badge.className = `fly badge ${className}`
+    badge.textContent = label
+    badge.setAttribute('aria-hidden', 'true')
+    document.body.append(badge)
+
+    const halfWidth = badge.offsetWidth / 2
+    const halfHeight = badge.offsetHeight / 2
+    const stops = Array.from({ length: FLY_STOPS + 1 }, (_, index) => {
+      const point = line.getPointAtLength((length * index) / FLY_STOPS)
+      return { transform: `translate(${point.x - halfWidth}px, ${point.y - halfHeight}px)` }
+    })
+
+    const timing = { duration: FLY_MS, easing: 'ease-in-out' }
+    line.animate([{ strokeDashoffset: length }, { strokeDashoffset: 0 }], { ...timing, fill: 'forwards' })
+
+    return settle(badge.animate(stops, timing)).then(() => {
+      badge.remove()
+      const fade = line.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 900, delay: 400, fill: 'forwards' })
+      settle(fade).then(() => line.remove())
+    })
+  }
+
+  /** 전체 그림의 선 위에 같은 모양의 색 선을 겹칩니다. 돌려주는 함수에 0에서 1까지 넣으면 그만큼 그려집니다. */
+  function signalTrail(edge, dot) {
+    const map = edge.ownerSVGElement
+    const length = edge.getTotalLength()
+    const kind = SIGNAL_KINDS[[...dot.classList].find((name) => name in SIGNAL_KINDS)]
+
+    const lines = ['signal-case', `signal-core ${kind}`].map((name) => {
+      const line = edge.cloneNode()
+      line.removeAttribute('id')
+      line.removeAttribute('marker-end')
+      line.setAttribute('class', `signal-path ${name}`)
+      line.style.strokeDasharray = length
+      line.style.strokeDashoffset = length
+      map.insertBefore(line, map.querySelector('.dot'))
+      return line
+    })
+
+    // 화살촉을 덮으면 방향이 안 보이므로 조금 앞에서 멈춥니다.
+    const drawable = length - ARROW_GAP
+
+    return (progress) => {
+      for (const line of lines) line.style.strokeDashoffset = length - drawable * progress
+    }
+  }
+
+  function revealMarks(container, delay = 0) {
+    for (const row of container.querySelectorAll('.is-marked')) {
+      row.animate([
+        { backgroundColor: 'transparent', color: color('--ink') },
+        { backgroundColor: color('--marker'), color: color('--on-marker') },
+      ], { duration: 320 * PACE, delay, fill: 'backwards' })
+    }
+  }
+
+  function revealRows(body, delay) {
+    body.querySelectorAll('li').forEach((row, index) => {
+      row.animate([
+        { opacity: 0, transform: 'translateX(-14px)' },
+        { opacity: 1, transform: 'none' },
+      ], { duration: 260 * PACE, delay: delay + index * 70 * PACE, easing: 'ease-out', fill: 'backwards' })
+    })
+  }
+
+  function playBuild(from, label) {
+    revealRows($('body-new'), 560 * PACE)
+    return fly(from, $('panel-new'), label, 'op-PROPS')
+  }
+
+  /** 두 설계도를 위에서부터 한 줄씩 훑고, 다른 줄에서 노란색이 켜집니다. */
+  function playCompare(oldBody, newBody, opsBody) {
+    const stepMs = 150 * PACE
+    let longest = 0
+
+    for (const body of [oldBody, newBody]) {
+      const rows = body.querySelectorAll('li')
+      longest = Math.max(longest, rows.length)
+      rows.forEach((row, index) => {
+        const delay = index * stepMs
+        if (row.classList.contains('is-marked')) {
+          row.animate([
+            { backgroundColor: 'transparent', color: color('--ink') },
+            { backgroundColor: color('--marker'), color: color('--on-marker') },
+          ], { duration: 220 * PACE, delay, fill: 'backwards' })
+        } else {
+          row.animate([
+            { backgroundColor: color('--tint'), boxShadow: `inset 4px 0 0 ${color('--cobalt')}` },
+            { backgroundColor: 'transparent', boxShadow: 'inset 0 0 0 transparent' },
+          ], { duration: 320 * PACE, delay })
+        }
+      })
+    }
+
+    const results = opsBody.querySelectorAll('.op, .empty')
+    results.forEach((result, index) => {
+      result.animate([
+        { opacity: 0, transform: 'translateY(10px)' },
+        { opacity: 1, transform: 'none' },
+      ], { duration: 280 * PACE, delay: longest * stepMs + index * 180 * PACE, easing: 'ease-out', fill: 'backwards' })
+    })
+  }
+
+  /** 연산 표를 실제 화면으로 날리고, 도착하면 이전 화면을 새 화면으로 바꿉니다. 두 페이지가 함께 씁니다. */
+  async function playApply({ item, body, opsBody, draw, alive }) {
+    if (item.ops.length === 0) return
+
+    const oldMarks = item.oldMarks ?? item.marks
+    body.innerHTML = draw(item.before, [])
+
+    const targetId = oldMarks[0] ?? item.marks[0]
+    const target = body.querySelector(`[data-id="${targetId}"]`) ?? body.querySelector('ul')
+    const badges = opsBody.querySelectorAll('.op .badge')
+
+    await Promise.all(item.ops.map(async (op, index) => {
+      await sleep(index * 140 * PACE)
+      if (alive()) await fly(badges[index], target, op.type, `op-${op.type}`)
+    }))
+    if (!alive()) return
+
+    const gone = [...body.querySelectorAll('li')].filter((row) => oldMarks.includes(row.dataset.id) && !item.marks.includes(row.dataset.id))
+    await Promise.all(gone.map((row) => settle(row.animate([
+      { opacity: 1, transform: 'none' },
+      { opacity: 0, transform: 'translateX(40px)' },
+    ], { duration: 420 * PACE, easing: 'ease-in', fill: 'forwards' }))))
+    if (!alive()) return
+
+    const tops = new Map([...body.querySelectorAll('li')].map((row) => [row.dataset.id, row.getBoundingClientRect().top]))
+    body.innerHTML = draw(item.after, item.marks)
+
+    for (const row of body.querySelectorAll('li')) {
+      if (tops.has(row.dataset.id)) {
+        const distance = tops.get(row.dataset.id) - row.getBoundingClientRect().top
+        if (distance !== 0) {
+          row.animate([{ transform: `translateY(${distance}px)` }, { transform: 'none' }], { duration: 520 * PACE, easing: 'ease-in-out' })
+        }
+      } else {
+        row.animate([
+          { opacity: 0, transform: 'translateX(-24px)' },
+          { opacity: 1, transform: 'none' },
+        ], { duration: 420 * PACE, easing: 'ease-out' })
+      }
+    }
+
+    revealMarks(body)
+  }
+
+  function playSave() {
+    const chips = $('body-history').querySelectorAll('.version')
+    const chip = chips[chips.length - 1]
+    if (chips.length < 2) return undefined
+
+    chip.animate([
+      { opacity: 0, transform: 'scale(1.6)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 300 * PACE, delay: 640 * PACE, easing: 'ease-out', fill: 'backwards' })
+    return fly($('panel-new'), chip, 'v2', 'op-PROPS')
+  }
+
+  async function play(index) {
+    const id = runId
+    const alive = () => id === runId
+    const isBack = scenario.kind === 'back'
+
+    if (index === 0 && isBack) {
+      const [first, second] = $('body-history').querySelectorAll('.version')
+      await fly(second, first, '지금 위치', 'op-MOVE')
+    } else if (index === 0) {
+      revealMarks($('body-test'))
+    } else if (index === 1) {
+      await playBuild(isBack ? $('panel-history') : $('panel-test'), isBack ? 'v1' : 'HTML')
+    } else if (index === 2) {
+      playCompare($('body-old'), $('body-new'), $('body-ops'))
+    } else if (index === 3) {
+      await playApply({ item: scenario, body: $('body-real'), opsBody: $('body-ops'), draw: renderReal, alive })
+    } else if (isBack) {
+      revealMarks($('body-test'), 640 * PACE)
+      await fly($('panel-new'), $('panel-test'), 'v1', 'op-PROPS')
+    } else if (scenario.ops.length > 0) {
+      await playSave()
+    }
+  }
+
+  function goTo(next, animate = true) {
+    step = next
+    render()
+    return animate && motionOn ? play(next) : Promise.resolve()
+  }
+
+  const FLOWS = {
+    lab: {
+      status: 'map-status',
+      end: '한 바퀴가 끝났습니다. 다음 Patch도 같은 길을 지납니다.',
+      parts: [
+        { text: '테스트 영역의 글자를 읽어 새 설계도를 만듭니다.', lit: ['box-test'], trips: [['edge-read', 'dot-new']], arrive: 'box-new' },
+        { text: '새 설계도와 기록에서 꺼낸 이전 설계도가 비교 단계에서 만납니다.', lit: ['box-history'], trips: [['edge-compare', 'dot-new'], ['edge-previous', 'dot-old']], arrive: 'box-diff' },
+        { text: '달라진 곳만 공사 지시서에 적습니다.', lit: [], trips: [['edge-order', 'dot-new']], arrive: 'box-ops' },
+        { text: '지시서에 적힌 곳만 실제 영역에서 고칩니다.', lit: [], trips: [['edge-apply', 'dot-new']], arrive: 'box-real' },
+        { text: '실제 영역 반영이 끝나면 새 설계도에 출발 신호를 보냅니다. 코드에서는 applyPatches가 끝나야 다음 줄의 history.push가 실행됩니다.', lit: [], trips: [['edge-go', 'dot-go']], arrive: 'box-new' },
+        { text: '새 설계도를 다음 버전으로 저장합니다. 다음 비교의 기준이 됩니다.', lit: [], trips: [['edge-save', 'dot-new']], arrive: 'box-history' },
+      ],
+    },
+    board: {
+      status: 'board-status',
+      end: '한 바퀴가 끝났습니다. 상태가 바뀔 때마다 같은 길을 지납니다.',
+      parts: [
+        { text: '버튼 클릭이나 타이머가 상태를 바꾸는 함수를 부릅니다.', lit: ['b-user'], trips: [['b-e1', 'b-dot']], arrive: 'b-set' },
+        { text: '새 값을 hooks 배열의 칸에 넣고, 렌더는 바로 하지 않고 예약합니다.', lit: [], trips: [['b-e2', 'b-dot'], ['b-store', 'b-dot-state']], arrive: 'b-micro' },
+        { text: '함수를 다시 실행합니다. useState는 hooks 배열에서 순서대로 값을 꺼내 옵니다.', lit: ['b-hooks'], trips: [['b-e3', 'b-dot'], ['b-read', 'b-dot-state']], arrive: 'b-render' },
+        { text: '새 설계도를 이전 설계도와 비교하고, 달라진 곳만 실제 DOM에 반영합니다.', lit: [], trips: [['b-e4', 'b-dot']], arrive: 'b-patch' },
+        { text: '화면이 바뀐 뒤에 effect를 실행합니다. 이전 정리 함수가 먼저 돕니다.', lit: [], trips: [['b-e5', 'b-dot']], arrive: 'b-effect' },
+      ],
+    },
+    link: {
+      status: 'link-status',
+      end: '입구는 달라도 같은 diff와 applyPatches를 지났습니다.',
+      parts: [
+        { text: '페이지 1은 테스트 영역을 읽고, 페이지 2는 컴포넌트를 실행해서 각자 새 설계도를 만듭니다.', lit: ['k-test', 'k-state'], trips: [['k-e1', 'k-dot-lab'], ['k-e2', 'k-dot-board']], arrive: 'k-lab-tree' },
+        { text: '두 설계도 모두 같은 diff 함수로 들어갑니다.', lit: ['k-board-tree'], trips: [['k-e3', 'k-dot-lab'], ['k-e4', 'k-dot-board']], arrive: 'k-diff' },
+        { text: '결과는 같은 모양의 공사 지시서입니다.', lit: [], trips: [['k-e5', 'k-dot-lab']], arrive: 'k-ops' },
+        { text: '같은 applyPatches가 실제 DOM을 고칩니다.', lit: [], trips: [['k-e6', 'k-dot-lab']], arrive: 'k-dom' },
+      ],
+    },
+  }
+
+  function clearFlow() {
+    for (const box of document.querySelectorAll('.map .is-lit')) box.classList.remove('is-lit')
+    for (const dot of document.querySelectorAll('.map .dot')) dot.setAttribute('visibility', 'hidden')
+    for (const line of document.querySelectorAll('.map .signal-path')) line.remove()
+  }
+
+  function travel(edgeId, dotId, duration, alive) {
+    const edge = $(edgeId)
+    const dot = $(dotId)
+    const length = edge.getTotalLength()
+    const startedAt = performance.now()
+    const draw = signalTrail(edge, dot)
+    dot.setAttribute('visibility', 'visible')
+
+    return new Promise((done) => {
+      function frame(now) {
+        if (!alive()) return done()
+        const time = Math.min((now - startedAt) / duration, 1)
+        const eased = time < 0.5 ? 2 * time * time : 1 - (-2 * time + 2) ** 2 / 2
+        const point = edge.getPointAtLength(length * eased)
+        dot.setAttribute('cx', point.x)
+        dot.setAttribute('cy', point.y)
+        draw(eased)
+        if (time < 1) return requestAnimationFrame(frame)
+        dot.setAttribute('visibility', 'hidden')
+        return done()
+      }
+      requestAnimationFrame(frame)
+    })
+  }
+
+  async function playFlow(name) {
+    flowId += 1
+    const id = flowId
+    const alive = () => id === flowId
+    const flow = FLOWS[name]
+    clearFlow()
+
+    for (const [index, part] of flow.parts.entries()) {
+      markFlow(flow, index)
+      for (const box of part.lit) $(box).classList.add('is-lit')
+      const longest = Math.max(...part.trips.map(([edge]) => $(edge).getTotalLength()))
+      const duration = Math.min(Math.max(900, longest * 3.5), 1600) * PACE
+      await Promise.all(part.trips.map(([edge, dot]) => travel(edge, dot, duration, alive)))
+      if (!alive()) return
+      for (const box of document.querySelectorAll('.map .is-lit')) box.classList.remove('is-lit')
+      $(part.arrive).classList.add('is-lit')
+      await sleep(650 * PACE)
+      if (!alive()) return
+    }
+
+    markFlow(flow, flow.parts.length)
+  }
+
+  function render() {
+    stopMotion()
+    const mode = scenario.kind === 'back' ? 'back' : 'normal'
+    const names = STEP_NAMES[mode]
+    const isBack = mode === 'back'
+    const oldMarks = scenario.oldMarks ?? scenario.marks
+    const applied = step >= 3
+
+    markChip($('scenarios'), scenario.label)
+    $('rail').innerHTML = renderRail(names, step, (index) => captionFor(scenario, index))
+
+    $('title-old').textContent = isBack ? '지금 설계도 v2' : '이전 설계도'
+    $('title-new').textContent = isBack ? '꺼낸 설계도 v1' : '새 설계도'
+
+    const testState = isBack ? (step >= 4 ? scenario.after : scenario.before) : scenario.after
+    const testMarks = isBack ? (step >= 4 ? scenario.marks : []) : scenario.marks
+    $('body-test').innerHTML = renderCode(testState, testMarks)
+
+    $('body-old').innerHTML = renderTree(scenario.before, step >= 2 ? oldMarks : [])
+    $('body-new').innerHTML = step >= 1
+      ? renderTree(scenario.after, step >= 2 ? scenario.marks : [])
+      : '<p class="empty">Patch를 누르면 이 자리에 만들어집니다.</p>'
+    $('body-ops').innerHTML = step >= 2 ? renderOps(scenario) : '<p class="empty">아직 비교하지 않았습니다.</p>'
+    $('body-real').innerHTML = renderReal(applied ? scenario.after : scenario.before, applied ? scenario.marks : [])
+    $('body-history').innerHTML = renderHistory(scenario, step)
+
+    const active = ACTIVE_PANEL[mode][step]
+    for (const name of ['test', 'old', 'new', 'ops', 'real', 'history']) {
+      $(`panel-${name}`).classList.toggle('is-active', name === active || (step === 2 && name === 'old'))
+    }
+
+    holdHeight($('rail'))
+    holdHeight($('rail').parentElement.querySelector('.panels'))
+  }
+
+  $('scenarios').innerHTML = SCENARIOS.map((item) => `<span class="chip">${item.label}</span>`).join('')
+
+  /* 페이지 2: 실제 집중 보드를 조작해서 나온 연산과 숫자입니다. */
+
+  const SLOTS = [
+    'tasks', 'draft', 'draftPriority', 'draftMinutes', 'filter', 'query', 'sortBy', 'focusId', 'focusMinutes',
+    'secondsLeft', 'running', 'showPickWarning', 'trash', 'editing', 'useMemo 목록', 'useMemo 통계',
+    'effect 저장', 'effect 제목', 'effect 타이머', 'effect 종료', 'effect 기록 저장', 'effect 이름 칸',
+  ]
+
+  const BOARD_TASKS = [
+    { id: 'a', title: 'Diff 설명 연습', done: false },
+    { id: 'b', title: 'useEffect 복습', done: false },
+    { id: 'c', title: 'Reflow 정리', done: true },
+    { id: 'd', title: 'README 데모', done: false },
+  ]
+  const BOARD = { progress: '4개 중 1개 끝냄', clock: '15:00', button: '시작하기', search: '', tasks: BOARD_TASKS }
+  const RUNNING = { ...BOARD, button: '멈추기' }
+  const SEARCHED = { ...BOARD, search: 'Diff', tasks: BOARD_TASKS.slice(0, 1) }
+
+  const tree = (depth, label, next, isMarked) => ({ depth, label, next: next ?? label, isMarked: Boolean(isMarked) })
+  const SAME = tree(1, '나머지 노드는 같음')
+
+  const BOARD_SCENARIOS = [
+    {
+      label: '타이머 1초', before: RUNNING, after: { ...RUNNING, clock: '14:59' }, marks: ['clock'],
+      trigger: 'setSecondsLeft(s => s - 1)', edit: 'setInterval이 1초마다 상태를 하나 바꿉니다.',
+      changed: { 9: '900 → 899' }, memos: [], effects: [17, 19],
+      why: '시계 글자 노드 하나만 다릅니다. 나머지 노드는 전부 같아서 연산이 1개입니다.',
+      effect: '제목 effect가 탭 제목을 바꾸고, 종료 effect는 시간이 남아 있어서 바로 끝납니다.',
+      ops: [{ type: 'TEXT', text: '"14:59" 내용으로 바꿈' }],
+      counts: { render: 1, memo: 0, diff: 1, dom: 1 },
+      rows: [tree(0, '<p role="timer">'), tree(1, '"15:00"', '"14:59"', true), SAME],
+    },
+    {
+      label: '할 일 완료', before: BOARD, after: { ...BOARD, progress: '4개 중 2개 끝냄', tasks: BOARD_TASKS.map((task, index) => (index === 0 ? { ...task, done: true } : task)) },
+      marks: ['progress', 'task-a'],
+      trigger: 'setTasks(...)', edit: '체크박스를 누르면 tasks 칸의 배열이 새 배열로 바뀝니다.',
+      changed: { 0: '새 배열' }, memos: [14, 15], effects: [16, 17],
+      why: '진행률 글자, 진행 막대 속성 2개, 그 줄의 class, 체크, 집중하기 버튼이 다릅니다. 연산 6개입니다.',
+      effect: '저장 effect가 목록을 저장하고, 제목 effect가 남은 일 개수를 탭 제목에 씁니다.',
+      ops: [
+        { type: 'TEXT', text: '"4개 중 2개 끝냄" 내용으로 바꿈' },
+        { type: 'PROPS', text: 'aria-valuenow 속성을 바꿈' },
+        { type: 'PROPS', text: 'style 속성을 바꿈' },
+        { type: 'PROPS', text: 'class 속성을 바꿈' },
+        { type: 'PROPS', text: 'checked 속성을 바꿈' },
+        { type: 'PROPS', text: 'disabled 속성을 바꿈' },
+      ],
+      counts: { render: 1, memo: 1, diff: 6, dom: 6 },
+      rows: [tree(0, '<p class="board-count">'), tree(1, '"4개 중 1개 끝냄"', '"4개 중 2개 끝냄"', true), tree(0, '<li class="task">', '<li class="task is-done">', true), SAME],
+    },
+    {
+      label: '할 일 추가', before: BOARD, after: { ...BOARD, progress: '5개 중 1개 끝냄', tasks: [...BOARD_TASKS, { id: 'e', title: '새 일', done: false }] },
+      marks: ['progress', 'task-e'],
+      trigger: 'setTasks(...), setDraft(\'\')', edit: '한 번의 제출에서 상태 두 개가 바뀝니다.',
+      changed: { 0: '새 배열', 1: '"새 일" → ""' }, memos: [14, 15], effects: [16, 17],
+      why: '기존 할 일 줄은 key가 같아서 그대로 두고, 새 li 하나만 추가합니다.',
+      effect: '저장 effect가 목록을 저장하고, 제목 effect가 남은 일 개수를 탭 제목에 씁니다.',
+      ops: [
+        { type: 'TEXT', text: '"5개 중 1개 끝냄" 내용으로 바꿈' },
+        { type: 'PROPS', text: 'aria-valuenow 속성을 바꿈' },
+        { type: 'PROPS', text: 'style 속성을 바꿈' },
+        { type: 'PROPS', text: 'value 속성을 바꿈' },
+        { type: 'PROPS', text: 'disabled 속성을 바꿈' },
+        { type: 'INSERT', text: '4번 자리에 <li> 추가' },
+      ],
+      counts: { render: 1, memo: 1, diff: 6, dom: 6 },
+      rows: [tree(0, '<ul class="task-list">'), tree(1, '기존 <li> 4개 그대로'), { ...tree(1, '', '<li key=새 일>', true), onlyNew: true }, SAME],
+    },
+    {
+      label: '검색', before: BOARD, after: SEARCHED, marks: ['search'], oldMarks: ['task-b', 'task-c', 'task-d'],
+      trigger: 'setQuery(\'Diff\')', edit: '검색칸에 입력하면 query 칸이 바뀝니다.',
+      changed: { 5: '"" → "Diff"' }, memos: [14], effects: [],
+      why: '입력칸 값이 다르고, 조건에 안 맞는 li 세 개가 새 설계도에 없습니다.',
+      effect: 'deps가 바뀐 effect가 없어서 아무것도 실행하지 않습니다.',
+      ops: [
+        { type: 'PROPS', text: 'value 속성을 바꿈' },
+        { type: 'REMOVE', text: '3번 자식 삭제' },
+        { type: 'REMOVE', text: '2번 자식 삭제' },
+        { type: 'REMOVE', text: '1번 자식 삭제' },
+      ],
+      counts: { render: 1, memo: 1, diff: 4, dom: 4 },
+      rows: [tree(0, '<input value="">', '<input value="Diff">', true), tree(0, '<ul class="task-list">'), tree(1, '<li> 첫째 그대로'), { ...tree(1, '<li> 3개', '', true), onlyOld: true }, SAME],
+    },
+    {
+      label: '보기 초기화', before: SEARCHED, after: BOARD, marks: ['search', 'task-b', 'task-c', 'task-d'],
+      trigger: 'setFilter, setQuery, setSortBy', edit: '버튼 한 번에 상태 함수 세 개를 부릅니다.',
+      changed: { 4: '같은 값', 5: '"Diff" → ""', 6: '같은 값' }, memos: [14], effects: [],
+      why: '입력칸 값이 다르고, 사라졌던 li 세 개가 새 설계도에 돌아왔습니다.',
+      effect: 'deps가 바뀐 effect가 없어서 아무것도 실행하지 않습니다.',
+      ops: [
+        { type: 'PROPS', text: 'value 속성을 바꿈' },
+        { type: 'INSERT', text: '1번 자리에 <li> 추가' },
+        { type: 'INSERT', text: '1번 자리에 <li> 추가' },
+        { type: 'INSERT', text: '1번 자리에 <li> 추가' },
+      ],
+      counts: { render: 1, memo: 1, diff: 4, dom: 4 },
+      rows: [tree(0, '<input value="Diff">', '<input value="">', true), tree(0, '<ul class="task-list">'), tree(1, '<li> 첫째 그대로'), { ...tree(1, '', '<li> 3개', true), onlyNew: true }, SAME],
+    },
+    {
+      label: '시작하기', before: BOARD, after: RUNNING, marks: ['button'],
+      trigger: 'setRunning(true)', edit: '버튼을 누르면 running 칸이 바뀝니다.',
+      changed: { 10: 'false → true' }, memos: [], effects: [17, 18],
+      why: '버튼 글자 하나만 다릅니다. 목록은 tasks가 그대로라서 useMemo가 이전 결과를 돌려줍니다.',
+      effect: '타이머 effect가 setInterval을 등록합니다. 여기서부터 1초마다 상태가 바뀝니다.',
+      ops: [{ type: 'TEXT', text: '"멈추기" 내용으로 바꿈' }],
+      counts: { render: 1, memo: 0, diff: 1, dom: 1 },
+      rows: [tree(0, '<button>'), tree(1, '"시작하기"', '"멈추기"', true), SAME],
+    },
+    {
+      label: '멈추기', before: RUNNING, after: BOARD, marks: ['button'],
+      trigger: 'setRunning(false)', edit: '버튼을 누르면 running 칸이 바뀝니다.',
+      changed: { 10: 'true → false' }, memos: [], effects: [17, 18],
+      why: '버튼 글자 하나만 다릅니다.',
+      effect: '타이머 effect의 정리 함수가 먼저 돌아 clearInterval을 부릅니다. 없으면 타이머가 살아남습니다.',
+      ops: [{ type: 'TEXT', text: '"시작하기" 내용으로 바꿈' }],
+      counts: { render: 1, memo: 0, diff: 1, dom: 1 },
+      rows: [tree(0, '<button>'), tree(1, '"멈추기"', '"시작하기"', true), SAME],
+    },
+    {
+      label: '결과 1개에서 더 입력', before: SEARCHED, after: SEARCHED, marks: [], kind: 'none',
+      trigger: 'changeQuery', edit: '검색 결과가 1개일 때 글자를 더 쳐도 보이는 목록이 그대로라서 상태로 올리지 않습니다. 상태가 그대로면 렌더도 없습니다.',
+      changed: {}, memos: [], effects: [], why: '비교할 새 설계도가 없습니다.', effect: '렌더가 없어서 effect도 없습니다.',
+      ops: [], counts: { render: 0, memo: 0, diff: 0, dom: 0 }, rows: [tree(0, '이전 그대로')],
+    },
+  ]
+
+  const BOARD_STEPS = ['상태 변경', '렌더 예약', '함수 재실행', '비교', '반영', 'effect']
+  const BOARD_PANEL = ['hooks', 'hooks', 'bnew', 'bops', 'bdom', 'hooks']
+  let boardScenario = BOARD_SCENARIOS[0]
+  let boardStep = 0
+
+  function boardCaption(item, step) {
+    const skipped = item.kind === 'none'
+    const stateCount = Object.keys(item.changed).length
+    const batch = stateCount > 1
+      ? `상태 함수를 ${stateCount}번 불렀지만 예약은 한 번입니다. 이것이 Batching입니다.`
+      : '바로 그리지 않고 지금 작업이 끝난 직후로 렌더를 예약합니다.'
+    const memo = item.memos.length > 0
+      ? 'deps가 바뀐 useMemo는 다시 계산합니다.'
+      : 'useMemo는 deps가 그대로라서 이전 결과를 돌려줍니다.'
+
+    return [
+      [item.trigger, item.edit],
+      skipped ? ['건너뜀', '상태가 그대로라서 렌더를 예약하지 않습니다.'] : ['queueMicrotask', batch],
+      skipped ? ['건너뜀', '함수를 다시 실행하지 않습니다.'] : ['FocusBoard()', `함수를 처음부터 다시 실행합니다. useState는 hooks 배열을 0번 칸부터 순서대로 읽어서 값이 유지됩니다. ${memo}`],
+      skipped ? ['건너뜀', item.why] : ['diff(이전, 새)  Phase 1 코드', item.why],
+      skipped ? ['건너뜀', '실제 DOM을 건드리지 않습니다.'] : ['applyPatches(DOM, 연산)  Phase 1 코드', '페이지 1과 같은 함수가 지시서에 적힌 곳만 고칩니다.'],
+      ['flushEffects()', item.effect],
+    ][step]
+  }
+
+  function renderSlots(item, step) {
+    const stateMarks = step <= 2 ? Object.keys(item.changed).map(Number) : []
+    const memoMarks = step === 2 ? item.memos : []
+    const effectMarks = step === 5 ? item.effects : []
+    const marked = [...stateMarks, ...memoMarks, ...effectMarks]
+
+    const slots = SLOTS.map((name, index) =>
+      `<li class="slot ${marked.includes(index) ? 'is-marked' : ''}" data-slot="${index}"><b>${index}</b><span>${name}</span></li>`)
+    const notes = step <= 2
+      ? Object.entries(item.changed).map(([index, text]) => `${SLOTS[index]}: ${escapeHtml(text)}`).join(', ')
+      : ''
+    return `<ol class="slots">${slots.join('')}</ol><p class="slot-note">${notes || '칸의 번호는 Hook을 부른 순서입니다.'}</p>`
+  }
+
+  function renderBoardTree(item, side, withMarks) {
+    const rows = item.rows
+      .filter((row) => (side === 'old' ? !row.onlyNew : !row.onlyOld))
+      .map((row) => {
+        const text = side === 'old' ? row.label : row.next
+        const indent = '&nbsp;&nbsp;'.repeat(row.depth)
+        return `<li class="${row.isMarked && withMarks ? 'is-marked' : ''}"><span>${indent}${escapeHtml(text)}</span></li>`
+      })
+    return `<ul class="tree">${rows.join('')}</ul>`
+  }
+
+  function renderMini(state, marks) {
+    const rows = state.tasks.map((task) => {
+      const classes = [task.done ? 'is-done' : '', markClass(`task-${task.id}`, marks)].join(' ')
+      return `<li data-id="task-${task.id}" class="${classes}">${task.title}</li>`
+    })
+    return `<div class="mini">
+      <p data-id="progress" class="${markClass('progress', marks)}">${state.progress}</p>
+      <p data-id="clock" class="mini-clock ${markClass('clock', marks)}">${state.clock}</p>
+      <span data-id="button" class="mini-button ${markClass('button', marks)}">${state.button}</span>
+      <p data-id="search" class="${markClass('search', marks)}">검색: ${state.search || '(비어 있음)'}</p>
+      <ul>${rows.join('')}</ul>
+    </div>`
+  }
+
+  function renderBoardOps(item) {
+    if (item.ops.length === 0) return '<p class="empty">연산 0개. 렌더가 일어나지 않았습니다.</p>'
+    const rows = item.ops.map((op) =>
+      `<li class="op"><span class="op-head"><span class="badge op-${op.type}">${op.type}</span></span><span>${escapeHtml(op.text)}</span></li>`)
+    return `<ol class="ops">${rows.join('')}</ol>`
+  }
+
+  function renderRecord(item, step) {
+    const { render, memo, diff, dom } = item.counts
+    const show = (value, from) => (step >= from ? value : 0)
+    return `<dl class="record">
+      <div><dt>렌더 횟수</dt><dd data-record="2">+${show(render, 2)}</dd></div>
+      <div><dt>목록 재계산</dt><dd data-record="2">+${show(memo, 2)}</dd></div>
+      <div><dt>Diff 연산</dt><dd data-record="3">${show(diff, 3)}</dd></div>
+      <div><dt>실제 DOM 변경</dt><dd data-record="4">${show(dom, 4)}</dd></div>
+    </dl>`
+  }
+
+  function renderBoard() {
+    stopMotion()
+    const item = boardScenario
+    const step = boardStep
+
+    markChip($('board-scenarios'), item.label)
+    $('board-rail').innerHTML = renderRail(BOARD_STEPS, step, (index) => boardCaption(item, index))
+
+    $('body-hooks').innerHTML = renderSlots(item, step)
+    $('body-bold').innerHTML = renderBoardTree(item, 'old', step >= 3)
+    $('body-bnew').innerHTML = step >= 2 && item.kind !== 'none'
+      ? renderBoardTree(item, 'new', step >= 3)
+      : '<p class="empty">함수를 다시 실행하면 이 자리에 만들어집니다.</p>'
+    $('body-bops').innerHTML = step >= 3 ? renderBoardOps(item) : '<p class="empty">아직 비교하지 않았습니다.</p>'
+    $('body-bdom').innerHTML = renderMini(step >= 4 ? item.after : item.before, step >= 4 ? item.marks : [])
+    $('body-brecord').innerHTML = renderRecord(item, step)
+
+    for (const name of ['hooks', 'bold', 'bnew', 'bops', 'bdom', 'brecord']) {
+      $(`panel-${name}`).classList.toggle('is-active', name === BOARD_PANEL[step] || (step === 3 && name === 'bold'))
+    }
+
+    holdHeight($('board-rail'))
+    holdHeight($('board-rail').parentElement.querySelector('.panels'))
+  }
+
+  function popRecord(step) {
+    for (const value of $('body-brecord').querySelectorAll(`[data-record="${step}"]`)) {
+      value.animate([{ transform: 'scale(1.5)', color: color('--op-replace') }, { transform: 'none' }], { duration: 420 * PACE, delay: 300 * PACE, easing: 'ease-out' })
+    }
+  }
+
+  /** 함수가 다시 실행되면서 hooks 칸을 0번부터 차례로 지나갑니다. */
+  function walkSlots() {
+    const stepMs = 70 * PACE
+    $('body-hooks').querySelectorAll('.slot').forEach((slot, index) => {
+      const keyframes = slot.classList.contains('is-marked')
+        ? [{ backgroundColor: 'transparent', color: color('--ink') }, { backgroundColor: color('--marker'), color: color('--on-marker') }]
+        : [{ backgroundColor: color('--tint'), boxShadow: `inset 3px 0 0 ${color('--cobalt')}` }, { backgroundColor: 'transparent', boxShadow: 'inset 0 0 0 transparent' }]
+      slot.animate(keyframes, { duration: 240 * PACE, delay: index * stepMs, fill: 'backwards' })
+    })
+    return SLOTS.length * stepMs
+  }
+
+  async function playBoard(index) {
+    const id = runId
+    const alive = () => id === runId
+    const item = boardScenario
+    const skipped = item.kind === 'none'
+    const firstSlot = () => $('body-hooks').querySelector('.slot.is-marked')
+
+    if (index === 0) {
+      revealMarks($('body-hooks'), skipped ? 0 : 640)
+      if (!skipped && firstSlot()) await fly($('panel-bdom'), firstSlot(), '새 값', 'op-TEXT')
+    } else if (index === 1 && !skipped) {
+      await fly($('panel-hooks'), $('panel-bnew'), '렌더 예약', 'op-MOVE')
+    } else if (index === 2 && !skipped) {
+      const walked = walkSlots()
+      revealRows($('body-bnew'), walked)
+      popRecord(2)
+    } else if (index === 3 && !skipped) {
+      playCompare($('body-bold'), $('body-bnew'), $('body-bops'))
+      popRecord(3)
+    } else if (index === 4 && !skipped) {
+      await playApply({ item, body: $('body-bdom'), opsBody: $('body-bops'), draw: renderMini, alive })
+      if (alive()) popRecord(4)
+    } else if (index === 5 && item.effects.length > 0) {
+      revealMarks($('body-hooks'), 640 * PACE)
+      if (firstSlot()) await fly($('panel-bdom'), firstSlot(), 'effect', 'op-INSERT')
+    }
+  }
+
+  function boardGoTo(next, animate = true) {
+    boardStep = next
+    renderBoard()
+    return animate && motionOn ? playBoard(next) : Promise.resolve()
+  }
+
+  $('board-scenarios').innerHTML = BOARD_SCENARIOS.map((item) => `<span class="chip">${item.label}</span>`).join('')
+
+
+  /* 버튼이 없으므로 내용은 전부 펼쳐 두고, 움직임은 보는 자리를 따라갑니다. */
+
+  const TRACE = JSON.parse($('trace-data').textContent)
+  const MIN_VISIBLE = 200
+
+  const inlineCode = (text) => escapeHtml(text).replace(/`([^`]+)`/g, '<code>$1</code>')
+  const shortFile = (file) => file.replace(/^src\//, '')
+  const baseName = (file) => file.split('/').at(-1)
+
+  function markChip(container, label) {
+    for (const chip of container.children) {
+      if (chip.textContent === label) chip.setAttribute('aria-current', 'true')
+      else chip.removeAttribute('aria-current')
+    }
+  }
+
+  function renderRail(names, current, describe) {
+    return names.map((name, index) => {
+      const [fn, text] = describe(index)
+      const state = index < current ? 'is-done' : ''
+      const mark = index === current ? 'aria-current="step"' : ''
+      return `<li><div class="step ${state}" ${mark}><b>${index + 1}</b><span class="step-name">${name}</span><code>${escapeHtml(fn)}</code><small>${escapeHtml(text)}</small></div></li>`
+    }).join('')
+  }
+
+  /** 예시마다 글 길이가 달라도 아래 내용이 들썩이지 않게, 가장 컸던 높이를 유지합니다. */
+  function holdHeight(element) {
+    const held = Number.parseFloat(element.style.minHeight) || 0
+    element.style.minHeight = `${Math.max(held, element.offsetHeight)}px`
+  }
+
+  function markFlow(flow, index) {
+    Array.from($(flow.status).children).forEach((row, position) => row.classList.toggle('is-on', position === index))
+  }
+
+  function renderFlowLists() {
+    for (const flow of Object.values(FLOWS)) {
+      $(flow.status).innerHTML = [...flow.parts.map((part) => part.text), flow.end]
+        .map((text) => `<li>${escapeHtml(text)}</li>`).join('')
+    }
+  }
+
+  const opList = (ops) => (ops.length === 0
+    ? '<span class="empty">연산 없음</span>'
+    : ops.map((op) => `<span class="op-line"><span class="badge op-${op.type}">${op.type}</span> ${escapeHtml(op.text)}</span>`).join(''))
+
+  function renderScenarioTables() {
+    $('scenario-rows').innerHTML = SCENARIOS.map((item) =>
+      `<tr><th scope="row">${item.label}</th><td>${escapeHtml(item.edit || '기록 위치를 v2에서 v1로 옮깁니다.')}</td><td>${escapeHtml(item.why)}</td><td>${opList(item.ops)}</td></tr>`).join('')
+
+    $('board-scenario-rows').innerHTML = BOARD_SCENARIOS.map((item) => {
+      const { render: renders, memo, diff, dom } = item.counts
+      return `<tr><th scope="row">${item.label}<code class="cell-code">${escapeHtml(item.trigger)}</code></th><td>${escapeHtml(item.edit)} ${escapeHtml(item.why)}</td><td>${opList(item.ops)}</td><td>${escapeHtml(item.effect)}</td><td>렌더 ${renders}, 목록 재계산 ${memo}, 연산 ${diff}, DOM 변경 ${dom}</td></tr>`
+    }).join('')
+  }
+
+  /* 코드 실행 경로: 실제 소스에서 뽑은 줄입니다. */
+
+  function renderTraceRow(step, index) {
+    const lines = step.code.map((text, offset) => {
+      const line = step.start + offset
+      return `<li class="${line === step.line ? 'is-target' : ''}"><span class="trace-ln">${line}</span><code>${escapeHtml(text) || ' '}</code></li>`
+    }).join('')
+    return `<li class="trace-row" data-file="${escapeHtml(baseName(step.file))}" data-line="${step.line}">
+      <div class="trace-info">
+        <b class="trace-num">${index + 1}</b>
+        <div>
+          <p class="trace-fn">${escapeHtml(step.fn)}</p>
+          <p class="trace-where">${escapeHtml(shortFile(step.file))}:${step.line}</p>
+          <p class="trace-text">${inlineCode(step.text)}</p>
+        </div>
+      </div>
+      <ol class="trace-lines" aria-label="${escapeHtml(baseName(step.file))} ${step.line}번 줄 주변 코드">${lines}</ol>
+    </li>`
+  }
+
+  function renderTrace(root) {
+    const flows = root.dataset.flows.split(',').map((id) => TRACE.flows.find((flow) => flow.id === id))
+    root.innerHTML = flows.map((flow) => `<article class="trace-flow">
+      <h4>${escapeHtml(flow.title)}</h4>
+      <p class="note">${inlineCode(flow.summary)}</p>
+      <ol class="trace-rows" aria-label="${escapeHtml(flow.title)} 실행 순서">${flow.steps.map(renderTraceRow).join('')}</ol>
+    </article>`).join('')
+  }
+
+  /** 글을 지우지 않고 색만 위에서 아래로 훑습니다. 읽던 코드가 깜빡이면 안 됩니다. */
+  function playRow(row, previous) {
+    row.querySelectorAll('.trace-lines li').forEach((line, offset) => {
+      line.animate([{ backgroundColor: color('--tint') }, { backgroundColor: 'transparent' }],
+        { duration: 320 * PACE, delay: Math.min(offset, 14) * 24 * PACE, easing: 'ease-out' })
+    })
+    row.querySelector('.is-target')?.animate([
+      { backgroundColor: color('--cobalt'), color: color('--on-cobalt') },
+      { backgroundColor: color('--tint'), color: color('--ink') },
+    ], { duration: 700 * PACE, delay: 260 * PACE, easing: 'ease-out', fill: 'backwards' })
+    row.querySelector('.trace-num').animate([{ transform: 'scale(1.35)' }, { transform: 'none' }], { duration: 260 * PACE, easing: 'ease-out' })
+
+    // 앞 단계의 실행 줄에서 이 단계의 실행 줄로 신호를 보냅니다. 위로 되돌아갈 때는 보내지 않습니다.
+    if (previous?.nextElementSibling === row && !document.querySelector('.fly')) {
+      const anchor = (item) => item.querySelector('.is-target .trace-ln')
+      fly(anchor(previous), anchor(row), `${row.dataset.file}:${row.dataset.line}`, 'op-REPLACE', -1)
+    }
+  }
+
+  const traceRows = []
+  let currentRow = null
+
+  function lightCenterRow() {
+    const middle = innerHeight / 2
+    const row = traceRows.find((item) => {
+      const box = item.getBoundingClientRect()
+      return box.top <= middle && box.bottom > middle
+    })
+    if (!row || row === currentRow) return
+
+    const previous = currentRow
+    previous?.classList.remove('is-current')
+    row.classList.add('is-current')
+    currentRow = row
+    if (motionOn) playRow(row, previous)
+  }
+
+  /* 재생: 화면에 들어온 구역이 저절로 돕니다. 같은 종류는 한 번에 하나만 움직입니다. */
+
+  function visibleHeight(element) {
+    const box = element.getBoundingClientRect()
+    return Math.max(0, Math.min(box.bottom, innerHeight) - Math.max(box.top, 0))
+  }
+
+  function createDirector(blocks) {
+    let current = null
+    let token = 0
+
+    function stop() {
+      token += 1
+      current?.stop()
+      current = null
+    }
+
+    function choose() {
+      if (!motionOn) return stop()
+      if (current && visibleHeight(current.element) >= MIN_VISIBLE) return undefined
+
+      const next = blocks
+        .map((block) => ({ block, height: visibleHeight(block.element) }))
+        .filter(({ height }) => height >= MIN_VISIBLE)
+        .sort((first, second) => second.height - first.height)[0]?.block ?? null
+
+      if (next === current) return undefined
+      stop()
+      if (!next) return undefined
+
+      current = next
+      const mine = token
+      next.run(() => mine === token)
+      return undefined
+    }
+
+    return { choose }
+  }
+
+  async function loopFlow(name, alive) {
+    while (alive()) {
+      await playFlow(name)
+      if (alive()) await sleep(3000)
+    }
+  }
+
+  function createStage({ items, steps, show, go }) {
+    let index = -1
+
+    return async function run(alive) {
+      while (alive()) {
+        index = (index + 1) % items.length
+        show(items[index])
+        for (let position = 0; position < steps && alive(); position += 1) {
+          await go(position)
+          if (alive()) await sleep((position === steps - 3 ? 2400 : 1500) * PACE)
+        }
+      }
+    }
+  }
+
+  const sectionOf = (id) => $(id).closest('section')
+
+  function flowBlock(name) {
+    return {
+      element: sectionOf(FLOWS[name].status).querySelector('.map-scroll'),
+      run: (alive) => loopFlow(name, alive),
+      stop() {
+        flowId += 1
+        clearFlow()
+        markFlow(FLOWS[name], -1)
+      },
+    }
+  }
+
+  function renderReport() {
+    $('report-toc').innerHTML = [...document.querySelectorAll('.report-part h3')].map((title, index) => {
+      title.parentElement.id = 'report-' + (index + 1)
+      const name = title.textContent.split('. ').slice(1).join('. ')
+      return '<li><a href="#report-' + (index + 1) + '">' + escapeHtml(name) + '</a></li>'
+    }).join('')
+
+    const rows = [
+      ['phase1', 'Virtual DOM, Diff, Patch, 기록'],
+      ['phase2', 'h, FunctionComponent, Hooks'],
+      ['app', '두 페이지, 렌더 기록, 테마'],
+      ['styles', '화면 스타일'],
+      ['tests', '단위 테스트와 기능 테스트'],
+    ]
+    const size = (item) => `파일 ${item.files}개, ${item.lines.toLocaleString()}줄`
+    $('report-sizes').innerHTML = rows.map(([key, role]) =>
+      `<tr><td>${key}</td><td>${role}</td><td class="num">${size(TRACE.sizes.M[key])}</td><td class="num">${size(TRACE.sizes.W[key])}</td></tr>`).join('')
+
+  }
+
+  for (const root of document.querySelectorAll('.trace')) renderTrace(root)
+  traceRows.push(...document.querySelectorAll('.trace-row'))
+  renderReport()
+  renderScenarioTables()
+  renderFlowLists()
+  render()
+  renderBoard()
+
+  const flows = createDirector(['lab', 'board', 'link'].map(flowBlock))
+  const stages = createDirector([
+    {
+      element: sectionOf('rail'),
+      run: createStage({ items: SCENARIOS, steps: 5, show: (item) => { scenario = item }, go: goTo }),
+      stop: stopMotion,
+    },
+    {
+      element: sectionOf('board-rail'),
+      run: createStage({ items: BOARD_SCENARIOS, steps: 6, show: (item) => { boardScenario = item }, go: boardGoTo }),
+      stop: stopMotion,
+    },
+  ])
+
+  let viewQueued = false
+
+  function followView() {
+    if (viewQueued) return
+    viewQueued = true
+    requestAnimationFrame(() => {
+      viewQueued = false
+      flows.choose()
+      stages.choose()
+      lightCenterRow()
+    })
+  }
+
+  addEventListener('scroll', followView, { passive: true })
+  addEventListener('resize', () => {
+    for (const element of document.querySelectorAll('.rail, .panels')) element.style.minHeight = ''
+    followView()
+  })
+
+  // 글을 가리는 버튼이 아니라 저절로 도는 움직임을 멈추는 스위치입니다.
+  $('motion').addEventListener('click', () => {
+    motionOn = !motionOn
+    $('motion').textContent = motionOn ? '움직임 끄기' : '움직임 켜기'
+    followView()
+  })
+
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest('.page-toc a, .report-toc a')
+    if (!link) return
+    event.preventDefault()
+    $(link.getAttribute('href').slice(1)).scrollIntoView({ block: 'start' })
+  })
+
+  // Windows의 애니메이션 효과가 꺼져 있어도 재생합니다. 재생 버튼이 없어서 여기서 막으면 볼 방법이 없고, 움직임 끄기로 멈출 수 있습니다.
+  followView()
+</script>
