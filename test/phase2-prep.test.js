@@ -92,3 +92,21 @@ test('controlledOnly: checked 없는 체크박스는 그대로, checked:false �
   syncFormState(a, ctl, { controlledOnly: true });
   assert.strictEqual(a.checked, false);
 });
+
+test('controlledOnly: value 가 null · undefined 면 빈 문자열, checked null 이면 false', () => {
+  const { document, rootEl } = setup();
+  for (const empty of [null, undefined]) {
+    const v = V.h('input', { type: 'text', value: empty });
+    const el = V.render(v, document);
+    rootEl.appendChild(el);
+    el.value = 'typed';
+    syncFormState(el, v, { controlledOnly: true });
+    assert.strictEqual(el.value, '');
+  }
+  const cv = V.h('input', { type: 'checkbox', checked: null });
+  const cel = V.render(cv, document);
+  rootEl.appendChild(cel);
+  cel.checked = true;
+  syncFormState(cel, cv, { controlledOnly: true });
+  assert.strictEqual(cel.checked, false);
+});

@@ -96,24 +96,25 @@
     const controlled = !!(opts && opts.controlledOnly);
     const own = (k) => Object.prototype.hasOwnProperty.call(p, k);
     const has = (k) => Object.prototype.hasOwnProperty.call(p, k) && p[k] !== null && p[k] !== false && p[k] !== undefined;
+    const val = () => (has('value') ? String(p.value) : '');
     if (el.localName === 'input' && el.namespaceURI === V.HTML_NS) {
       if (el.type === 'checkbox' || el.type === 'radio') {
         if (!controlled) el.checked = has('checked');
         else if (own('checked') && el.checked !== has('checked')) el.checked = has('checked');
       } else if (el.type !== 'file') {
         if (!controlled) el.value = has('value') ? String(p.value) : '';
-        else if (own('value') && el.value !== String(p.value)) el.value = String(p.value);
+        else if (own('value') && el.value !== val()) el.value = val();
       }
     } else if (el.localName === 'textarea') {
       if (!controlled) el.value = el.textContent;
-      else if (own('value') && el.value !== String(p.value)) el.value = String(p.value);
+      else if (own('value') && el.value !== val()) el.value = val();
     } else if (el.localName === 'option') {
       if (!controlled) el.selected = has('selected');
       else if (own('selected') && el.selected !== has('selected')) el.selected = has('selected');
     }
     const container = childContainer(el);
     vnode.children.forEach((child, i) => syncFormState(container.childNodes[i], child, opts));
-    if (el.localName === 'select' && has('value') && !(controlled && el.value === String(p.value))) el.value = String(p.value);
+    if (el.localName === 'select' && has('value') && !(controlled && el.value === val())) el.value = val();
   }
 
   /* 실제 요소의 자식을 Virtual DOM 대로 다시 그려 1:1 로 맞추는 함수 */

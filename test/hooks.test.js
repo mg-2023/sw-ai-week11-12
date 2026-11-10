@@ -44,7 +44,6 @@ test('useState: 두 개는 각자 값을 유지하고 inspect 순서는 호출 �
     return null;
   });
   setA('A');
-  comp.run();
   assert.deepEqual(seen, [['a', 'b'], ['A', 'b']]);
   assert.deepEqual(comp.inspect().hooks, [{ kind: 'state', value: 'A' }, { kind: 'state', value: 'b' }]);
 });

@@ -30,11 +30,29 @@
     return current.hooks[i];
   }
 
-  /* 상태를 기억하고 [값, 바꾸는 함수] 를 돌려주는 훅 (값 저장까지, 다시 그리기는 다음 작업) */
+  /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 무시, 렌더 예외면 값을 되돌림) */
+  function makeSetter(hook, comp) {
+    return (next) => {
+      if (comp.phase === 'render') throw new Error('렌더 중에는 setState 를 부를 수 없습니다 (렌더 중 setState)');
+      if (comp.destroyed) return;
+      const prev = hook.value;
+      const value = typeof next === 'function' ? next(prev) : next;
+      if (Object.is(prev, value)) return;
+      hook.value = value;
+      try {
+        comp.update();
+      } catch (err) {
+        hook.value = prev;
+        throw err;
+      }
+    };
+  }
+
+  /* 상태를 기억하고 [값, 바꾸는 함수] 를 돌려주는 훅 (값이 바뀌면 컴포넌트를 다시 그린다) */
   function useState(init) {
     const slot = nextSlot('state', () => {
       const hook = { kind: 'state', value: typeof init === 'function' ? init() : init };
-      hook.setter = (next) => { hook.value = typeof next === 'function' ? next(hook.value) : next; };
+      hook.setter = makeSetter(hook, current);
       return hook;
     });
     return [slot.value, slot.setter];

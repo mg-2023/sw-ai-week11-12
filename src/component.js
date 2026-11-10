@@ -4,6 +4,7 @@
 
   const V = typeof require === 'function' ? require('./vdom.js') : root.MiniReact;
   const P = typeof require === 'function' ? require('./patch.js') : root.MiniReact;
+  const D = typeof require === 'function' ? require('./diff.js') : root.MiniReact;
   const H = typeof require === 'function' ? require('./hooks.js') : root.MiniReact;
 
   /* 패치 종류별 개수를 세어 다섯 키가 모두 있는 객체로 돌려주는 함수 */
@@ -45,14 +46,15 @@
       this.hookCount = null;
       this.mounted = false;
       this.listeners = [];
+      this.phase = 'idle';
+      this.destroyed = false;
     }
 
     /* 함수를 실행해 펼친 트리로 컨테이너를 처음 그리고 보고하는 함수 */
     mount() {
       if (this.mounted) throw new Error('FunctionComponent: 이미 mount 되었습니다');
       const start = performance.now();
-      const result = this.run();
-      const tree = expand(result);
+      const tree = this.renderTree();
       const vdom = { type: this.container.localName, props: {}, children: tree ? [tree] : [] };
       P.mount(this.container, vdom);
       P.syncFormState(this.container, vdom, { controlledOnly: true });
@@ -77,13 +79,43 @@
       }
     }
 
-    /* 다시 그리는 함수 (다음 작업에서 구현) */
+    /* render 단계로 함수를 실행해 펼친 트리를 돌려주는 함수 (끝나면 phase 를 idle 로) */
+    renderTree() {
+      this.phase = 'render';
+      try {
+        return expand(this.run());
+      } finally {
+        this.phase = 'idle';
+      }
+    }
+
+    /* 다시 렌더해 diff 한 patch 만 적용하고 보고하는 함수 (patch 실패 시 새 vdom 으로 다시 mount) */
     update() {
-      throw new Error('update: not implemented yet');
+      const start = performance.now();
+      const tree = this.renderTree();
+      const vdom = { type: this.container.localName, props: {}, children: tree ? [tree] : [] };
+      const stats = { compared: 0, eventOnly: 0 };
+      const patches = D.diff(this.vdom, vdom, stats);
+      let recovered = false;
+      this.phase = 'commit';
+      try {
+        P.applyPatches(this.container, patches);
+        P.syncFormState(this.container, vdom, { controlledOnly: true });
+      } catch (err) {
+        P.mount(this.container, vdom);
+        P.syncFormState(this.container, vdom, { controlledOnly: true });
+        recovered = true;
+      } finally {
+        this.phase = 'idle';
+      }
+      this.vdom = vdom;
+      // effect 단계 자리 (다음 작업에서 채움)
+      this.report('update', start, stats.compared, patches, stats.eventOnly, recovered);
     }
 
     /* 컴포넌트를 정리하는 함수 (구독 해제만, effect 정리는 다음 작업) */
     destroy() {
+      this.destroyed = true;
       this.listeners = [];
     }
 
@@ -94,7 +126,7 @@
     }
 
     /* 측정값을 모아 등록된 콜백에 보내는 함수 */
-    report(kind, start, compared, patches, eventOnly) {
+    report(kind, start, compared, patches, eventOnly, recovered = false) {
       const report = {
         kind,
         ms: performance.now() - start,
@@ -102,7 +134,7 @@
         eventOnly,
         patches: countPatches(patches),
         hookCount: this.hooks.length,
-        recovered: false,
+        recovered,
       };
       for (const cb of this.listeners.slice()) cb(report);
     }
