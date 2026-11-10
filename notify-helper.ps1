@@ -18,10 +18,8 @@ $BrowserPaths = @(
   "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
 )
 
-# 알림 발신자 이름과 아이콘입니다. HKCU\Software\Classes\AppUserModelId\mini-react.Notify에 등록해 두었고,
-# 등록 값 DisplayName = mini-react, IconUri = notify-icon.png (보라 번개, public/favicon.svg에서 만든 PNG)입니다.
-$AppId = 'mini-react.Notify'
-$IconUri = ([System.Uri](Join-Path $PSScriptRoot 'notify-icon.png')).AbsoluteUri
+# Windows 알림은 앱 이름이 있어야 떠서 PowerShell의 이름을 빌립니다.
+$AppId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
 
 Add-Type @'
 using System;
@@ -125,7 +123,7 @@ function Get-SafeText($value) {
 
 function Show-Toast($title, $message) {
   $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-  $xml.LoadXml("<toast><visual><binding template='ToastGeneric'><image placement='appLogoOverride' src='$IconUri'/><text>$title</text><text>$message</text></binding></visual></toast>")
+  $xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$title</text><text>$message</text></binding></visual></toast>")
   $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
   [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($AppId).Show($toast)
 }
