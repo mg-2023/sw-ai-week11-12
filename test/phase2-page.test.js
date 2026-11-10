@@ -140,3 +140,13 @@ test('문서 제목에 남은 일 수가 들어간다', () => {
   items(win)[0].querySelector('input[type="checkbox"]').click();
   assert.ok(win.document.title.includes(String(remaining(win))));
 });
+
+test('addClick 은 준비(타이핑)를 빼고 추가 클릭만 잰다 — 배칭 전 기준선 2', () => {
+  const win = loadPage();
+  win.document.querySelector('[data-scenario="addClick"]').click();
+  const r = win.Phase2.records[0];
+  assert.strictEqual(r.scenario, 'addClick');
+  assert.strictEqual(items(win).length, 3);
+  assert.strictEqual(win.document.querySelector('#demo input[type="text"]').value, '');
+  assert.strictEqual(r.renders, 2);
+});

@@ -66,6 +66,7 @@
         reverse: () => setTodos((list) => list.slice().reverse()),
         prepend: () => setTodos((list) => [makeTodo('맨 앞 항목')].concat(list)),
         editOne: () => setTodos((list) => list.map((t, i) => (i === Math.floor(list.length / 2) ? { ...t, text: t.text + '!' } : t))),
+        addClick: () => doc.querySelector('#demo button[type="submit"]').click(),
         set10: () => { for (let i = 0; i < 10; i++) setTodos((list) => list.map((t, j) => (j === 0 ? { ...t, done: !t.done } : t))); },
       });
     }, []);
@@ -90,7 +91,13 @@
 
   const records = [];
   const totals = { renders: 0, ms: 0, compared: 0, patches: 0, domMutations: 0 };
-  const Phase2 = { app: null, actions: {}, records, recordsToMarkdown, runScenario };
+  const Phase2 = { app: null, actions: {}, prepares: {}, records, recordsToMarkdown, runScenario };
+  /* addClick 준비 : 입력칸에 글자를 넣고 input 이벤트를 보내는 함수 */
+  Phase2.prepares.addClick = () => {
+    const input = doc.querySelector('#demo input[type="text"]');
+    input.value = '측정 항목';
+    input.dispatchEvent(new root.Event('input', { bubbles: true }));
+  };
   root.Phase2 = Phase2;
 
   const demo = doc.getElementById('demo');
@@ -148,6 +155,8 @@
   function runScenario(id) {
     const action = Phase2.actions[id];
     if (!action) throw new Error('모르는 시나리오: ' + id);
+    const prepare = Phase2.prepares[id];
+    if (prepare) prepare();
     totals.domMutations += observer.takeRecords().length;
     const before = { ...totals };
     action();
