@@ -204,3 +204,59 @@ test('effect 가 여럿 throw 하면 AggregateError 로 모아 던진다', () =>
   }, {}, env.rootEl);
   assert.throws(() => comp.mount(), (err) => err instanceof AggregateError && err.errors.length === 2);
 });
+
+test('effect A 가 setState, effect B 가 throw → 던지되 새 값이 그려지고 깃발이 없고 다음 setState 는 보고 한 번', () => {
+  const env = setup();
+  let set;
+  const comp = new FunctionComponent(() => {
+    const [n, setN] = H.useState(0);
+    const [m, setM] = H.useState(0);
+    set = setM;
+    H.useEffect(() => { if (n === 0) setN(1); }, [n]);
+    H.useEffect(() => { if (n === 0) throw new Error('B'); }, [n]);
+    return h('p', null, String(n), String(m));
+  }, {}, env.rootEl);
+  const kinds = [];
+  comp.onCommit((r) => kinds.push(r.kind));
+  assert.throws(() => comp.mount(), /B/);
+  assert.equal(env.rootEl.textContent, '10');
+  assert.equal(comp.pendingUpdate, false);
+  kinds.length = 0;
+  set(1);
+  assert.deepEqual(kinds, ['update']);
+});
+
+test('밀린 setState 의 재렌더가 던지면 값을 되돌리고 화면은 그대로, 이어서 정상', () => {
+  const env = setup();
+  let setN;
+  const comp = new FunctionComponent(() => {
+    const [n, s] = H.useState(0);
+    const [m, setM] = H.useState(0);
+    setN = s;
+    H.useEffect(() => { if (m === 0) setM(1); }, [m]);
+    if (m === 1 && n === 0) throw new Error('render boom');
+    return h('p', null, String(n), String(m));
+  }, {}, env.rootEl);
+  assert.throws(() => comp.mount(), /render boom/);
+  assert.equal(comp.inspect().hooks[1].value, 0);
+  assert.equal(env.rootEl.textContent, '00');
+  setN(2);
+  assert.equal(env.rootEl.textContent, '20');
+});
+
+test('update loop 에러 뒤에도 일반 setState 를 받는다', () => {
+  const env = setup();
+  let setT;
+  const comp = new FunctionComponent(() => {
+    const [n, setN] = H.useState(0);
+    const [t, s] = H.useState(0);
+    setT = s;
+    H.useEffect(() => { if (t === 0) setN(n + 1); });
+    return h('p', null, String(n), '/', String(t));
+  }, {}, env.rootEl);
+  assert.throws(() => comp.mount(), /update loop/);
+  assert.equal(comp.pendingUpdate, false);
+  assert.doesNotThrow(() => setT(1));
+  assert.equal(env.rootEl.textContent.endsWith('/1'), true);
+  assert.equal(comp.pendingUpdate, false);
+});

@@ -49,6 +49,7 @@
       if (Object.is(prev, value)) return;
       hook.value = value;
       if (comp.phase === 'commit') {
+        if (!comp.queued.some((q) => q.hook === hook)) comp.queued.push({ hook, prev });
         comp.pendingUpdate = true;
         return;
       }

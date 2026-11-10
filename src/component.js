@@ -65,6 +65,7 @@
       this.destroyed = false;
       this.pendingEffects = [];
       this.pendingUpdate = false;
+      this.queued = [];
     }
 
     /* 함수를 실행해 펼친 트리로 컨테이너를 처음 그리고 보고하는 함수 */
@@ -74,18 +75,17 @@
       const tree = this.renderTree();
       const vdom = { type: this.container.localName, props: {}, children: tree ? [tree] : [] };
       this.phase = 'commit';
+      let errors;
       try {
         P.mount(this.container, vdom);
         P.syncFormState(this.container, vdom, { controlledOnly: true });
         this.vdom = vdom;
         this.mounted = true;
-        const errors = this.runEffects();
-        this.report('mount', start, 0, [], 0);
-        this.finishCommit(errors);
+        errors = this.runEffects().concat(this.report('mount', start, 0, [], 0));
       } finally {
         this.phase = 'idle';
       }
-      this.flushPending();
+      this.settle(errors);
     }
 
     /* 모은 effect 를 훅 순서대로 (이전 cleanup → 실행 → 새 cleanup 저장) 돌리고 던진 예외를 목록으로 돌려주는 함수 */
@@ -114,14 +114,35 @@
       if (errors.length > 1) throw new AggregateError(errors, 'effect 여러 개에서 예외가 났습니다');
     }
 
-    /* 커밋 중 setState 로 밀린 갱신을 update 한 번씩으로 처리하는 함수 (연쇄 50 번 넘으면 에러) */
-    flushPending() {
+    /* 커밋 중 setState 로 밀린 갱신을 먼저 처리한 뒤 붙잡아 둔 effect · onCommit 예외를 던지는 함수 (갱신 자체의 예외가 이기고, 붙잡은 예외는 heldErrors 에 붙인다) */
+    settle(held) {
+      try {
+        this.flushPending(held);
+      } catch (err) {
+        if (held.length > 0 && err && typeof err === 'object') err.heldErrors = held;
+        throw err;
+      }
+      this.finishCommit(held);
+    }
+
+    /* 밀린 값을 되돌리는 함수 (같은 Hook 은 맨 처음 값으로) */
+    restoreQueued(batch) {
+      for (const { hook, prev } of batch) hook.value = prev;
+    }
+
+    /* 밀린 갱신을 update 한 번씩으로 처리하는 함수 (렌더 예외 · 연쇄 50 번 초과면 그 묶음의 값을 되돌림) */
+    flushPending(held) {
       let chain = 0;
       while (this.pendingUpdate && !this.destroyed) {
+        const batch = this.queued;
+        this.queued = [];
         this.pendingUpdate = false;
         chain += 1;
-        if (chain > 50) throw new Error('update loop');
-        this.updateOnce();
+        if (chain > 50) {
+          this.restoreQueued(batch);
+          throw new Error('update loop');
+        }
+        held.push(...this.updateOnce(() => this.restoreQueued(batch)));
       }
     }
 
@@ -156,12 +177,12 @@
 
     /* 한 번 갱신하고 커밋 중 밀린 setState 가 있으면 이어서 갱신하는 함수 */
     update(undo) {
-      this.updateOnce(undo);
-      this.flushPending();
+      this.settle(this.updateOnce(undo));
     }
 
-    /* 다시 렌더해 diff 한 patch 만 적용하고 effect 를 돌린 뒤 보고하는 함수 (렌더 예외면 undo 로 값을 되돌리고, patch 실패 시 새 vdom 으로 다시 mount) */
+    /* 다시 렌더해 diff 한 patch 만 적용하고 effect 를 돌린 뒤 보고하는 함수 (렌더 예외면 undo 로 값을 되돌리고, patch 실패 시 새 vdom 으로 다시 mount, effect · onCommit 예외는 목록으로 돌려줌) */
     updateOnce(undo) {
+      let errors;
       const start = performance.now();
       let tree;
       try {
@@ -185,12 +206,11 @@
           recovered = true;
         }
         this.vdom = vdom;
-        const errors = this.runEffects();
-        this.report('update', start, stats.compared, patches, stats.eventOnly, recovered);
-        this.finishCommit(errors);
+        errors = this.runEffects().concat(this.report('update', start, stats.compared, patches, stats.eventOnly, recovered));
       } finally {
         this.phase = 'idle';
       }
+      return errors;
     }
 
     /* 모든 effect cleanup 을 훅 순서로 실행하고 컨테이너를 비우는 함수 (cleanup 예외는 모아서 마지막에 던진다) */
@@ -198,6 +218,8 @@
       if (this.destroyed) return;
       this.destroyed = true;
       this.listeners = [];
+      this.queued = [];
+      this.pendingUpdate = false;
       const errors = [];
       for (const hook of this.hooks) {
         if (hook.kind !== 'effect' || typeof hook.cleanup !== 'function') continue;
@@ -215,7 +237,7 @@
       return () => { this.listeners = this.listeners.filter((l) => l !== cb); };
     }
 
-    /* 측정값을 모아 등록된 콜백에 보내는 함수 */
+    /* 측정값을 모아 등록된 콜백에 보내고 콜백이 던진 예외 목록을 돌려주는 함수 */
     report(kind, start, compared, patches, eventOnly, recovered = false) {
       const report = {
         kind,
@@ -226,7 +248,11 @@
         hookCount: this.hooks.length,
         recovered,
       };
-      for (const cb of this.listeners.slice()) cb(report);
+      const errors = [];
+      for (const cb of this.listeners.slice()) {
+        try { cb(report); } catch (err) { errors.push(err); }
+      }
+      return errors;
     }
 
     /* 훅 값과 vdom 의 복사본을 돌려주는 함수 */
