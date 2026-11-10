@@ -122,7 +122,7 @@
     return result;
   }
 
-  /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 화면 입력값만 다시 맞추고, 렌더 예외면 update 가 값을 되돌림) */
+  /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 화면 입력값만 다시 맞추되 batch 중엔 끝날 때로 미루고, 렌더 예외면 update 가 값을 되돌림) */
   function makeSetter(hook, comp) {
     return (next) => {
       if (comp.phase === 'render') throw new Error('렌더 중에는 setState 를 부를 수 없습니다 (렌더 중 setState)');
@@ -130,7 +130,9 @@
       const prev = hook.value;
       const value = resolveNext(next, prev);
       if (Object.is(prev, value)) {
-        comp.resyncForms();
+        // batch 중엔 옛 vdom 으로 되감으면 입력값이 두 번 쓰이니 끝날 때 flushBatched 가 맞춘다
+        if (batchDepth > 0) batched.add(comp);
+        else comp.resyncForms();
         return;
       }
       hook.value = value;

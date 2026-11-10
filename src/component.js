@@ -49,7 +49,7 @@
   function wrapProps(props) {
     const out = { ...props };
     for (const key of Object.keys(out)) {
-      if (key.startsWith('on') && typeof out[key] === 'function') out[key] = wrapHandler(out[key]);
+      if (/^on/i.test(key) && typeof out[key] === 'function') out[key] = wrapHandler(out[key]);
     }
     return out;
   }
@@ -262,7 +262,7 @@
       P.syncFormState(this.container, vdom, { controlledOnly: true });
     }
 
-    /* 커밋 중 setState 로 밀린 갱신을 먼저 처리한 뒤 붙잡아 둔 effect · onCommit 예외를 던지는 함수 (갱신 자체의 예외가 이기고, 붙잡은 예외는 heldErrors 에 붙인다) */
+    /* 커밋 중 · batch 끝(flushBatched)에서 밀린 갱신을 먼저 처리한 뒤 붙잡아 둔 effect · onCommit 예외를 던지는 함수 (갱신 자체의 예외가 이기고, 붙잡은 예외는 heldErrors 에 붙인다) */
     settle(held) {
       try {
         this.flushPending(held);
@@ -273,31 +273,32 @@
       this.finishCommit(held);
     }
 
-    /* batch 가 끝났을 때 밀린 갱신이 남아 있으면 한 번에 반영하는 함수 (없어졌거나 커밋 중이면 건너뜀) */
+    /* batch 가 끝났을 때 밀린 갱신은 한 번에 반영하고 없으면 입력값만 맞추는 함수 (없어졌거나 커밋 중이면 건너뜀) */
     flushBatched() {
-      if (this.destroyed || this.phase !== 'idle' || !this.pendingUpdate) return;
-      this.settle([]);
+      if (this.destroyed || this.phase !== 'idle') return;
+      if (this.pendingUpdate) this.settle([]);
+      else this.resyncForms();
     }
 
     /* 밀린 갱신을 update 한 번씩으로 처리하는 함수 (렌더 예외 · 연쇄 50 번 초과면 그 묶음의 값을 되돌림) */
     flushPending(held) {
       let chain = 0;
       while (this.pendingUpdate && !this.destroyed) {
-        const batch = this.queued;
+        const deferred = this.queued;
         this.queued = [];
         this.pendingUpdate = false;
         chain += 1;
         if (chain > 50) {
-          this.restoreQueued(batch);
+          this.restoreQueued(deferred);
           throw new Error('update loop');
         }
-        held.push(...this.updateOnce(() => this.restoreQueued(batch)));
+        held.push(...this.updateOnce(() => this.restoreQueued(deferred)));
       }
     }
 
     /* 밀린 값을 되돌리는 함수 (같은 Hook 은 맨 처음 값으로) */
-    restoreQueued(batch) {
-      for (const { hook, prev } of batch) hook.value = prev;
+    restoreQueued(deferred) {
+      for (const { hook, prev } of deferred) hook.value = prev;
     }
 
     /* 커밋 중 예외(effect · onCommit · destroy cleanup)가 하나면 그대로, 여럿이면 AggregateError 로 던지는 함수 */

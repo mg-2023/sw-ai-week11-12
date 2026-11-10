@@ -198,7 +198,7 @@ test('같은 핸들러 함수를 다시 넘긴 렌더는 PROPS 패치가 없다'
 
 test('effect 가 엔진 버튼을 click() 해도 다시 들어가 그리지 않는다', () => {
   let setN;
-  const { window, rootEl } = start(() => {
+  const { window, rootEl, reports } = start(() => {
     const [n, s] = H.useState(0);
     setN = s;
     H.useEffect(() => {
@@ -208,4 +208,68 @@ test('effect 가 엔진 버튼을 click() 해도 다시 들어가 그리지 않�
   });
   assert.doesNotThrow(() => setN(1));
   assert.equal(rootEl.textContent, '10');
+  assert.equal(reports.length, 3);
+});
+
+/* input 인스턴스의 value 쓰기를 세는 도우미 (원래 setter 에 그대로 넘긴다) */
+function countValueWrites(win, input) {
+  const desc = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value');
+  const writes = [];
+  Object.defineProperty(input, 'value', {
+    configurable: true,
+    get() { return desc.get.call(this); },
+    set(v) { writes.push(v); desc.set.call(this, v); },
+  });
+  return writes;
+}
+
+/* 글자를 치는 제어 input 을 그리고 이벤트 한 번 뒤의 value 쓰기 · 커밋 수 · 커서 위치를 돌려주는 도우미 */
+function typeInto(onInput) {
+  const { window, rootEl, reports } = start(() => {
+    const [text, setText] = H.useState('ab');
+    const [error, setError] = H.useState(null);
+    return h('input', { type: 'text', value: text, onInput: (e) => onInput(e, setText, setError) });
+  });
+  const input = rootEl.querySelector('input');
+  input.value = 'abc';
+  input.setSelectionRange(1, 1);
+  const writes = countValueWrites(window, input);
+  const before = reports.length;
+  input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  return { input, writes, commits: reports.length - before };
+}
+
+test('배칭 중 같은 값 setter 는 중간에 화면 값을 되감지 않는다 (value 쓰기 · 커서 · 커밋 1회)', () => {
+  const single = typeInto((e, setText) => { setText(e.target.value); });
+  const both = typeInto((e, setText, setError) => { setText(e.target.value); setError(null); });
+  assert.equal(both.writes.length, single.writes.length);
+  assert.equal(both.input.value, 'abc');
+  assert.equal(both.input.selectionStart, 1);
+  assert.equal(both.commits, 1);
+});
+
+test('batch 에 같은 값 setter 만 있어도 batch 뒤 제어 input 값을 state 로 되돌린다 (커밋 0회)', () => {
+  let setV;
+  const { window, rootEl, reports } = start(() => {
+    const [v, s] = H.useState('12');
+    setV = s;
+    return h('input', { type: 'text', value: v });
+  });
+  const input = rootEl.querySelector('input');
+  input.value = '12x';
+  const before = reports.length;
+  H.batch(() => { setV('12'); });
+  assert.equal(input.value, '12');
+  assert.equal(reports.length, before);
+});
+
+test('대문자 On 으로 시작하는 핸들러도 batch 로 감싼다 (커밋 1회)', () => {
+  const { window, rootEl, reports } = start(() => {
+    const [a, setA] = H.useState(0);
+    const [b, setB] = H.useState(0);
+    return h('button', { OnClick: () => { setA(a + 1); setB(b + 1); } }, a + '/' + b);
+  });
+  click(window, rootEl.querySelector('button'));
+  assert.equal(rootEl.textContent, '1/1');
+  assert.equal(reports.length, 2);
 });
