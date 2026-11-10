@@ -3,6 +3,14 @@
   'use strict';
 
   let current = null;
+  let inChild = false;
+
+  /* 자식 렌더 중 표시를 바꾸고 이전 값을 돌려주는 함수 */
+  function setInChild(value) {
+    const prev = inChild;
+    inChild = value;
+    return prev;
+  }
 
   /* 지금 렌더 중인 컴포넌트를 돌려주는 함수 */
   function getCurrent() {
@@ -16,6 +24,7 @@
 
   /* 지금 컴포넌트의 다음 훅 자리를 종류 검사와 함께 돌려주는 함수 (없으면 만든다) */
   function nextSlot(kind, make) {
+    if (inChild) throw new Error('자식 컴포넌트 안에서는 Hook 을 부를 수 없습니다 (State 는 루트에만 둡니다)');
     if (current === null) throw new Error('Hook 은 컴포넌트 함수 안에서만 부를 수 있습니다 (컴포넌트 밖 호출)');
     const i = current.hookIndex;
     if (current.hookCount !== null && i >= current.hookCount) {
@@ -63,7 +72,7 @@
     throw new Error('useEffect: not implemented yet');
   }
 
-  const api = { getCurrent, setCurrent, nextSlot, useState, useMemo, useEffect };
+  const api = { getCurrent, setCurrent, setInChild, nextSlot, useState, useMemo, useEffect };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MiniReact = Object.assign(root.MiniReact || {}, api);

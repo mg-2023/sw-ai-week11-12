@@ -21,16 +21,30 @@
     return V.text(String(value));
   }
 
-  /* vnode 트리를 훑어 자식의 null · 불리언 · 글자를 정리한 새 트리를 만드는 함수 */
-  function expand(node) {
-    const vnode = normalize(node);
-    if (vnode === null) return null;
-    const children = [];
-    for (const child of vnode.children) {
-      const out = expand(child);
-      if (out !== null) children.push(out);
+  /* 자식 함수를 Hook 금지 상태로 props 복사본과 함께 불러 결과를 돌려주는 함수 */
+  function callChild(vnode) {
+    const prev = H.setInChild(true);
+    try {
+      return vnode.type({ ...vnode.props, children: vnode.children });
+    } finally {
+      H.setInChild(prev);
     }
-    return { type: vnode.type, props: vnode.props, children };
+  }
+
+  /* 값 하나를 펼쳐 vnode 목록(배열·null 은 풀거나 뺌)으로 돌려주는 함수 */
+  function expandAll(node) {
+    if (Array.isArray(node)) return node.flatMap(expandAll);
+    const vnode = normalize(node);
+    if (vnode === null) return [];
+    if (typeof vnode.type === 'function') return expandAll(callChild(vnode));
+    const children = vnode.children.flatMap(expandAll);
+    return [{ type: vnode.type, props: vnode.props, children }];
+  }
+
+  /* vnode 트리를 훑어 자식 컴포넌트를 부르고 null · 불리언 · 글자를 정리한 새 트리를 만드는 함수 */
+  function expand(node) {
+    const out = expandAll(node);
+    return out.length === 0 ? null : out[0];
   }
 
   class FunctionComponent {
