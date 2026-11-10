@@ -71,6 +71,7 @@ header p{margin:0;color:var(--muted)}
 .canvas .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
 .canvas .btn[disabled]{opacity:.5}
 .canvas .card{border:1px solid var(--border);border-radius:10px;padding:10px 14px}
+.canvas .btn-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 #test-src{display:block;flex:1;width:100%;min-height:250px;border:0;resize:vertical;padding:14px 18px;font-size:13px;line-height:1.6;tab-size:2;
   background:var(--bg);color:var(--text);outline:2px solid transparent;outline-offset:-2px;transition:outline-color .15s}
 #test-src:focus{outline-color:var(--accent)}
@@ -138,7 +139,7 @@ pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg)
     <div class="canvas" id="real-root" inert>
       <div class="card" id="profile">
         <h2 class="title">Virtual DOM 연습</h2>
-        <p class="desc">조회수: <b>10</b> 회</p>
+        <p class="desc">카운터: <b>0</b></p>
         <ul class="list">
           <li>React</li>
           <li class="done">Virtual DOM</li>
@@ -180,7 +181,7 @@ pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg)
   <ol>
     <li>테스트 영역의 HTML 코드를 직접 고칩니다. (예: <code>&lt;li&gt;</code> 추가, <code>class="done"</code> 부여, <code>&lt;p&gt;</code> → <code>&lt;h3&gt;</code>, 글자 수정)</li>
     <li><b>Patch</b>: 테스트 영역의 HTML → 새 Virtual DOM → 이전 VDOM과 Diff → 변경된 부분만 실제 영역에 반영(노란 깜빡임) → State History에 저장.</li>
-    <li><b>컴포넌트 모드</b>: <code>App</code> 컴포넌트를 마운트하고 실제 영역 카드 아래에 <code>조회수 +1</code> 버튼이 생깁니다. 버튼을 누르면 <code>setViews</code> → 리렌더 → 이전 VDOM과 Diff → <code>TEXT</code> 패치 하나만 반영됩니다. 이 모드에서는 Patch · 뒤로 / 앞으로 · History 이동이 꺼지고 테스트 영역은 렌더 결과를 보여 주는 읽기 전용이 됩니다.</li>
+    <li><b>컴포넌트 모드</b>: <code>App</code> 컴포넌트를 마운트하고 실제 영역 카드 아래에 카운터 버튼들이 생깁니다. <code>+1</code>을 누르면 <code>setCount</code> → 리렌더 → 이전 VDOM과 Diff → 바뀐 텍스트만 <code>TEXT</code> 패치로 반영됩니다. 소수 개수는 <code>useMemo</code>로 계산하므로 <code>제목 강조</code>처럼 카운터와 무관한 state만 바뀌면 다시 계산하지 않고(콘솔 로그로 확인), <code>useEffect</code>가 탭 제목 갱신과 <code>자동 증가</code> 타이머의 시작 / 해제를 맡습니다. 이 모드에서는 Patch · 뒤로 / 앞으로 · History 이동이 꺼지고 테스트 영역은 렌더 결과를 보여 주는 읽기 전용이 됩니다.</li>
     <li><b>뒤로 / 앞으로</b> (HTML 편집 모드): 저장된 VDOM으로 이동. 실제 영역은 두 State 사이의 Diff 패치로 바뀌고, 테스트 영역은 해당 VDOM의 HTML 코드로 바뀝니다. State History 항목을 눌러도 같은 방식으로 이동해요.</li>
     <li>컴포넌트 모드에서는 State History를 보기만 할 수 있어요. state는 훅 배열이 관리하므로, VDOM만 되돌리면 화면과 state가 어긋나기 때문입니다.</li>
   </ol>

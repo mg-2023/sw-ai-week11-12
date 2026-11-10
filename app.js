@@ -7,7 +7,7 @@
  *     src/patch.js   Patch 를 실제 영역(DOM)에 반영
  *     src/history.js State History (보기 전용)
  *     src/root.js    컴포넌트 마운트 · state 변경 시 리렌더 (compo.js / hooks.js / events.js 사용)
- *     demo/App.js    예제 컴포넌트 (조회수 +1)
+ *     demo/App.js    예제 컴포넌트 (카운터: useState / useMemo / useEffect)
  *
  *   두 가지 모드
  *     HTML 편집 모드 : 테스트 영역 HTML 을 고치고 Patch → 변경분만 실제 영역에 반영
@@ -91,7 +91,7 @@ const vdomJson = (vdom) => JSON.stringify(vdom, (k, v) => (typeof v === 'functio
 function updateUI() {
   const { states, index: cur, current } = stateHistory;
   $('#st-pos').textContent = (cur + 1) + ' / ' + states.length;
-  // 컴포넌트 모드에서는 이동 금지: VDOM 만 되돌리면 화면은 10 인데 state(훅)는 11 인 상태가 된다
+  // 컴포넌트 모드에서는 이동 금지: VDOM 만 되돌리면 화면은 0 인데 state(훅)는 1 인 상태가 된다
   btnBack.disabled = componentMode || !stateHistory.canBack;
   btnFwd.disabled = componentMode || !stateHistory.canForward;
   $('#vdom-json').textContent = vdomJson(current.vdom);
@@ -159,7 +159,7 @@ function onCommit({ reason, next, patches, mutated, touched, verified }) {
   showLog({
     title: (mount ? '컴포넌트 마운트' : '렌더 (state 변경)') + ' → State #' + stateHistory.index + ' 저장',
     patches, mutated, verified,
-    message: mount ? '실제 영역의 "조회수 +1" 버튼을 눌러 보세요. 클릭 → setState → 리렌더 → Diff → Patch 순서로 반영돼요.' : '',
+    message: mount ? '실제 영역의 "+1" 버튼을 눌러 보세요. 클릭 → setState → 리렌더 → Diff → Patch 순서로 반영돼요. useMemo / useEffect 의 실행 여부는 브라우저 콘솔과 탭 제목에서 확인할 수 있어요.' : '',
   });
 }
 
@@ -178,7 +178,7 @@ function setMode(on) {
   $('#test-badge').textContent = on ? '렌더 결과 (읽기 전용)' : 'HTML 소스를 자유롭게 수정';
   $('#test-badge').className = 'badge ' + (on ? '' : 'warn');
   $('#real-hint').textContent = on
-    ? '컴포넌트 모드: "조회수 +1" 버튼을 클릭할 수 있어요. 클릭 이벤트는 실제 영역에 단 하나의 리스너로 위임됩니다.'
+    ? '컴포넌트 모드: 카운터 버튼들을 클릭할 수 있어요. 클릭 이벤트는 실제 영역에 단 하나의 리스너로 위임됩니다.'
     : '여기는 직접 수정·조작할 수 없어요(inert). Patch / 뒤로(앞으로)의 결과만 보입니다.';
   $('#test-hint').textContent = on
     ? '컴포넌트 모드: 렌더 결과 HTML을 보여 주는 읽기 전용 영역이에요.'
@@ -197,7 +197,7 @@ function toggleMode() {
     setMode(false);
     renderTestFrom(stateHistory.current.vdom);
     updateUI();
-    showLog({ title: 'HTML 편집 모드로 전환', message: '실제 영역은 마지막 렌더 결과 그대로예요. 테스트 영역을 고친 뒤 Patch할 수 있어요. 다시 컴포넌트 모드로 들어가면 state는 초기값(10)부터 시작합니다.' });
+    showLog({ title: 'HTML 편집 모드로 전환', message: '실제 영역은 마지막 렌더 결과 그대로예요. 테스트 영역을 고친 뒤 Patch할 수 있어요. 다시 컴포넌트 모드로 들어가면 state는 초기값(0)부터 시작합니다.' });
   }
 }
 
