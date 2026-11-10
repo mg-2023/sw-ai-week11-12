@@ -103,3 +103,37 @@ test('가운데 삭제 뒤 핸들러가 맞는 항목을 가리킨다', () => {
   click(window, rootEl.querySelectorAll('button')[0]);
   assert.deepEqual(names(), ['c']);
 });
+
+test('루트 → 자식이 배열(2개 이상)을 돌려주면 mount 에서 에러', () => {
+  const Two = () => [h('a'), h('b')];
+  assert.throws(() => mountComp(() => h(Two)), /루트/);
+});
+
+test('루트 → 자식이 요소 하나인 배열을 돌려주면 그 요소가 그려진다', () => {
+  const One = () => [h('a', null, 'x')];
+  const { rootEl } = mountComp(() => h(One));
+  assert.equal(rootEl.innerHTML, '<a>x</a>');
+});
+
+test('루트 → 자식이 빈 배열을 돌려주면 컨테이너가 빈다', () => {
+  const None = () => [];
+  const { rootEl } = mountComp(() => h(None));
+  assert.equal(rootEl.innerHTML, '');
+});
+
+test('자식이 던진 뒤에도 Hook 금지 표시가 풀린다', () => {
+  const Boom = () => { throw new Error('boom'); };
+  assert.throws(() => expand(h(Boom)), /boom/);
+  assert.throws(() => useState(1), /밖/);
+  const { rootEl } = mountComp(() => { const [n] = useState(2); return h('p', null, String(n)); });
+  assert.equal(rootEl.innerHTML, '<p>2</p>');
+});
+
+test('같은 vnode 를 두 번 expand 해도 vnode.props 는 그대로', () => {
+  const Item = (p) => { p.text = 'x'; return null; };
+  const vnode = h('div', null, h(Item, { text: 'a' }));
+  expand(vnode);
+  expand(vnode);
+  assert.equal(vnode.children[0].props.text, 'a');
+  assert.deepEqual(vnode.children[0].children, []);
+});

@@ -44,6 +44,7 @@
   /* vnode 트리를 훑어 자식 컴포넌트를 부르고 null · 불리언 · 글자를 정리한 새 트리를 만드는 함수 */
   function expand(node) {
     const out = expandAll(node);
+    if (out.length > 1) throw new Error('FunctionComponent: 루트가 배열을 돌려줄 수 없습니다 (하나의 요소로 감싸세요)');
     return out.length === 0 ? null : out[0];
   }
 
