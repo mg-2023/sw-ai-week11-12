@@ -253,6 +253,12 @@
       this.finishCommit(held);
     }
 
+    /* batch 가 끝났을 때 밀린 갱신이 남아 있으면 한 번에 반영하는 함수 (없어졌거나 커밋 중이면 건너뜀) */
+    flushBatched() {
+      if (this.destroyed || this.phase !== 'idle' || !this.pendingUpdate) return;
+      this.settle([]);
+    }
+
     /* 밀린 갱신을 update 한 번씩으로 처리하는 함수 (렌더 예외 · 연쇄 50 번 초과면 그 묶음의 값을 되돌림) */
     flushPending(held) {
       let chain = 0;

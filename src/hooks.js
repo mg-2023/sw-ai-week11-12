@@ -5,12 +5,15 @@
  * 2. 처음 열면 칸을 만들어 넣고, 다시 열면 같은 번호의 칸을 꺼내 쓴다 (개수나 종류가 달라지면 예외, 같은 종류끼리 순서만 바뀌면 못 잡고 값이 뒤섞인다)
  * 3. useState 의 setter 는 칸의 값을 바꾼 뒤 컴포넌트를 다시 그리게 한다 (makeSetter)
  * 4. useMemo · useEffect 는 deps 가 달라졌을 때만 계산하거나 실행할 것으로 표시한다 (depsChanged)
+ * 5. batch 안의 setter 는 값만 저장하고 줄을 세웠다가, 가장 바깥 batch 가 끝날 때 컴포넌트마다 한 번에 갱신한다 (batch · flushBatched)
  */
 (function (root) {
   'use strict';
 
   let current = null;
   let inChild = false;
+  let batchDepth = 0;
+  const batched = new Set();
 
   /* 자식 렌더 중 표시를 바꾸고 이전 값을 돌려주는 함수 */
   function setInChild(value) {
@@ -67,10 +70,54 @@
     return typeof next === 'function' ? next(prev) : next;
   }
 
-  /* 커밋 중 바뀐 값을 줄 세우는 함수 (같은 hook 은 한 번만 넣고, 커밋 뒤 이어서 갱신하게 표시한다) */
-  function queueAfterCommit(comp, hook, prev) {
+  /* 커밋 중 · 배칭 중 바뀐 값을 줄 세우는 함수 (같은 hook 은 한 번만 넣고, 커밋 뒤 · batch 끝에 이어서 갱신하게 표시한다) */
+  function queueDeferred(comp, hook, prev) {
     if (!comp.queued.some((q) => q.hook === hook)) comp.queued.push({ hook, prev });
     comp.pendingUpdate = true;
+  }
+
+  /* 목록의 컴포넌트마다 밀린 갱신을 반영하고 던진 예외를 목록으로 돌려주는 함수 */
+  function flushAll(list) {
+    const errors = [];
+    for (const comp of list) {
+      try { comp.flushBatched(); } catch (err) { errors.push(err); }
+    }
+    return errors;
+  }
+
+  /* 반영 중 예외를 정리해 던지는 함수 (핸들러 예외가 이기고 나머지는 heldErrors 에 붙이며, 핸들러 예외가 없으면 1개는 그대로 · 여럿은 AggregateError) */
+  function throwFlushErrors(errors, handlerError, handlerThrew) {
+    if (handlerThrew) {
+      if (errors.length > 0 && handlerError && typeof handlerError === 'object') {
+        handlerError.heldErrors = (handlerError.heldErrors || []).concat(errors);
+      }
+      throw handlerError;
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, '배칭 반영 중 예외 여러 개');
+  }
+
+  /* fn 안의 setter 를 모았다가 가장 바깥 batch 가 끝날 때 한 번에 갱신하고 fn 의 반환값을 돌려주는 함수 */
+  function batch(fn) {
+    batchDepth += 1;
+    let result;
+    let handlerError;
+    let handlerThrew = false;
+    try {
+      result = fn();
+    } catch (err) {
+      handlerError = err;
+      handlerThrew = true;
+    } finally {
+      batchDepth -= 1;
+    }
+    if (batchDepth === 0) {
+      const list = Array.from(batched);
+      batched.clear();
+      throwFlushErrors(flushAll(list), handlerError, handlerThrew);
+    }
+    if (handlerThrew) throw handlerError;
+    return result;
   }
 
   /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 화면 입력값만 다시 맞추고, 렌더 예외면 update 가 값을 되돌림) */
@@ -86,7 +133,12 @@
       }
       hook.value = value;
       if (comp.phase === 'commit') {
-        queueAfterCommit(comp, hook, prev);
+        queueDeferred(comp, hook, prev);
+        return;
+      }
+      if (batchDepth > 0) {
+        queueDeferred(comp, hook, prev);
+        batched.add(comp);
         return;
       }
       comp.update(() => { hook.value = prev; });
@@ -130,7 +182,7 @@
     if (depsChanged(slot.deps, deps)) current.pendingEffects.push({ slot, fn, deps });
   }
 
-  const api = { getCurrent, setCurrent, setInChild, nextSlot, depsChanged, useState, useMemo, useEffect };
+  const api = { batch, getCurrent, setCurrent, setInChild, nextSlot, depsChanged, useState, useMemo, useEffect };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MiniReact = Object.assign(root.MiniReact || {}, api);
