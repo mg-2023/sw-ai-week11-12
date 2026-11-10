@@ -2,7 +2,7 @@
   "name": "mini-react",
   "version": "0.1.0",
   "private": true,
-  "description": "Vanilla JS 미니 리액트 — Phase 1: Virtual DOM · Diff · Patch",
+  "description": "Vanilla JS 미니 리액트 — Phase 1: Virtual DOM · Diff · Patch, Phase 2: 함수형 컴포넌트 · Hooks 측정",
   "scripts": {
     "test": "node --test"
   },

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>미니 리액트 — Phase 2 측정</title>
+  <link rel="stylesheet" href="phase2/style.css">
+</head>
+<body>
+  <header>
+    <h1>미니 리액트 · Phase 2 측정 페이지</h1>
+    <label class="version">버전
+      <select id="version"><option value="v0 기본">v0 기본</option></select>
+    </label>
+  </header>
+
+  <main class="top">
+    <section class="card">
+      <h2>① 데모 앱 <small>할 일 목록 (엔진으로 그림)</small></h2>
+      <div id="demo"></div>
+    </section>
+
+    <section class="card">
+      <h2>② 측정 패널 <small>엔진을 쓰지 않는 일반 DOM</small></h2>
+      <div id="panel">
+        <dl>
+          <dt>마지막 커밋</dt><dd class="kind">-</dd>
+          <dt>시간(ms)</dt><dd class="ms">-</dd>
+          <dt>비교한 노드</dt><dd class="compared">-</dd>
+          <dt>patch</dt><dd class="patches">-</dd>
+          <dt>이벤트만 바뀐 PROPS</dt><dd class="event-only">-</dd>
+          <dt>Hook 개수</dt><dd class="hook-count">-</dd>
+          <dt>DOM 변경 누계</dt><dd class="dom-total">0</dd>
+        </dl>
+        <h3>Hooks</h3>
+        <ul class="hooks"></ul>
+      </div>
+    </section>
+  </main>
+
+  <section class="card">
+    <h2>③ 시나리오</h2>
+    <div class="scenarios">
+      <button type="button" data-scenario="add100">100개 추가</button>
+      <button type="button" data-scenario="reverse">순서 뒤집기</button>
+      <button type="button" data-scenario="prepend">맨 앞에 끼우기</button>
+      <button type="button" data-scenario="editOne">하나만 고치기</button>
+      <button type="button" data-scenario="set10">setState 10번</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>④ 기록 <small>DOM 변경 수에는 속성 쓰기도 포함</small></h2>
+    <button type="button" id="copy-md">마크다운으로 복사</button>
+    <table id="records">
+      <thead><tr><th>버전</th><th>시나리오</th><th>렌더</th><th>시간(ms)</th><th>비교</th><th>patch</th><th>DOM 변경</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- 순서 중요: vdom → diff → patch → hooks → component → app -->
+  <script src="src/vdom.js"></script>
+  <script src="src/diff.js"></script>
+  <script src="src/patch.js"></script>
+  <script src="src/hooks.js"></script>
+  <script src="src/component.js"></script>
+  <script src="phase2/app.js"></script>
+</body>
+</html>
