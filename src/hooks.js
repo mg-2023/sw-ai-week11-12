@@ -1,4 +1,11 @@
 /* 컴포넌트 안에서 쓰는 훅(useState · useMemo · useEffect)과 지금 그리는 컴포넌트를 알려 주는 모듈 */
+/*
+ * 흐름 지도 — "번호표 사물함"
+ * 1. 렌더마다 컴포넌트는 사물함 0번, 1번, 2번… 을 훅을 부른 순서대로 연다 (nextSlot)
+ * 2. 처음 열면 칸을 만들어 넣고, 다시 열면 같은 번호의 칸을 꺼내 쓴다 (순서가 바뀌면 예외)
+ * 3. useState 의 setter 는 칸의 값을 바꾼 뒤 컴포넌트를 다시 그리게 한다 (makeSetter)
+ * 4. useMemo · useEffect 는 deps 가 달라졌을 때만 계산하거나 실행할 것으로 표시한다 (depsChanged)
+ */
 (function (root) {
   'use strict';
 
@@ -22,21 +29,48 @@
     current = component;
   }
 
-  /* 지금 컴포넌트의 다음 훅 자리를 종류 검사와 함께 돌려주는 함수 (없으면 만든다) */
-  function nextSlot(kind, make) {
+  /* 훅을 부를 수 없는 자리(자식 안 · 컴포넌트 밖)면 예외를 던지는 함수 */
+  function assertHookAllowed() {
     if (inChild) throw new Error('자식 컴포넌트 안에서는 Hook 을 부를 수 없습니다 (State 는 루트에만 둡니다)');
     if (current === null) throw new Error('Hook 은 컴포넌트 함수 안에서만 부를 수 있습니다 (컴포넌트 밖 호출)');
-    const i = current.hookIndex;
-    if (current.hookCount !== null && i >= current.hookCount) {
+  }
+
+  /* 이번에 열 사물함 번호를 돌려주고 다음 번호로 넘기는 함수 (이전 렌더보다 많이 열면 예외) */
+  function takeIndex(comp) {
+    const i = comp.hookIndex;
+    if (comp.hookCount !== null && i >= comp.hookCount) {
       throw new Error('Hook 개수가 이전 렌더와 다릅니다 (조건문 · 반복문 안에서 Hook 을 부르지 마세요)');
     }
-    current.hookIndex += 1;
-    if (i >= current.hooks.length) {
-      current.hooks.push(make());
-    } else if (current.hooks[i].kind !== kind) {
-      throw new Error('Hook 종류가 이전 렌더와 다릅니다 (' + i + '번째: ' + current.hooks[i].kind + ' → ' + kind + ')');
+    comp.hookIndex += 1;
+    return i;
+  }
+
+  /* i 번 칸을 돌려주는 함수 (비어 있으면 make 로 만들어 넣고, 있으면 종류가 같은지 검사한다) */
+  function slotAt(comp, i, kind, make) {
+    if (i >= comp.hooks.length) {
+      comp.hooks.push(make());
+    } else if (comp.hooks[i].kind !== kind) {
+      throw new Error('Hook 종류가 이전 렌더와 다릅니다 (' + i + '번째: ' + comp.hooks[i].kind + ' → ' + kind + ')');
     }
-    return current.hooks[i];
+    return comp.hooks[i];
+  }
+
+  /* 지금 컴포넌트의 다음 훅 자리를 종류 검사와 함께 돌려주는 함수 (없으면 만든다) */
+  function nextSlot(kind, make) {
+    assertHookAllowed();
+    const i = takeIndex(current);
+    return slotAt(current, i, kind, make);
+  }
+
+  /* setState 에 넘긴 값이 함수면 이전 값으로 계산하고, 아니면 그대로 돌려주는 함수 */
+  function resolveNext(next, prev) {
+    return typeof next === 'function' ? next(prev) : next;
+  }
+
+  /* 커밋 중 바뀐 값을 줄 세우는 함수 (같은 hook 은 한 번만 넣고, 커밋 뒤 이어서 갱신하게 표시한다) */
+  function queueAfterCommit(comp, hook, prev) {
+    if (!comp.queued.some((q) => q.hook === hook)) comp.queued.push({ hook, prev });
+    comp.pendingUpdate = true;
   }
 
   /* 상태 바꾸는 함수를 만드는 함수 (같은 값이면 화면 입력값만 다시 맞추고, 렌더 예외면 update 가 값을 되돌림) */
@@ -45,15 +79,14 @@
       if (comp.phase === 'render') throw new Error('렌더 중에는 setState 를 부를 수 없습니다 (렌더 중 setState)');
       if (comp.destroyed) return;
       const prev = hook.value;
-      const value = typeof next === 'function' ? next(prev) : next;
+      const value = resolveNext(next, prev);
       if (Object.is(prev, value)) {
         comp.resyncForms();
         return;
       }
       hook.value = value;
       if (comp.phase === 'commit') {
-        if (!comp.queued.some((q) => q.hook === hook)) comp.queued.push({ hook, prev });
-        comp.pendingUpdate = true;
+        queueAfterCommit(comp, hook, prev);
         return;
       }
       comp.update(() => { hook.value = prev; });
