@@ -11,12 +11,11 @@ Virtual DOM, Diff, Patch와 함수형 컴포넌트, Hooks를 프레임워크 없
 
 인터넷이 없으면 글꼴만 기본 글꼴로 바뀝니다.
 
-`start-notify.bat` 실행시 power shell을 활용한 window 알림센터를 사용하여
-집중 시간이 끝났을 경우 직접적으로 알림을 보내며,
-기존 크롬과는 별개의 크롬 창과 아이콘을 실행합니다.
-작업표시줄의 전용 창 아이콘이 3번 깜빡입니다.
-끝내려면 검은 창에서 `Ctrl+C`를 누르거나 X를 누릅니다. 전용 창도 함께 닫힙니다.
+## 타이머 알림 (Windows)
 
+`start-notify.bat`을 더블클릭하면 `mini-react.html`이 전용 창으로 열리고 알림 프로그램이 함께 켜집니다.
+타이머가 끝나면 Windows 알림이 뜨고 작업표시줄의 전용 창 아이콘이 3번 깜빡입니다.
+끝내려면 검은 창에서 `Ctrl+C`를 누르거나 X를 누릅니다. 전용 창도 함께 닫힙니다.
 
 웹페이지는 PC 기능을 직접 부를 수 없어서 `notify-helper.ps1`이 중간 다리 역할을 합니다.
 이 PC 안의 요청만 받습니다. 켜지 않아도 앱은 그대로 동작하고 알림만 나오지 않습니다.
@@ -64,6 +63,7 @@ Phase 2의 렌더는 Phase 1의 `diff`와 `applyPatches`를 그대로 씁니다.
 **공통**
 
 - 오른쪽 위 버튼으로 다크 모드를 켭니다. 고른 값은 저장되고, 고른 적이 없으면 운영체제 설정을 따릅니다.
+- [동작 지도](docs/mini-react%20동작%20지도.html)에서 두 페이지의 동작과 연동 과정을 애니메이션으로 볼 수 있습니다.
 
 ## 입력 한도
 
@@ -127,6 +127,7 @@ Phase 2의 렌더는 Phase 1의 `diff`와 `applyPatches`를 그대로 씁니다.
 
 ```text
 src/
+├─ main.ts      앱 진입점
 ├─ phase1/      Virtual DOM, Diff, Patch, History (Hook을 모름)
 ├─ phase2/      h, FunctionComponent, hooks (phase1을 가져다 씀)
 ├─ app/         두 페이지, 렌더 기록, 테마
@@ -135,22 +136,30 @@ src/
 
 docs/                  학습 가이드, 구현 순서, 동작 지도
 build-single-file.mjs  dist를 HTML 파일 하나로 합치는 스크립트
+start-notify.bat       타이머 알림과 전용 창을 함께 켜는 파일
+notify-helper.ps1      웹페이지 요청을 받아 Windows 알림을 띄우는 스크립트
 mini-react.html        더블클릭으로 여는 파일 (만들어진 결과물)
 ```
 
 의존 방향은 `app → phase2 → phase1` 한쪽입니다.
 
-## 테스트(1차 : AI , 2차 : 직접 )
+## 테스트
 
 단위 테스트와 기능 테스트 외에, 시드를 고정한 무작위 트리로 패치 결과가
 새로 만든 DOM과 같은지 대조합니다. 고유 key 트리 1,000쌍과 중복 key 트리 500쌍을 씁니다.
 
-화면 배치는 jsdom에서 잴 수 없어서  -> 실제 브라우저로 확인했습니다.
+화면 배치는 jsdom에서 잴 수 없어서 실제 브라우저로 확인했습니다.
 
 ## 일부러 뺀 것
 
 실험실의 입력 방어는 `script`, `on...` 속성, `javascript:` 주소를 막는 최소 수준입니다.
--> 실제 서비스라면 검증된 sanitizer를 써야 합니다.
+실제 서비스라면 검증된 sanitizer를 써야 합니다.
 
 Fiber, 우선순위 스케줄링, 이벤트 위임, Fragment는 구현하지 않았습니다.
--> 실제 React와의 차이는 학습 가이드에 표로 정리했습니다.
+실제 React와의 차이는 학습 가이드에 표로 정리했습니다.
+
+## 더 읽기
+
+- [학습 가이드](docs/learn-guide.md): 실행 순서 지도, 설계 이유, 코드 스타일
+- [구현 순서](docs/implementation-order.md): 함수 단위 구현 순서
+- [동작 지도](docs/mini-react%20동작%20지도.html): 페이지 1, 2와 연동 과정을 단계별로 눌러 보는 시각화
