@@ -130,3 +130,40 @@ test('batch 안 렌더 예외 → 예외가 나오고 batch 안에서 바꾼 값
   assert.deepEqual(comp.inspect().hooks.map((x) => x.value), [0, 0]);
   assert.equal(rootEl.textContent, '0/0');
 });
+
+/* 값이 1 이 되면 렌더가 던지는 컴포넌트를 만들어 setter 와 함께 돌려주는 도우미 */
+function startThrowing(label) {
+  const box = {};
+  const env = start(() => {
+    const [n, s] = H.useState(0);
+    box.set = s;
+    if (n === 1) throw new Error(label);
+    return h('p', null, String(n));
+  });
+  return { ...env, set: box.set };
+}
+
+test('batch 안 핸들러도 던지고 컴포넌트 둘의 렌더도 던지면 → 핸들러 예외가 이기고 heldErrors 에 덧붙임, 값은 모두 되돌림', () => {
+  const a = startThrowing('render A');
+  const b = startThrowing('render B');
+  const earlier = new Error('earlier');
+  const boom = new Error('handler boom');
+  boom.heldErrors = [earlier];
+  assert.throws(() => H.batch(() => { a.set(1); b.set(1); throw boom; }), (err) => err === boom);
+  assert.equal(boom.heldErrors.length, 3);
+  assert.equal(boom.heldErrors[0], earlier);
+  assert.deepEqual(boom.heldErrors.slice(1).map((e) => e.message), ['render A', 'render B']);
+  assert.deepEqual(a.comp.inspect().hooks.map((x) => x.value), [0]);
+  assert.deepEqual(b.comp.inspect().hooks.map((x) => x.value), [0]);
+});
+
+test('batch 핸들러는 정상인데 컴포넌트 둘의 렌더가 던지면 → AggregateError 2개, 값은 모두 되돌림', () => {
+  const a = startThrowing('render A');
+  const b = startThrowing('render B');
+  assert.throws(
+    () => H.batch(() => { a.set(1); b.set(1); }),
+    (err) => err instanceof AggregateError && err.errors.length === 2,
+  );
+  assert.deepEqual(a.comp.inspect().hooks.map((x) => x.value), [0]);
+  assert.deepEqual(b.comp.inspect().hooks.map((x) => x.value), [0]);
+});

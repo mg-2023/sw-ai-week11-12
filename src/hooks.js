@@ -88,6 +88,7 @@
   /* 반영 중 예외를 정리해 던지는 함수 (핸들러 예외가 이기고 나머지는 heldErrors 에 붙이며, 핸들러 예외가 없으면 1개는 그대로 · 여럿은 AggregateError) */
   function throwFlushErrors(errors, handlerError, handlerThrew) {
     if (handlerThrew) {
+      // 글자 · 숫자 같은 원시값 예외는 heldErrors 를 달 수 없어 반영 중 예외가 버려진다 (settle 과 같음)
       if (errors.length > 0 && handlerError && typeof handlerError === 'object') {
         handlerError.heldErrors = (handlerError.heldErrors || []).concat(errors);
       }
@@ -116,6 +117,7 @@
       batched.clear();
       throwFlushErrors(flushAll(list), handlerError, handlerThrew);
     }
+    // 안쪽 batch 의 핸들러 예외는 여기서 다시 던져야 바깥 batch 와 호출한 쪽까지 올라간다
     if (handlerThrew) throw handlerError;
     return result;
   }
