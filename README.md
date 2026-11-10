@@ -13,7 +13,7 @@ Virtual DOM, Diff, Patch와 함수형 컴포넌트, Hooks를 프레임워크 없
 
 ## 타이머 알림 (Windows)
 
-***`start-notify.bat`***을 더블클릭하면 `mini-react.html`이 전용 창으로 열리고 알림 프로그램이 함께 켜집니다.
+***start-notify.bat***을 더블클릭하면 `mini-react.html`이 전용 창으로 열리고 알림 프로그램이 함께 켜집니다.
 타이머가 끝나면 Windows 알림이 뜨고 작업표시줄의 전용 창 아이콘이 3번 깜빡입니다.
 끝내려면 검은 창에서 `Ctrl+C`를 누르거나 X를 누릅니다. 전용 창도 함께 닫힙니다.
 
