@@ -5,14 +5,15 @@
   const TEXT = '#text';
 
   /* 이전 · 새 Virtual DOM 을 비교해 patch 목록을 돌려주는 함수 */
-  function diff(oldVnode, newVnode) {
+  function diff(oldVnode, newVnode, stats) {
     const patches = [];
-    walk(oldVnode, newVnode, [], patches);
+    walk(oldVnode, newVnode, [], patches, stats);
     return patches;
   }
 
   /* 두 노드를 같은 번호끼리 재귀로 비교하며 patch 를 쌓는 함수 */
-  function walk(oldV, newV, path, patches) {
+  function walk(oldV, newV, path, patches, stats) {
+    if (stats) stats.compared += 1;
     if (oldV === undefined || oldV === null) {
       if (newV !== undefined && newV !== null) patches.push({ type: 'CREATE', path, node: newV });
       return;
@@ -36,6 +37,7 @@
 
     const propPatch = diffProps(oldV.props, newV.props);
     if (propPatch) patches.push({ type: 'PROPS', path, ...propPatch });
+    if (propPatch && stats && isEventOnly(propPatch)) stats.eventOnly += 1;
     const beforeKids = patches.length;
 
     const oldKids = oldV.children;
@@ -43,7 +45,7 @@
     const common = Math.min(oldKids.length, newKids.length);
 
     for (let i = 0; i < common; i++) {
-      walk(oldKids[i], newKids[i], path.concat(i), patches);
+      walk(oldKids[i], newKids[i], path.concat(i), patches, stats);
     }
     for (let i = common; i < newKids.length; i++) {
       patches.push({ type: 'CREATE', path: path.concat(i), node: newKids[i] });
@@ -65,6 +67,12 @@
         patches.push({ type: 'PROPS', path, set: { value: newV.props.value }, remove: [] });
       }
     }
+  }
+
+  /* PROPS patch 가 이벤트 핸들러 교체만 담았는지 확인하는 함수 */
+  function isEventOnly(propPatch) {
+    const setOk = Object.keys(propPatch.set).every((k) => /^on/i.test(k) && typeof propPatch.set[k] === 'function');
+    return setOk && propPatch.remove.every((k) => /^on/i.test(k));
   }
 
   /* 객체가 그 이름의 칸을 직접 가졌는지 확인하는 함수 */

@@ -20,7 +20,7 @@
       type,
       props: props ? { ...props } : {},
       children: children.flat(Infinity)
-        .filter((c) => c !== null && c !== undefined && c !== false)
+        .filter((c) => c !== null && c !== undefined && c !== false && c !== true)
         .map((c) => (typeof c === 'object' ? c : text(String(c)))),
     };
   }
@@ -152,7 +152,8 @@
     if (LIVE_PROPS.has(name) && FORM_TAGS.has(el.localName) && el.namespaceURI === HTML_NS) {
       if (name === 'value' && el.type === 'file') {
       } else if (name === 'value') {
-        el.value = remove ? '' : String(value);
+        const next = remove ? '' : String(value);
+        if (el.value !== next) el.value = next;
       } else {
         el[name] = !remove;
       }
