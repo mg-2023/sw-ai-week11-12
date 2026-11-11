@@ -118,12 +118,15 @@ test('엔진 패널을 펼치면 게임 화면을 오른쪽으로 민다 (body.p
   assert.ok(!win.document.body.classList.contains('panel-open'));
 });
 
-test('세부 목록을 열면 패널이 넓어지고, 착수의 diff 명령 · path 확인 · VDOM 트리가 보인다', (t) => {
+test('세부 목록은 엔진 패널 오른쪽에 따로 나오는 토글 패널이고, 착수의 diff 명령 · path 확인 · VDOM 트리가 보인다', (t) => {
   const { win } = loadPage(t);
   const doc = win.document;
+  const detail = doc.getElementById('panel-detail');
   doc.getElementById('panel-toggle').click();
   doc.querySelector('.detail-toggle').click();
-  assert.ok(doc.body.classList.contains('panel-detail'));
+  assert.ok(detail.classList.contains('open'));
+  assert.ok(doc.getElementById('engine-panel').classList.contains('open'));
+  assert.ok(!doc.getElementById('engine-panel').contains(detail));
   place(win, 112);
   const rows = Array.from(doc.querySelectorAll('.patch-list li')).map((li) => li.textContent);
   assert.ok(rows.some((r) => r.startsWith('CREATE') && r.includes('[0,1,0,1,112,0]')));
@@ -132,6 +135,11 @@ test('세부 목록을 열면 패널이 넓어지고, 착수의 diff 명령 · p
   assert.strictEqual(doc.querySelector('[data-cell="path-vdom"]').textContent, '<span.stone.B>');
   assert.strictEqual(doc.querySelector('[data-cell="path-dom"]').textContent, '<span.stone.B>');
   assert.ok(doc.querySelector('.vdom-tree details'));
+  doc.querySelector('.detail-toggle').click();
+  assert.ok(!detail.classList.contains('open'));
+  doc.querySelector('.detail-toggle').click();
+  doc.querySelector('.panel-close').click();
+  assert.ok(!detail.classList.contains('open'));
 });
 
 test('왼쪽 위 엔진 버튼이 패널을 펼치고 접는다, 패널에 커밋 누계가 보인다', (t) => {

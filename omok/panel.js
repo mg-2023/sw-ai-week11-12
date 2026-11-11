@@ -11,15 +11,16 @@
   const container = doc.getElementById('app');
   const panel = doc.getElementById('engine-panel');
   const toggle = doc.getElementById('panel-toggle');
+  const detailEl = doc.getElementById('panel-detail');
   const totals = { commits: 0, dom: 0 };
   const log = [];
 
   const observer = new root.MutationObserver((list) => { totals.dom += list.length; });
   observer.observe(container, { subtree: true, childList: true, attributes: true, characterData: true });
 
-  /* 패널 안 [data-cell=name] 칸에 글자를 쓰는 함수 */
+  /* 패널 · 세부 패널 안 [data-cell=name] 칸에 글자를 쓰는 함수 */
   function setCell(name, value) {
-    const el = panel.querySelector(`[data-cell="${name}"]`);
+    const el = doc.querySelector(`[data-cell="${name}"]`);
     if (el) el.textContent = value;
   }
 
@@ -37,6 +38,7 @@
     panel.classList.toggle('open', open);
     doc.body.classList.toggle('panel-open', open);
     toggle.setAttribute('aria-expanded', String(open));
+    if (!open) setDetail(false);
   }
 
   /* 엔진 버전 고르기 칸을 채우고, 바꾸면 그 버전으로 다시 여는 함수 */
@@ -155,11 +157,11 @@
   /* 마지막 diff 명령 목록을 그리는 함수 (세부 목록이 열려 있을 때만) */
   function renderPatches() {
     if (!detail.open) return;
-    const hide = panel.querySelector('#hide-event-only').checked;
+    const hide = detailEl.querySelector('#hide-event-only').checked;
     const all = detail.patches;
     const shown = hide ? all.filter((p) => !eventOnly(p)) : all;
     setCell('patch-count', `커밋 #${detail.commitNo} · ${all.length}개 중 ${shown.length}개 표시`);
-    const ol = panel.querySelector('.patch-list');
+    const ol = detailEl.querySelector('.patch-list');
     ol.textContent = '';
     for (const p of shown) {
       const li = doc.createElement('li');
@@ -173,7 +175,7 @@
       const what = doc.createElement('span');
       what.textContent = ` ${target} — ${patchDetail(p)}`;
       li.append(type, ' ', where, what);
-      li.addEventListener('click', () => { panel.querySelector('#path-input').value = p.path.join(','); showPath(); });
+      li.addEventListener('click', () => { detailEl.querySelector('#path-input').value = p.path.join(','); showPath(); });
       ol.appendChild(li);
     }
     if (shown.length === 0) {
@@ -185,7 +187,7 @@
 
   /* 입력한 path 의 VDOM 노드와 실제 DOM 노드를 나란히 보여 주는 함수 */
   function showPath() {
-    const raw = panel.querySelector('#path-input').value.trim();
+    const raw = detailEl.querySelector('#path-input').value.trim();
     const path = raw === '' ? [] : raw.split(/[\s,]+/).map(Number);
     if (path.some((n) => !Number.isInteger(n) || n < 0)) {
       setCell('path-show', '0 이상의 정수를 쉼표로 (예 0,1,0,1,112)');
@@ -220,7 +222,7 @@
 
   /* 지금 VDOM(엔진이 보관한 this.vdom 의 복사본)으로 트리를 다시 그리는 함수 */
   function renderTree() {
-    const box = panel.querySelector('.vdom-tree');
+    const box = detailEl.querySelector('.vdom-tree');
     box.textContent = '';
     const vdom = Omok.app.inspect().vdom;
     if (!vdom) return;
@@ -230,9 +232,10 @@
     box.appendChild(top);
   }
 
-  /* 세부 목록을 펼치거나 접는 함수 (패널이 오른쪽으로 넓어진다) */
+  /* 세부 목록을 펼치거나 접는 함수 (엔진 패널 오른쪽에 패널이 하나 더 나온다) */
   function setDetail(open) {
     detail.open = open;
+    detailEl.classList.toggle('open', open);
     doc.body.classList.toggle('panel-detail', open);
     const btn = panel.querySelector('.detail-toggle');
     btn.setAttribute('aria-expanded', String(open));
@@ -243,10 +246,11 @@
   fillEngineSelect();
   setCell('engine', info.engines[info.key].label);
   panel.querySelector('.detail-toggle').addEventListener('click', () => setDetail(!detail.open));
-  panel.querySelector('#hide-event-only').addEventListener('change', renderPatches);
-  panel.querySelector('#path-go').addEventListener('click', showPath);
-  panel.querySelector('#path-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') showPath(); });
-  panel.querySelector('#vdom-refresh').addEventListener('click', renderTree);
+  detailEl.querySelector('#hide-event-only').addEventListener('change', renderPatches);
+  detailEl.querySelector('#path-go').addEventListener('click', showPath);
+  detailEl.querySelector('#path-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') showPath(); });
+  detailEl.querySelector('#vdom-refresh').addEventListener('click', renderTree);
+  detailEl.querySelector('.detail-close').addEventListener('click', () => setDetail(false));
   setCell('batch', typeof root.MiniReact.flushSync === 'function' ? '마이크로태스크 — 어디서 부르든 한 번'
     : typeof root.MiniReact.batch === 'function' ? '있음 — 엔진 이벤트 경계' : '없음 — setter 마다 갱신');
   toggle.addEventListener('click', () => setOpen(!panel.classList.contains('open')));

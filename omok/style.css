@@ -268,9 +268,13 @@ button { font: inherit; }
 .log li:first-child { color: var(--blue-dark); font-weight: 700; }
 .log:empty, .hooks:empty { display: none; }
 
-/* 세부 목록 — 누르면 패널이 오른쪽으로 넓어지고 두 단이 된다 */
-body.panel-detail { --panel-w: min(860px, 96vw); }
+/* 세부 목록 — 엔진 패널은 그대로 두고, 그 오른쪽에 패널이 하나 더 나온다 (토글) */
+:root { --detail-w: min(440px, 92vw); }
+@media (min-width: 760px) {
+  body.panel-open.panel-detail .top, body.panel-open.panel-detail #app { margin-left: calc(var(--panel-w) + var(--detail-w)); }
+}
 .panel-head-actions { display: flex; gap: 8px; align-items: center; }
+.panel-head h2 small { color: var(--muted); font-size: 13px; font-weight: 400; margin-left: 4px; }
 .detail-toggle {
   border: 0;
   border-radius: 10px;
@@ -281,11 +285,29 @@ body.panel-detail { --panel-w: min(860px, 96vw); }
   cursor: pointer;
 }
 .detail-toggle[aria-expanded="true"] { background: var(--blue); color: #fff; }
-.panel-cols { display: block; }
-.panel-detail { display: none; }
-body.panel-detail .panel-cols { display: grid; grid-template-columns: minmax(0, 300px) minmax(0, 1fr); gap: 24px; }
-body.panel-detail .panel-detail { display: block; border-left: 1px solid var(--line); padding-left: 24px; }
-.panel-detail h3:first-child { margin-top: 0; }
+.detail-panel {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: var(--panel-w);
+  z-index: 29;
+  width: var(--detail-w);
+  padding: 20px;
+  overflow-y: auto;
+  background: #fbfcfd;
+  border-left: 1px solid var(--line);
+  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.08);
+  font-size: 13px;
+  transform: translateX(calc(-1 * (var(--panel-w) + var(--detail-w) + 24px)));
+  transition: transform .2s ease;
+}
+.detail-panel.open { transform: none; }
+.detail-panel h3 { margin: 18px 0 8px; font-size: 14px; }
+.detail-panel h3 small { color: var(--muted); font-weight: 400; }
+.detail-close { border: 0; background: var(--bg); width: 32px; height: 32px; border-radius: 10px; font-size: 18px; cursor: pointer; }
+@media (max-width: 759px) {
+  .detail-panel { left: 0; z-index: 31; }
+}
 .check { display: flex; gap: 6px; align-items: center; color: var(--sub); }
 .hint { margin: 4px 0 8px; color: var(--muted); font-size: 12px; }
 .patch-list {

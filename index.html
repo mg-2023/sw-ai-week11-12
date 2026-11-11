@@ -19,8 +19,6 @@
         <button type="button" class="panel-close" aria-label="패널 닫기">×</button>
       </div>
     </div>
-    <div class="panel-cols">
-    <div class="panel-main">
     <label class="field">엔진 버전
       <select id="engine-select"></select>
     </label>
@@ -43,9 +41,13 @@
     <ol class="log"></ol>
     <h3>Hooks <small>App 의 hooks 배열</small></h3>
     <ol class="hooks" start="0"></ol>
-    </div>
+  </aside>
 
-    <section id="panel-detail" class="panel-detail" aria-label="Phase 1 세부 — diff · VDOM · path">
+  <aside id="panel-detail" class="detail-panel" aria-label="Phase 1 세부 — diff · VDOM · path">
+      <div class="panel-head">
+        <h2>세부 목록 <small>Phase 1 엔진</small></h2>
+        <button type="button" class="detail-close" aria-label="세부 목록 닫기">×</button>
+      </div>
       <h3>마지막 diff 명령 <small data-cell="patch-count">-</small></h3>
       <label class="check"><input type="checkbox" id="hide-event-only" checked> 클릭 함수만 바뀐 PROPS 숨기기</label>
       <p class="hint">줄을 누르면 아래 path 확인에 그 경로가 들어간다</p>
@@ -65,8 +67,6 @@
       <h3>VDOM 트리 <small data-cell="vdom-base">-</small></h3>
       <button type="button" id="vdom-refresh" class="small-btn">지금 VDOM 으로 새로 고침</button>
       <div class="vdom-tree"></div>
-    </section>
-    </div>
   </aside>
 
   <header class="top">
