@@ -2,7 +2,7 @@
 (function (root) {
   'use strict';
 
-  const V = typeof require === 'function' ? require('./vdom.js') : root.MiniReact;
+  const V = typeof require === 'function' ? require('../engines/v1-batch/vdom.js') : root.MiniReact;
 
   /* 첫 Virtual DOM 으로 기록 객체를 만드는 함수 */
   function createHistory(initial) {

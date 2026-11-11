@@ -2,10 +2,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
-const V = require('../src/vdom');
-const { diff } = require('../src/diff');
-const { applyPatches, findNode, mount, syncFormState } = require('../src/patch');
-const { createHistory } = require('../src/history');
+const V = require('../engines/v1-batch/vdom');
+const { diff } = require('../engines/v1-batch/diff');
+const { applyPatches, findNode, mount, syncFormState } = require('../engines/v1-batch/patch');
+const { createHistory } = require('../phase1/history');
 
 const { h } = V;
 

@@ -1,4 +1,4 @@
-// 오목 데모(omok.html) 기능 테스트: jsdom 에 페이지를 올리고 src 엔진 · 오목 · 패널 스크립트를 순서대로 실행해 확인한다
+// 오목 데모(index.html) 기능 테스트: jsdom 에 페이지를 올리고 v1 엔진 · 오목 · 패널 스크립트를 순서대로 실행해 확인한다
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
@@ -6,12 +6,12 @@ const path = require('node:path');
 const { JSDOM } = require('jsdom');
 
 const ROOT = path.join(__dirname, '..');
-const SCRIPTS = ['src/vdom.js', 'src/diff.js', 'src/patch.js', 'src/hooks.js', 'src/component.js', 'omok/game.js', 'omok/panel.js'];
+const SCRIPTS = ['engines/v1-batch/vdom.js', 'engines/v1-batch/diff.js', 'engines/v1-batch/patch.js', 'engines/v1-batch/hooks.js', 'engines/v1-batch/component.js', 'omok/game.js', 'omok/panel.js'];
 
 /* omok.html 을 올리고 스크립트를 실행한 뒤, 커밋 보고 목록과 함께 window 를 돌려주는 함수 (로더는 jsdom 이 불러오지 않는다) */
 function loadPage(t) {
-  const html = fs.readFileSync(path.join(ROOT, 'omok.html'), 'utf8');
-  const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'http://localhost/omok.html' });
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'http://localhost/index.html' });
   for (const file of SCRIPTS) dom.window.eval(fs.readFileSync(path.join(ROOT, file), 'utf8'));
   const reports = [];
   dom.window.Omok.app.onCommit((r) => reports.push(r));

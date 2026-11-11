@@ -2,9 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
-const { h } = require('../src/vdom');
-const { useState, useMemo, getCurrent, depsChanged } = require('../src/hooks');
-const { FunctionComponent } = require('../src/component');
+const { h } = require('../engines/v1-batch/vdom');
+const { useState, useMemo, getCurrent, depsChanged } = require('../engines/v1-batch/hooks');
+const { FunctionComponent } = require('../engines/v1-batch/component');
 
 // 다시 렌더는 내부 run() 을 직접 불러 흉내 낸다 (update() 는 M3 에서 구현됨)
 function mountComp(fn) {

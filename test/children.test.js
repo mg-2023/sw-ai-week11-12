@@ -2,9 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
-const { h } = require('../src/vdom');
-const { useState } = require('../src/hooks');
-const { FunctionComponent, expand } = require('../src/component');
+const { h } = require('../engines/v1-batch/vdom');
+const { useState } = require('../engines/v1-batch/hooks');
+const { FunctionComponent, expand } = require('../engines/v1-batch/component');
 
 // 컴포넌트를 만들어 mount 한다
 function mountComp(fn) {

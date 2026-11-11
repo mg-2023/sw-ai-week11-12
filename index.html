@@ -3,64 +3,50 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>미니 리액트 — Phase 1 검증</title>
-  <link rel="stylesheet" href="style.css">
+  <title>미니 리액트 오목</title>
+  <link rel="stylesheet" href="omok/style.css">
 </head>
 <body>
-  <header>
-    <h1>미니 리액트 · Phase 1</h1>
-    <p class="lead">테스트 영역의 HTML 을 고치고 <b>Patch</b> → 바뀐 곳만 실제 영역에 반영된다 (노란 깜빡임). 뒤로 · 앞으로가기로 기록을 오간다.</p>
+  <button type="button" id="panel-toggle" class="panel-toggle" aria-expanded="false" aria-controls="engine-panel">
+    <span class="bars" aria-hidden="true"></span>엔진
+  </button>
+
+  <aside id="engine-panel" class="engine-panel" aria-label="엔진 내부 상태">
+    <div class="panel-head">
+      <h2>엔진 내부 상태</h2>
+      <button type="button" class="panel-close" aria-label="패널 닫기">×</button>
+    </div>
+    <label class="field">엔진 버전
+      <select id="engine-select"></select>
+    </label>
+    <dl class="kv">
+      <dt>지금 엔진</dt><dd data-cell="engine">-</dd>
+      <dt>배칭</dt><dd data-cell="batch">-</dd>
+      <dt>커밋 누계</dt><dd data-cell="commits">0</dd>
+      <dt>DOM 변경 누계</dt><dd data-cell="dom">0</dd>
+    </dl>
+    <h3>마지막 커밋</h3>
+    <dl class="kv">
+      <dt>원인</dt><dd data-cell="cause">-</dd>
+      <dt>종류</dt><dd data-cell="kind">-</dd>
+      <dt>시간(ms)</dt><dd data-cell="ms">-</dd>
+      <dt>비교한 노드</dt><dd data-cell="compared">-</dd>
+      <dt>patch</dt><dd data-cell="patches">-</dd>
+      <dt>이벤트만 바뀐 PROPS</dt><dd data-cell="event-only">-</dd>
+    </dl>
+    <h3>커밋 기록 <small>최근 순</small></h3>
+    <ol class="log"></ol>
+    <h3>Hooks <small>App 의 hooks 배열</small></h3>
+    <ol class="hooks" start="0"></ol>
+  </aside>
+
+  <header class="top">
+    <h1>오목</h1>
+    <p>미니 리액트 엔진으로 그린 2인용 대국</p>
   </header>
 
-  <nav class="toolbar">
-    <button id="btn-patch" type="button" title="Ctrl+Enter">Patch</button>
-    <button id="btn-back" type="button">← 뒤로가기</button>
-    <button id="btn-forward" type="button">앞으로가기 →</button>
-    <span id="history-pos" class="pos"></span>
-    <span id="status" class="status" role="status"></span>
-  </nav>
+  <main id="app"></main>
 
-  <main class="panes">
-    <section class="pane">
-      <h2>실제 영역 <small>Patch 로만 바뀜</small></h2>
-      <!-- 로드하면 이 샘플 HTML 을 Virtual DOM 으로 읽는다 -->
-      <div id="actual" class="actual">
-        <h3 class="title">할 일 목록</h3>
-        <p>오늘 할 일은 <b>세 가지</b>, 끝난 것은 <i>하나</i>입니다.</p>
-        <ul class="todo">
-          <li class="done">Virtual DOM 변환</li>
-          <li>Diff 알고리즘</li>
-          <li>Patch 적용</li>
-        </ul>
-        <!-- 주석은 Virtual DOM 에 들어가지 않는다 -->
-        <p><label><input type="checkbox" checked> 동의함</label> <button type="button" disabled>제출</button></p>
-        <table class="score">
-          <tr><th>이름</th><th>점수</th></tr>
-          <tr><td>정글</td><td>90</td></tr>
-        </table>
-        <svg width="80" height="40" viewBox="0 0 80 40"><circle cx="20" cy="20" r="14" fill="tomato"></circle><rect x="44" y="6" width="28" height="28" fill="steelblue"></rect></svg>
-        <pre>  공백이   그대로
-    남는 pre</pre>
-        <p>링크: <a href="https://developer.mozilla.org/" target="_blank">MDN</a></p>
-      </div>
-    </section>
-
-    <section class="pane">
-      <h2>테스트 영역 <small>HTML 을 고치는 곳</small></h2>
-      <textarea id="test" spellcheck="false" aria-label="테스트 영역 HTML"></textarea>
-    </section>
-  </main>
-
-  <section class="log">
-    <h2>마지막 Patch <small id="log-summary"></small></h2>
-    <ol id="patch-log"></ol>
-  </section>
-
-  <!-- 순서 중요: vdom → diff → patch → history → app -->
-  <script src="src/vdom.js"></script>
-  <script src="src/diff.js"></script>
-  <script src="src/patch.js"></script>
-  <script src="src/history.js"></script>
-  <script src="app.js"></script>
+  <script src="omok/loader.js"></script>
 </body>
 </html>

@@ -2,10 +2,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
-const { h } = require('../src/vdom');
-const H = require('../src/hooks');
-const P = require('../src/patch');
-const { FunctionComponent } = require('../src/component');
+const { h } = require('../engines/v1-batch/vdom');
+const H = require('../engines/v1-batch/hooks');
+const P = require('../engines/v1-batch/patch');
+const { FunctionComponent } = require('../engines/v1-batch/component');
 
 /* 컴포넌트를 만들어 mount 하고 보고 목록과 함께 돌려주는 도우미 */
 function start(fn) {

@@ -1,8 +1,8 @@
 // Diff 단위 테스트: 두 VDOM → patches 목록
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const V = require('../src/vdom');
-const { diff, diffProps } = require('../src/diff');
+const V = require('../engines/v1-batch/vdom');
+const { diff, diffProps } = require('../engines/v1-batch/diff');
 
 const { h } = V;
 

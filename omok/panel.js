@@ -5,7 +5,7 @@
   const { FunctionComponent } = root.MiniReact;
   const doc = root.document;
   const Omok = root.Omok;
-  const info = root.ENGINE_INFO || { key: 'src', engines: { src: { label: '현재 작업본 (src)' } } };
+  const info = root.ENGINE_INFO || { key: 'v1-batch', engines: { 'v1-batch': { label: 'v1 이벤트 경계 배칭' } } };
   const LOG_MAX = 14;
 
   const container = doc.getElementById('app');

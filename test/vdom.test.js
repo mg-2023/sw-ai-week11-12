@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
-const V = require('../src/vdom');
+const V = require('../engines/v1-batch/vdom');
 
 const { h, text } = V;
 

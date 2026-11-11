@@ -2,8 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { setup } = require('./helpers');
-const { h } = require('../src/vdom');
-const { FunctionComponent, expand } = require('../src/component');
+const { h } = require('../engines/v1-batch/vdom');
+const { FunctionComponent, expand } = require('../engines/v1-batch/component');
 
 const PATCH_KEYS = ['CREATE', 'REMOVE', 'REPLACE', 'TEXT', 'PROPS'];
 

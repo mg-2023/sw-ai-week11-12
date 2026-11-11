@@ -2,9 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { setup } = require('./helpers.js');
-const V = require('../src/vdom.js');
-const { diff } = require('../src/diff.js');
-const { syncFormState } = require('../src/patch.js');
+const V = require('../engines/v1-batch/vdom.js');
+const { diff } = require('../engines/v1-batch/diff.js');
+const { syncFormState } = require('../engines/v1-batch/patch.js');
 
 test('h() 는 true 를 자식에서 버린다', () => {
   const p = V.h('p', null, true, 'a');
