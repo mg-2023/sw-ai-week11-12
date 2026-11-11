@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/demo/hero.png" alt="Mini React 엔진으로 렌더링한 오목 데모와 엔진 상태 패널, Phase 1 세부 패널" width="880">
-</p>
-
 # Mini React
 
 ---
