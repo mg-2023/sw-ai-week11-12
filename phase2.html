@@ -15,12 +15,12 @@
   </header>
 
   <main class="top">
-    <section class="card">
+    <section class="card card-demo">
       <h2>① 데모 앱 <small>할 일 목록 (엔진으로 그림)</small></h2>
       <div id="demo"></div>
     </section>
 
-    <section class="card">
+    <section class="card card-panel">
       <h2>② 측정 패널 <small>엔진을 쓰지 않는 일반 DOM</small></h2>
       <div id="panel">
         <dl>
@@ -38,8 +38,8 @@
     </section>
   </main>
 
-  <section class="card">
-    <h2>③ 시나리오</h2>
+  <details class="card fold" open>
+    <summary><h2>③ 시나리오</h2></summary>
     <div class="scenarios">
       <button type="button" data-scenario="add100">100개 추가</button>
       <button type="button" data-scenario="reverse">순서 뒤집기</button>
@@ -48,16 +48,16 @@
       <button type="button" data-scenario="set10">setState 10번</button>
       <button type="button" data-scenario="addClick">추가 클릭</button>
     </div>
-  </section>
+  </details>
 
-  <section class="card">
-    <h2>④ 기록 <small>DOM 변경 수에는 속성 쓰기도 포함</small></h2>
+  <details class="card fold" open>
+    <summary><h2>④ 기록 <small>DOM 변경 수에는 속성 쓰기도 포함</small></h2></summary>
     <button type="button" id="copy-md">마크다운으로 복사</button>
     <table id="records">
       <thead><tr><th>버전</th><th>시나리오</th><th>렌더</th><th>시간(ms)</th><th>비교</th><th>patch</th><th>DOM 변경</th></tr></thead>
       <tbody></tbody>
     </table>
-  </section>
+  </details>
 
   <!-- 순서 중요: vdom → diff → patch → hooks → component → app -->
   <script src="src/vdom.js"></script>

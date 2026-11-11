@@ -1,49 +1,263 @@
+/* 깃허브(Primer) 느낌 테마 — HTML 은 그대로, CSS 만 바꿈 */
 :root {
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --ink: #1d232b;
-  --muted: #6b7480;
-  --line: #dde1e6;
-  --accent: #2f6fde;
+  --bg: #ffffff;
+  --bg-subtle: #f6f8fa;
+  --ink: #1f2328;
+  --muted: #59636e;
+  --line: #d1d9e0;
+  --line-muted: #d1d9e0b3;
+  --accent: #0969da;
+  --accent-soft: #ddf4ff;
+  --btn-bg: #f6f8fa;
+  --btn-hover: #eff2f5;
+  --btn-border: #d1d9e0;
+  --primary: #1f883d;
+  --primary-hover: #1c8139;
+  --danger: #d1242f;
+  --header-bg: #f6f8fa;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --bg-subtle: #151b23;
+    --ink: #f0f6fc;
+    --muted: #9198a1;
+    --line: #3d444d;
+    --line-muted: #3d444db3;
+    --accent: #4493f8;
+    --accent-soft: #388bfd33;
+    --btn-bg: #212830;
+    --btn-hover: #262c36;
+    --btn-border: #3d444d;
+    --primary: #238636;
+    --primary-hover: #29903b;
+    --danger: #f85149;
+    --header-bg: #010409;
+  }
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  padding: 16px 24px 40px;
+  padding: 0 0 40px;
   background: var(--bg);
   color: var(--ink);
-  font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", "Malgun Gothic", Helvetica, Arial, sans-serif;
+  font-size: 14px;
   line-height: 1.5;
 }
 
-header { display: flex; justify-content: space-between; align-items: center; }
-header h1 { margin: 0 0 8px; font-size: 1.4rem; }
+/* 맨 위 막대 — 깃허브 저장소 머리 */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 32px;
+  margin-bottom: 24px;
+  background: var(--header-bg);
+  border-bottom: 1px solid var(--line);
+}
+header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+header .version { display: flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 600; }
+
+main.top, body > section, body > details { margin-left: 32px; margin-right: 32px; }
 
 .top { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; }
-.card h2 { margin: 0 0 8px; font-size: 1.05rem; }
-.card small { color: var(--muted); font-weight: normal; }
 
-button { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
-button:hover { border-color: var(--accent); }
-input[type="text"] { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; }
+/* 카드 — 깃허브 Box. h2 가 회색 머리 줄 */
+.card {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+.card > h2 {
+  margin: -16px -16px 16px;
+  padding: 12px 16px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  font-weight: 600;
+}
+.card small { color: var(--muted); font-weight: 400; margin-left: 4px; }
 
-#demo ul { list-style: none; padding: 0; margin: 8px 0; max-height: 240px; overflow: auto; }
-#demo li { padding: 2px 0; }
+/* ① 테스트하는 곳은 늘 흰 배경 (다크 모드에서도) */
+.card-demo {
+  --bg: #ffffff;
+  --bg-subtle: #f6f8fa;
+  --ink: #1f2328;
+  --muted: #59636e;
+  --line: #d1d9e0;
+  --line-muted: #d1d9e0b3;
+  --accent: #0969da;
+  --accent-soft: #ddf4ff;
+  --btn-bg: #f6f8fa;
+  --btn-hover: #eff2f5;
+  --btn-border: #d1d9e0;
+  --primary: #1f883d;
+  --primary-hover: #1c8139;
+  --danger: #d1242f;
+  color: var(--ink);
+}
+
+/* ② 측정 패널은 늘 검은 배경 · 흰 글씨 — 데모와 한눈에 구별 */
+.card-panel {
+  --bg: #0d1117;
+  --bg-subtle: #010409;
+  --ink: #f0f6fc;
+  --muted: #9198a1;
+  --line: #3d444d;
+  --line-muted: #3d444db3;
+  --accent: #4493f8;
+  color: var(--ink);
+  border-color: #3d444d;
+}
+.card-panel dd { color: #7ee787; }
+
+/* ③ ④ 접는 칸 — 제목 줄을 누르면 접고 편다 */
+.fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -16px -16px 16px;
+  padding: 12px 16px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform .12s;
+  flex: none;
+}
+.fold[open] > summary::before { transform: rotate(45deg); }
+.fold > summary:hover { background: var(--btn-hover); }
+.fold > summary h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.fold:not([open]) > summary { margin-bottom: -16px; border-bottom: 0; }
+
+/* 버튼 — 깃허브 기본 버튼 */
+button, select {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  padding: 5px 16px;
+  color: var(--ink);
+  background: var(--btn-bg);
+  border: 1px solid var(--btn-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color .08s;
+}
+select { padding: 5px 12px; }
+button:hover, select:hover { background: var(--btn-hover); }
+button:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* 입력 칸 */
+input[type="text"] {
+  font: inherit;
+  padding: 5px 12px;
+  line-height: 20px;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-width: 0;
+}
+input[type="text"]:focus { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); outline: none; }
+input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+
+/* ① 데모 앱 */
+#demo form { display: flex; gap: 8px; }
+#demo form input[type="text"] { flex: 1; }
+#demo form button[type="submit"] { background: var(--primary); border-color: #1f232826; color: #fff; }
+#demo form button[type="submit"]:hover { background: var(--primary-hover); }
+
+#demo ul {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+#demo ul:empty { display: none; }
+#demo li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line-muted);
+}
+#demo li:first-child { border-top: 0; }
+#demo li:hover { background: var(--bg-subtle); }
+#demo li span { flex: 1; word-break: break-all; }
 #demo li.done span { text-decoration: line-through; color: var(--muted); }
+#demo li button { padding: 2px 10px; font-size: 12px; color: var(--danger); }
+#demo li button:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+#demo p { margin: 8px 0 0; color: var(--muted); }
+#demo .remaining {
+  display: inline-block;
+  min-width: 20px;
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  color: var(--ink);
+  background: var(--accent-soft);
+  border-radius: 2em;
+}
 
-#panel dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; }
+/* ② 측정 패널 */
+#panel dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
 #panel dt { color: var(--muted); }
-#panel dd { margin: 0; font-variant-numeric: tabular-nums; }
-#panel h3 { margin: 12px 0 4px; font-size: 0.95rem; }
-#panel .hooks { margin: 0; padding-left: 18px; max-height: 160px; overflow: auto; font-family: ui-monospace, Consolas, monospace; font-size: 0.8rem; word-break: break-all; }
+#panel dd { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 21px; font-variant-numeric: tabular-nums; }
+#panel h3 { margin: 16px 0 8px; padding-top: 12px; border-top: 1px solid var(--line-muted); font-size: 14px; font-weight: 600; }
+#panel .hooks {
+  margin: 0;
+  padding: 8px 8px 8px 28px;
+  max-height: 160px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  background: var(--bg-subtle);
+  border-radius: 6px;
+}
+#panel .hooks:empty { display: none; }
 
+/* ③ 시나리오 */
 .scenarios { display: flex; flex-wrap: wrap; gap: 8px; }
 
-table { border-collapse: collapse; width: 100%; margin-top: 8px; }
-th, td { border: 1px solid var(--line); padding: 4px 8px; text-align: right; }
+/* ④ 기록 — 깃허브 마크다운 표 */
+#copy-md { font-size: 12px; padding: 3px 12px; }
+table { border-collapse: collapse; width: 100%; margin-top: 12px; font-variant-numeric: tabular-nums; }
+th, td { border: 1px solid var(--line); padding: 6px 13px; text-align: right; }
+th { font-weight: 600; background: var(--bg-subtle); }
+tbody tr:nth-child(2n) { background: var(--bg-subtle); }
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+.card:has(table) { overflow-x: auto; }
 
-@media (max-width: 720px) { .top { grid-template-columns: 1fr; } }
+@media (max-width: 720px) {
+  header { padding: 12px 16px; flex-wrap: wrap; }
+  main.top, body > section, body > details { margin-left: 16px; margin-right: 16px; }
+  .top { grid-template-columns: 1fr; }
+}
