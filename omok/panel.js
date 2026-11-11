@@ -88,10 +88,165 @@
       li.textContent = `[${i}] ${hook.kind} : ${brief(hook.value)}`;
       hooks.appendChild(li);
     });
+
+    if (report.kind === 'update') detail.commitNo = totals.commits;
+    renderPatches();
+  }
+
+  // ───────── 세부 목록 : Phase 1 엔진(diff · VDOM · path)을 들여다보기 ─────────
+
+  const M = root.MiniReact;
+  const detail = { open: false, patches: [], commitNo: 0 };
+
+  // 엔진의 diff 를 감싸 마지막 명령 목록을 붙잡는다 (엔진은 MiniReact.diff 를 부를 때마다 이 객체에서 꺼낸다)
+  const originalDiff = M.diff;
+  M.diff = function (oldV, newV, stats) {
+    const patches = originalDiff.call(this, oldV, newV, stats);
+    detail.patches = patches;
+    return patches;
+  };
+
+  /* VDOM 노드 하나를 "태그.클래스" 나 "#text '글자'" 같은 짧은 글자로 줄이는 함수 */
+  function describeVnode(v) {
+    if (!v) return '없음';
+    if (v.type === '#text') return `#text "${String(v.props.nodeValue).slice(0, 24)}"`;
+    const cls = v.props && v.props.class ? '.' + String(v.props.class).trim().split(/\s+/).join('.') : '';
+    return `<${v.type}${cls}>`;
+  }
+
+  /* 실제 DOM 노드 하나를 짧은 글자로 줄이는 함수 */
+  function describeDom(node) {
+    if (!node) return '없음';
+    if (node.nodeType === 3) return `#text "${node.nodeValue.slice(0, 24)}"`;
+    const cls = node.getAttribute('class') ? '.' + node.getAttribute('class').trim().split(/\s+/).join('.') : '';
+    return `<${node.localName}${cls}>`;
+  }
+
+  /* path 를 따라 VDOM 을 내려가 그 노드를 돌려주는 함수 (없으면 null) */
+  function vnodeAt(vdom, path) {
+    let v = vdom;
+    for (const i of path) {
+      if (!v || !v.children || !v.children[i]) return null;
+      v = v.children[i];
+    }
+    return v;
+  }
+
+  /* path 를 따라 실제 DOM 을 내려가 그 노드를 돌려주는 함수 (엔진의 findNode 사용, 없으면 null) */
+  function domAt(path) {
+    try { return M.findNode(container, path); } catch (err) { return null; }
+  }
+
+  /* 명령 하나의 내용을 짧은 글자로 줄이는 함수 */
+  function patchDetail(p) {
+    if (p.type === 'TEXT') return `"${String(p.value).slice(0, 30)}"`;
+    if (p.type === 'CREATE' || p.type === 'REPLACE') return '새 ' + describeVnode(p.node);
+    if (p.type === 'REMOVE') return '그 자리 노드 지움';
+    const keys = Object.keys(p.set).map((k) => (typeof p.set[k] === 'function' ? k + '(함수)' : `${k}=${JSON.stringify(p.set[k])}`));
+    return keys.concat(p.remove.map((k) => '−' + k)).join(' · ');
+  }
+
+  /* PROPS 명령이 클릭 함수 같은 이벤트 함수만 바꿨는지 확인하는 함수 */
+  function eventOnly(p) {
+    return p.type === 'PROPS' && p.remove.length === 0
+      && Object.keys(p.set).every((k) => /^on/i.test(k) && typeof p.set[k] === 'function');
+  }
+
+  /* 마지막 diff 명령 목록을 그리는 함수 (세부 목록이 열려 있을 때만) */
+  function renderPatches() {
+    if (!detail.open) return;
+    const hide = panel.querySelector('#hide-event-only').checked;
+    const all = detail.patches;
+    const shown = hide ? all.filter((p) => !eventOnly(p)) : all;
+    setCell('patch-count', `커밋 #${detail.commitNo} · ${all.length}개 중 ${shown.length}개 표시`);
+    const ol = panel.querySelector('.patch-list');
+    ol.textContent = '';
+    for (const p of shown) {
+      const li = doc.createElement('li');
+      li.className = 'patch-' + p.type.toLowerCase();
+      const target = p.type === 'REMOVE' ? '(지워진 자리)' : describeDom(domAt(p.path));
+      li.innerHTML = '';
+      const type = doc.createElement('strong');
+      type.textContent = p.type;
+      const where = doc.createElement('code');
+      where.textContent = `[${p.path.join(',')}]`;
+      const what = doc.createElement('span');
+      what.textContent = ` ${target} — ${patchDetail(p)}`;
+      li.append(type, ' ', where, what);
+      li.addEventListener('click', () => { panel.querySelector('#path-input').value = p.path.join(','); showPath(); });
+      ol.appendChild(li);
+    }
+    if (shown.length === 0) {
+      const li = doc.createElement('li');
+      li.textContent = all.length === 0 ? '아직 diff 가 없다 (처음 그리기는 diff 없이 mount)' : '모두 클릭 함수 교체뿐';
+      ol.appendChild(li);
+    }
+  }
+
+  /* 입력한 path 의 VDOM 노드와 실제 DOM 노드를 나란히 보여 주는 함수 */
+  function showPath() {
+    const raw = panel.querySelector('#path-input').value.trim();
+    const path = raw === '' ? [] : raw.split(/[\s,]+/).map(Number);
+    if (path.some((n) => !Number.isInteger(n) || n < 0)) {
+      setCell('path-show', '0 이상의 정수를 쉼표로 (예 0,1,0,1,112)');
+      return;
+    }
+    const vdom = Omok.app.inspect().vdom;
+    setCell('path-show', `[${path.join(',')}]`);
+    setCell('path-vdom', describeVnode(vnodeAt(vdom, path)));
+    setCell('path-dom', describeDom(domAt(path)));
+  }
+
+  /* VDOM 노드 하나를 펼칠 수 있는 줄로 만드는 함수 (자식은 펼칠 때 만든다 — 칸이 225개라서) */
+  function treeNode(v, path) {
+    const label = `[${path.join(',')}] ${describeVnode(v)}`;
+    if (v.type === '#text' || v.children.length === 0) {
+      const div = doc.createElement('div');
+      div.className = 'tree-leaf';
+      div.textContent = label;
+      return div;
+    }
+    const d = doc.createElement('details');
+    const s = doc.createElement('summary');
+    s.textContent = `${label}  · 자식 ${v.children.length}`;
+    d.appendChild(s);
+    d.addEventListener('toggle', () => {
+      if (!d.open || d.dataset.filled) return;
+      d.dataset.filled = '1';
+      v.children.forEach((c, i) => d.appendChild(treeNode(c, path.concat(i))));
+    });
+    return d;
+  }
+
+  /* 지금 VDOM(엔진이 보관한 this.vdom 의 복사본)으로 트리를 다시 그리는 함수 */
+  function renderTree() {
+    const box = panel.querySelector('.vdom-tree');
+    box.textContent = '';
+    const vdom = Omok.app.inspect().vdom;
+    if (!vdom) return;
+    setCell('vdom-base', `커밋 #${totals.commits} 기준 · path 는 컨테이너(#app)부터`);
+    const top = treeNode(vdom, []);
+    top.open = true;
+    box.appendChild(top);
+  }
+
+  /* 세부 목록을 펼치거나 접는 함수 (패널이 오른쪽으로 넓어진다) */
+  function setDetail(open) {
+    detail.open = open;
+    doc.body.classList.toggle('panel-detail', open);
+    const btn = panel.querySelector('.detail-toggle');
+    btn.setAttribute('aria-expanded', String(open));
+    btn.textContent = open ? '세부 목록 ◂' : '세부 목록 ▸';
+    if (open) { renderPatches(); renderTree(); }
   }
 
   fillEngineSelect();
   setCell('engine', info.engines[info.key].label);
+  panel.querySelector('.detail-toggle').addEventListener('click', () => setDetail(!detail.open));
+  panel.querySelector('#hide-event-only').addEventListener('change', renderPatches);
+  panel.querySelector('#path-go').addEventListener('click', showPath);
+  panel.querySelector('#path-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') showPath(); });
+  panel.querySelector('#vdom-refresh').addEventListener('click', renderTree);
   setCell('batch', typeof root.MiniReact.flushSync === 'function' ? '마이크로태스크 — 어디서 부르든 한 번'
     : typeof root.MiniReact.batch === 'function' ? '있음 — 엔진 이벤트 경계' : '없음 — setter 마다 갱신');
   toggle.addEventListener('click', () => setOpen(!panel.classList.contains('open')));
