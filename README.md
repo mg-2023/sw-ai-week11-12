@@ -189,7 +189,16 @@ sequenceDiagram
 
 </td></tr></table>
 
-**직접 해 보기** — 저장소를 받아 `phase1.html`(시연 1) · `index.html`(시연 2 · 3)을 브라우저로 연다. 오목은 왼쪽 위 **엔진** → **세부 목록**, **바뀐 DOM 강조** 체크, 엔진 고르기에서 v0 / v2. GIF 다시 찍기 : `node docs/demo/record.mjs` → `python docs/demo/make_gif.py`
+**직접 해 보기** (브라우저에서 바로 열림 — `feat-Jongeume` 브랜치를 raw.githack.com 으로 미리보기)
+
+| 시연 | 링크 |
+| --- | --- |
+| 1 · Diff · Patch | [phase1.html](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/phase1.html) — 테스트 영역을 고치고 **Patch** |
+| 2 · Hooks | [오목 (v2)](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html) — 왼쪽 위 **엔진** → **바뀐 DOM 강조** 체크 · **세부 목록** |
+| 3 · 배칭 | [오목 v0](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v0) · [v1](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v1-batch) · [v2](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v2-microtask) — 엔진 패널의 커밋 기록 비교 |
+
+- 저장소를 받아 `phase1.html` · `index.html` 을 그냥 열어도 된다 (서버 필요 없음)
+- GIF 다시 찍기 : `node docs/demo/record.mjs` → `python docs/demo/make_gif.py`
 
 <details>
 <summary><b>데모에서 더 볼 수 있는 것</b></summary>
