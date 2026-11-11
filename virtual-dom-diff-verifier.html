@@ -119,9 +119,6 @@ pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg)
 <header>
   <h1>Virtual DOM · Diff 검증기</h1>
   <p>테스트 영역에서 HTML을 수정하고 Patch를 누르면, 달라진 부분만 실제 영역에 반영됩니다. 컴포넌트 모드에서는 버튼 클릭 → state 변경 → 리렌더가 같은 Diff / Patch를 거칩니다.</p>
-  <div class="flow">
-    <span>실제 영역 HTML</span><span class="arr">→</span><span>Virtual DOM</span><span class="arr">→</span><span>테스트 영역에 HTML 표시</span><span class="arr">→</span><span>사용자가 HTML 수정</span><span class="arr">→</span><span>Patch 또는 setState → 새 VDOM + Diff</span><span class="arr">→</span><span>실제 영역에 변경분만 반영</span><span class="arr">→</span><span>State History</span>
-  </div>
 </header>
 
 <div class="toolbar">
