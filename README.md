@@ -1,77 +1,122 @@
-# Mini React — 오목으로 검증한 Vanilla JS 리액트 엔진
+<p align="center">
+  <img src="docs/demo/hero.png" alt="Mini React 엔진으로 렌더링한 오목 데모와 엔진 상태 패널, Phase 1 세부 패널" width="880">
+</p>
 
-> [!NOTE]
-> **함수는 매번 새로 실행되고, 상태는 엔진의 `hooks` 배열에 남는다.**
-> 상태가 바뀌면 루트부터 새 Virtual DOM 을 만들고, Diff 로 찾은 **바뀐 곳만** 실제 DOM 에 고친다.
-> 같은 작업 안에서 생긴 여러 상태 변경은 **한 번의 렌더로 묶는다** (마이크로태스크 배칭).
+# Mini React
 
 ---
 
-## 1. 프로젝트 소개
+[![Vanilla JavaScript](https://img.shields.io/badge/JavaScript-Vanilla-f7df1e?logo=javascript&logoColor=black)](#제약-조건)
+[![Runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-3182f6)](#제약-조건)
+[![Tests](https://img.shields.io/badge/tests-202%20passed-2ea44f)](#테스트)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js&logoColor=white)](#실행)
+[![Live demo](https://img.shields.io/badge/demo-raw.githack-3182f6)](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html)
 
-**목표** — React 의 핵심 원리(Virtual DOM · Diff · Patch · State · Hooks)를 라이브러리 없이 직접 만들고, 실제로 동작하는 웹 페이지로 증명한다.
+Mini React는 Virtual DOM, Diff, Patch, 함수형 컴포넌트와 Hooks를 외부 라이브러리 없이 구현한 Vanilla JavaScript 렌더링 엔진입니다. 오목 데모 애플리케이션으로 동작을 검증하며, 같은 애플리케이션을 세 가지 엔진 버전으로 실행하여 배칭 방식의 차이를 비교할 수 있습니다.
 
-| 구현 범위 | 내용 |
-| --- | --- |
-| Phase 1 | Virtual DOM · Diff(5가지 변경) · Patch · State History(뒤로 · 앞으로) — `phase1.html` |
-| Phase 2 | `FunctionComponent` 클래스 · `useState` · `useMemo` · `useEffect` — 데모 **오목** `index.html` |
-| 배칭 | 엔진 3단계로 발전 : v0 배칭 없음 → v1 이벤트 경계 → **v2 마이크로태스크 (데모 기본)** |
-| 검증 | 단위 테스트 202개 통과 · 실제 브라우저에서 엔진별 렌더 횟수 측정 |
+- **선언적 렌더링:** 컴포넌트는 현재 상태에 맞는 화면을 `h()`로 기술합니다. 엔진은 이전 Virtual DOM과 비교하여 변경된 노드만 실제 DOM에 반영합니다.
+- **Hook 기반 상태:** 컴포넌트 함수는 렌더할 때마다 새로 실행되며, 상태는 엔진이 관리하는 `hooks` 배열에 Hook 호출 순서대로 보존됩니다.
+- **마이크로태스크 배칭:** 하나의 작업에서 발생한 여러 상태 변경은 호출 위치와 관계없이 한 번의 렌더로 반영됩니다.
 
-- 외부 라이브러리 · 빌드 도구 없음 (테스트용 `jsdom` 만 개발 의존성)
-- 과제 제약 : **상태와 Hook 은 루트 컴포넌트에만**, 자식은 props 만 받는 순수 함수
+## 목차
+
+1. [개요](#1-개요)
+2. [아키텍처](#2-아키텍처)
+3. [실행 흐름과 설계 결정](#3-실행-흐름과-설계-결정)
+4. [시연과 검증](#4-시연과-검증)
+5. [제한 사항과 향후 계획](#5-제한-사항과-향후-계획)
+6. [시작하기](#6-시작하기)
+
+---
+
+## 1. 개요
+
+### 목표
+
+React의 핵심 원리인 Virtual DOM, Diff, Patch, State, Hooks를 직접 구현하고, 실제로 동작하는 웹 페이지로 검증합니다.
+
+### 구현 범위
+
+| 영역 | 내용 | 진입점 |
+| --- | --- | --- |
+| Phase 1 | Virtual DOM, Diff(변경 명령 5종), Patch, State History(뒤로 가기, 앞으로 가기) | `phase1.html` |
+| Phase 2 | `FunctionComponent` 클래스, `useState`, `useMemo`, `useEffect` | `index.html` (오목) |
+| 배칭 | v0 배칭 없음, v1 이벤트 경계 배칭, v2 마이크로태스크 배칭(기본값) | `?engine=` 쿼리 |
+| 검증 | 단위 테스트 202개 통과, 실제 브라우저에서 엔진별 렌더 횟수 측정 | `npm test` |
+
+### 제약 조건
+
+- 외부 라이브러리와 빌드 도구를 사용하지 않습니다. 개발 의존성은 테스트용 `jsdom` 하나입니다.
+- 상태와 Hook은 루트 컴포넌트에서만 사용합니다. 자식 컴포넌트는 props만 받는 순수 함수입니다.
 
 ---
 
 ## 2. 아키텍처
 
-### 모듈 관계
+### 모듈 구성
 
 ```mermaid
 flowchart TB
-  subgraph APP["앱 — omok/"]
-    GAME["game.js<br/>App · 자식 컴포넌트 6종"]
-    PANEL["panel.js<br/>엔진 내부 상태 패널"]
+  subgraph APP["애플리케이션 (omok/)"]
+    GAME["game.js<br/>App, 자식 컴포넌트 6종"]
+    PANEL["panel.js<br/>엔진 상태 패널"]
   end
 
-  subgraph ENGINE["엔진 — engines/v2-microtask/"]
-    HOOKS["hooks.js<br/>useState · useMemo · useEffect<br/>setter → 렌더 예약"]
-    COMP["component.js<br/>FunctionComponent<br/>mount · update · effect 실행"]
-    VDOM["vdom.js<br/>h() · render · setProp"]
-    DIFF["diff.js<br/>두 VDOM → 변경 목록"]
-    PATCH["patch.js<br/>변경 목록 → 실제 DOM"]
+  subgraph ENGINE["엔진 (engines/v2-microtask/)"]
+    HOOKS["hooks.js<br/>useState, useMemo, useEffect<br/>렌더 예약"]
+    COMP["component.js<br/>FunctionComponent<br/>mount, update, effect 실행"]
+    VDOM["vdom.js<br/>h(), render, setProp"]
+    DIFF["diff.js<br/>변경 명령 생성"]
+    PATCH["patch.js<br/>실제 DOM 반영"]
   end
 
-  GAME -->|"h() 로 VDOM 작성"| VDOM
+  GAME -->|"h() 호출"| VDOM
   GAME -->|"Hook 호출"| HOOKS
-  PANEL -->|"생성 · mount · onCommit"| COMP
-  HOOKS -.->|"예약을 비울 때 갱신 요청"| COMP
-  COMP -->|"지금 그리는 컴포넌트 표시"| HOOKS
+  PANEL -->|"생성, mount, onCommit"| COMP
+  HOOKS -.->|"갱신 요청"| COMP
+  COMP -->|"현재 컴포넌트 지정"| HOOKS
   COMP -->|"diff"| DIFF
-  COMP -->|"applyPatches · mount"| PATCH
-  COMP -.->|"글자 노드 · 복구용 render"| VDOM
-  PATCH -->|"render · setProp"| VDOM
+  COMP -->|"applyPatches, mount"| PATCH
+  PATCH -->|"render, setProp"| VDOM
 ```
 
 ### 모듈별 책임
 
-| 모듈 | 한 줄 책임 | 핵심 함수 |
+| 모듈 | 책임 | 주요 함수 |
 | --- | --- | --- |
-| `vdom.js` | 화면을 `{ type, props, children }` 객체로 적고, 객체 → 실제 노드로 만든다 | `h` · `render` · `setProp` |
-| `diff.js` | 이전 · 새 VDOM 을 **같은 자리끼리** 비교해 변경 목록을 만든다 (DOM 을 모름) | `diff` · `walk` |
-| `patch.js` | 변경 목록의 위치(`path`)를 따라가 **그 노드만** 고친다 | `applyPatches` · `findNode` |
-| `hooks.js` | Hook 을 부른 **순서 = 칸 번호**로 상태를 저장하고, setter 가 렌더를 예약한다 | `nextSlot` · `makeSetter` · `schedule` |
-| `component.js` | 함수 실행 → 펼치기 → diff → patch → effect 한 바퀴를 돌린다 | `updateOnce` · `run` · `expand` · `runEffects` |
+| `vdom.js` | 화면을 `{ type, props, children }` 객체로 표현하고, 객체를 실제 노드로 생성합니다. | `h`, `render`, `setProp` |
+| `diff.js` | 이전 Virtual DOM과 새 Virtual DOM을 같은 위치끼리 비교하여 변경 명령 목록을 생성합니다. DOM에 접근하지 않습니다. | `diff`, `walk` |
+| `patch.js` | 변경 명령의 `path`를 따라 대상 노드를 찾아 해당 노드만 수정합니다. | `applyPatches`, `findNode` |
+| `hooks.js` | Hook 호출 순서를 슬롯 번호로 사용하여 상태를 저장하고, setter 호출 시 렌더를 예약합니다. | `nextSlot`, `makeSetter`, `schedule` |
+| `component.js` | 컴포넌트 실행, 트리 확장, Diff, Patch, effect 실행으로 이어지는 갱신 주기를 수행합니다. | `updateOnce`, `run`, `expand`, `runEffects` |
 
-- **변경 목록 5종** : `CREATE` · `REMOVE` · `REPLACE` · `TEXT` · `PROPS`
-- `diff` 는 목록을 **만들기만**, `patch` 는 **쓰기만** — 둘은 변경 목록이라는 약속으로만 이어진다
-- v0 · v1 · v2 세 엔진의 `vdom` · `diff` · `patch` 는 **같은 파일**이다. 다른 곳은 `hooks` · `component` 뿐 (배칭 방식)
+### 변경 명령
+
+`diff`는 아래 다섯 종류의 명령만 생성하고, `patch`는 명령만 해석합니다. 두 모듈은 이 명령 형식으로만 연결됩니다.
+
+| 명령 | 생성 조건 | DOM 반영 |
+| --- | --- | --- |
+| `CREATE` | 해당 위치에 이전 노드가 없음 | 부모 노드에 새 노드 삽입 |
+| `REMOVE` | 해당 위치에 새 노드가 없음 | 노드 제거 (뒤쪽 인덱스부터) |
+| `REPLACE` | 태그가 다름 | 노드를 새로 생성하여 교체 |
+| `TEXT` | 텍스트 내용이 다름 | `nodeValue` 변경 |
+| `PROPS` | 속성이 다름 | 속성 추가, 변경, 제거 |
+
+### 엔진 버전
+
+세 버전은 `vdom.js`, `diff.js`, `patch.js`를 공유하며, 배칭 방식을 결정하는 `hooks.js`와 `component.js`만 다릅니다.
+
+| 버전 | 경로 | 렌더 시점 |
+| --- | --- | --- |
+| v0 | `engines/v0/` | setter 호출마다 즉시 렌더 |
+| v1 | `engines/v1-batch/` | 엔진이 등록한 이벤트 핸들러가 반환될 때 한 번 렌더 |
+| v2 | `engines/v2-microtask/` | 현재 실행 중인 코드가 끝난 직후(마이크로태스크) 한 번 렌더 |
 
 ---
 
-## 3. 핵심 실행 흐름 및 설계 결정
+## 3. 실행 흐름과 설계 결정
 
-### 돌 하나를 두면 — 클릭에서 DOM 반영까지
+### 착수 시 실행 흐름
 
 ```mermaid
 sequenceDiagram
@@ -83,236 +128,200 @@ sequenceDiagram
   participant D as diff.js
   participant P as patch.js
 
-  U->>G: 칸 클릭 → place()
-  G->>H: setHistory(…) · setMoveIndex(…)
-  Note over H: 값만 저장 · 줄 세우기<br/>queueMicrotask 는 한 번만 건다
-  Note over U,P: 지금 실행 중인 코드가 모두 끝남 (호출 스택이 빔)
-  H->>C: flushBatched → settle → updateOnce
-  C->>G: App() 다시 실행 (Hook 번호 0부터)
-  G-->>C: VDOM (자식 자리는 아직 함수)
-  C->>C: expand — 자식 함수를 불러 트리 완성
+  U->>G: 칸 클릭, place()
+  G->>H: setHistory(...), setMoveIndex(...)
+  Note over H: 값 저장, queueMicrotask 1회 예약
+  Note over U,P: 호출 스택이 비워짐
+  H->>C: flushBatched, settle, updateOnce
+  C->>G: App() 재실행 (Hook 번호 0부터)
+  G-->>C: Virtual DOM
+  C->>C: expand (자식 컴포넌트 실행)
   C->>D: diff(이전 VDOM, 새 VDOM)
-  D-->>C: 변경 목록
-  C->>P: applyPatches → 목록의 노드만 고침
-  C->>C: runEffects (탭 제목 갱신)
+  D-->>C: 변경 명령 목록
+  C->>P: applyPatches
+  C->>C: runEffects
 ```
 
-| 단계 | 코드 (`engines/v2-microtask/`) |
+| 단계 | 구현 위치 (`engines/v2-microtask/`) |
 | --- | --- |
-| setter : 저장 · 예약 | `hooks.js` `makeSetter` → `schedule` |
-| 예약 비우기 | `hooks.js` `flushFromMicrotask` → `flushScheduled` |
-| 한 바퀴 갱신 | `component.js` `flushBatched` → `settle` → `flushPending` → `updateOnce` |
-| 함수 실행 · 펼치기 | `component.js` `run` · `expand` |
-| 비교 · 반영 · effect | `diff.js` `diff` → `patch.js` `applyPatches` → `component.js` `runEffects` |
+| 상태 저장과 렌더 예약 | `hooks.js`: `makeSetter`, `schedule` |
+| 예약 처리 | `hooks.js`: `flushFromMicrotask`, `flushScheduled` |
+| 갱신 주기 | `component.js`: `flushBatched`, `settle`, `flushPending`, `updateOnce` |
+| 컴포넌트 실행과 트리 확장 | `component.js`: `run`, `expand` |
+| 비교, 반영, effect | `diff.js`: `diff`, `patch.js`: `applyPatches`, `component.js`: `runEffects` |
 
-### 설계 결정 — "작업이 끝나는 때" 를 마이크로태스크로 정했다
+### 설계 결정: 렌더 시점을 마이크로태스크로 지정
 
-| | 내용 |
+| 항목 | 내용 |
 | --- | --- |
-| **문제** | 착수 한 번에 setter 가 2개 불린다. setter 마다 렌더하면 렌더가 2번이고, 그 사이 **중간 상태**(기록과 현재 수가 안 맞는 화면)를 한 번 그린다 |
-| **선택** | setter 는 값만 저장하고, 렌더는 `queueMicrotask` 로 **한 번만 예약**한다. 예약이 실행되기 전에 모인 변경을 1번에 렌더 |
-| **이유** | v1(엔진이 붙인 이벤트 핸들러만 자동으로 묶기)은 **타이머 · `await` 뒤**의 setter 를 자동으로 묶지 못했다 (직접 `batch(fn)` 로 감싸야 함). 마이크로태스크는 부르는 곳과 상관없이 묶인다 |
-| **트레이드오프** | setter 직후엔 DOM 이 아직 옛 모습 → 바로 읽어야 하면 `flushSync(fn)` · 예약된 렌더의 예외는 부른 쪽이 못 받음 → 값을 되돌리고 `reportError` 로 보고 |
+| 문제 | 착수 한 번에 setter가 2회 호출됩니다. setter마다 렌더하면 렌더가 2회 발생하고, 그 사이에 기록과 현재 수가 일치하지 않는 중간 상태가 렌더됩니다. |
+| 결정 | setter는 값만 저장하고, 렌더는 `queueMicrotask`로 한 번만 예약합니다. 예약이 실행되기 전까지 발생한 변경을 한 번에 렌더합니다. |
+| 근거 | v1은 엔진이 등록한 이벤트 핸들러 안의 변경만 묶을 수 있으며, 타이머나 `await` 이후의 변경은 `batch(fn)`로 직접 감싸야 합니다. 마이크로태스크 방식은 호출 위치와 관계없이 변경을 묶습니다. |
+| 비용 | setter 직후에는 DOM이 아직 갱신되지 않으므로, 즉시 읽어야 하는 경우 `flushSync(fn)`를 사용합니다. 예약된 렌더에서 발생한 예외는 호출한 코드로 전달되지 않으므로, 값을 되돌린 뒤 `reportError`로 보고합니다. |
 
-**같은 오목, 엔진만 바꿔 측정한 렌더(커밋) 횟수** — 실제 브라우저, 11-11 측정
-(순서 : 새로 연 판에 두 수 → 전체 초기화 → 타이머 1초 → 첫 저장)
+### 엔진별 렌더 횟수
 
-| 동작 | 부르는 setter | v0 배칭 없음 | v1 이벤트 경계 | v2 마이크로태스크 |
+동일한 오목 화면에서 엔진만 바꾸어 측정한 커밋 횟수입니다. 측정 순서는 두 수 착수, 전체 초기화, 타이머 1초, 첫 저장입니다. (실제 브라우저, 2026-11-11)
+
+| 동작 | setter 호출 수 | v0 | v1 | v2 |
 | --- | :---: | :---: | :---: | :---: |
-| 착수 | 2 | 2 | **1** | **1** |
-| 전체 초기화 | 5 | 4 | **1** | **1** |
-| 타이머 1초 (이벤트 밖) | 2 | 2 | 2 | **1** |
-| 첫 저장 : 시작 + `await` 뒤 | 1 + 2 | 3 | 3 | **2** |
+| 착수 | 2 | 2 | 1 | 1 |
+| 전체 초기화 | 5 | 4 | 1 | 1 |
+| 타이머 1초 (이벤트 외부) | 2 | 2 | 2 | 1 |
+| 첫 저장 (`await` 전 1, 후 2) | 3 | 3 | 3 | 2 |
 
-- 값이 그대로인 setter 는 렌더하지 않는다 (`Object.is` 비교). 그래서 v0 의 숫자는 판 상태에 따라 달라진다
-	- 전체 초기화가 4 : 저장한 적이 없어 `savedAt` 이 이미 `null`
-	- 같은 수를 다시 저장하면 `savedAt` 이 그대로라 v0 · v1 도 2
-- 저장이 v2 에서도 2인 이유 : `await` 앞과 뒤는 다른 작업이다 — "저장 중" 화면을 한 번 보여 줘야 한다
+- 값이 변하지 않는 setter는 렌더하지 않습니다(`Object.is` 비교). 전체 초기화의 v0 결과가 4인 이유는 `savedAt`이 이미 `null`이기 때문입니다.
+- 저장의 v2 결과가 2인 이유는 `await` 전후가 서로 다른 작업이기 때문입니다. 저장 중 상태를 한 번 표시해야 합니다.
 
 ---
 
-## 4. 기능 시연 및 검증
+## 4. 시연과 검증
 
-> 세 GIF 모두 **지금 엔진 코드를 그대로 실행해 녹화**했다 — `docs/demo/record.mjs` 가 Edge(화면 없음)에서 진짜 버튼을 누르고, 자막의 숫자 · 노드 이름은 찍는 순간 페이지에서 읽은 값이다. 노란 표시 = 그 커밋에서 **실제로 고친 DOM 노드**.
+모든 시연은 현재 엔진 코드를 실제 브라우저에서 실행하여 녹화했습니다. `docs/demo/record.mjs`가 헤드리스 Edge에서 실제 버튼을 조작하며, 자막의 수치와 노드 이름은 녹화 시점에 페이지에서 읽은 값입니다. 노란색 강조는 해당 커밋에서 실제로 변경된 DOM 노드를 나타냅니다.
 
-### 시연 1 — Diff · Patch : 글자 하나를 바꾸면 그 글자 노드만 고친다
+### 시연 1. Diff와 Patch
 
-<table><tr>
-<td width="58%"><img src="docs/demo/demo-1-diff-patch.gif" alt="Phase 1 페이지에서 '세 가지' 를 '네 가지' 로 고치고 Patch 하면 TEXT 명령 1건으로 그 글자만 바뀌고, 이어서 class 추가와 li 추가가 PROPS · CREATE 2건으로 반영되는 모습"></td>
-<td>
+![Phase 1 페이지에서 텍스트 하나를 수정하고 Patch하면 TEXT 명령 1건으로 해당 텍스트만 변경되고, 이어서 class 추가와 li 추가가 PROPS, CREATE 2건으로 반영되는 화면](docs/demo/demo-1-diff-patch.gif)
 
-**문제** — 테스트 영역 글자 하나를 고쳤을 뿐인데 실제 영역을 통째로 다시 그리면 노드가 새로 생기고, 입력 · 포커스 상태가 날아간다
-
-**채택한 설계** — 이전 · 새 VDOM 을 **같은 자리끼리** 비교(`diff`) → 변경 명령 목록 → `path` 로 그 노드만 고침(`applyPatches`)
-
-**시연에서 보이는 것** — "세 가지 → 네 가지" : `TEXT` 1건 · 실제 DOM 변경 1건, `<b>` 와 글자 노드는 **같은 객체 그대로**. 이어서 class 추가 + `<li>` 추가 : `PROPS` · `CREATE` 2건
-
-**선택 이유** — 최소 편집을 찾는 O(n³) 대신 노드 수에 비례하는 비교. 화면은 대개 조금씩 바뀌어 충분하다 (React 도 같은 가정)
-
-**증명하는 설계** → 2절 "diff 는 만들기만, patch 는 쓰기만"
-
-</td></tr></table>
-
-### 시연 2 — Hooks : 상태는 엔진 배열에 남고, 바뀐 DOM 만 고친다
-
-<table><tr>
-<td width="58%"><img src="docs/demo/demo-2-hooks-render.gif" alt="오목에서 착수할 때마다 엔진 패널의 hooks[0] 판 기록과 hooks[1] 현재 수가 늘고, 커밋 1번에 새 돌 span 이 CREATE 되며 바뀐 노드가 노랗게 표시되는 모습"></td>
-<td>
-
-**문제** — 함수 컴포넌트는 매번 처음부터 다시 실행된다. 착수한 판은 어디에 남나
-
-**채택한 설계** — Hook 을 **부른 순서 = 칸 번호**로 `hooks` 배열에 저장. setter 가 값을 바꾸면 `App()` 을 다시 실행해 새 VDOM → diff → patch
-
-**시연에서 보이는 것** — 착수마다 `hooks[0]` 판 기록 `Array(1→2→3)` · `hooks[1]` 현재 수 `0→1→2`, 렌더 1번, 새 돌 `CREATE <span.stone.B>` 와 차례 · 기보처럼 **바뀐 노드만 노랗게**
-
-**선택 이유** — 과제 제약(상태는 루트에만) 아래 가장 단순한 저장소. 대가 : 225칸 VDOM 을 매번 다시 만든다 (5절 한계)
-
-**증명하는 설계** → 3절 흐름 "VDOM 은 루트부터, DOM 은 patch 만"
-
-</td></tr></table>
-
-### 시연 3 — 배칭 : 같은 오목, 엔진만 바꿔 커밋 수를 센다
-
-<table><tr>
-<td width="46%"><img src="docs/demo/demo-3-batching.gif" alt="왼쪽 v0, 오른쪽 v2 엔진의 커밋 기록. 착수 1번에 v0 는 커밋 2번, v2 는 1번. 1초 타이머에서도 v0 2번, v2 1번"></td>
-<td>
-
-**문제** — 착수 한 번에 setter 2개. setter 마다 렌더하면 2번 그리고, 그 사이 **중간 상태**가 생긴다 (v0 에서 실제로 터진 적 있음)
-
-**채택한 설계** — setter 는 값만 저장, 렌더는 `queueMicrotask` 로 **한 번만** 예약 (v2)
-
-**시연에서 보이는 것** — 착수 1번 : v0 커밋 **2** · v2 **1**. 1초 타이머(엔진 이벤트 밖) : v0 **2** · v2 **1**
-
-**선택 이유** — v1(이벤트 경계)은 타이머 · `await` 뒤를 묶지 못했다. "작업의 끝" 을 호출 스택이 빌 때로 정하면 부르는 곳과 상관없이 묶인다
-
-**증명하는 설계** → 3절 설계 결정 "작업이 끝나는 때를 마이크로태스크로"
-
-</td></tr></table>
-
-**직접 해 보기** (브라우저에서 바로 열림 — `feat-Jongeume` 브랜치를 raw.githack.com 으로 미리보기)
-
-| 시연 | 링크 |
+| 항목 | 내용 |
 | --- | --- |
-| 1 · Diff · Patch | [phase1.html](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/phase1.html) — 테스트 영역을 고치고 **Patch** |
-| 2 · Hooks | [오목 (v2)](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html) — 왼쪽 위 **엔진** → **바뀐 DOM 강조** 체크 · **세부 목록** |
-| 3 · 배칭 | [오목 v0](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v0) · [v1](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v1-batch) · [v2](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v2-microtask) — 엔진 패널의 커밋 기록 비교 |
+| 문제 | 텍스트 하나를 수정할 때 영역 전체를 다시 그리면 노드가 새로 생성되고 입력 상태와 포커스가 유실됩니다. |
+| 설계 | 이전 Virtual DOM과 새 Virtual DOM을 같은 위치끼리 비교하여 변경 명령을 만들고(`diff`), `path`로 찾은 노드만 수정합니다(`applyPatches`). |
+| 결과 | "세 가지"를 "네 가지"로 수정하면 `TEXT` 명령 1건, DOM 변경 1건이 발생하며 `<b>` 요소와 텍스트 노드는 동일한 객체로 유지됩니다. 이어서 class 추가와 `<li>` 추가는 `PROPS`, `CREATE` 2건으로 반영됩니다. |
+| 선택 근거 | 최소 편집 거리를 구하는 O(n³) 비교 대신 노드 수에 비례하는 비교를 사용합니다. React도 같은 가정을 사용합니다. |
+| 검증하는 설계 | [변경 명령](#변경-명령): `diff`는 명령을 생성하고 `patch`는 명령만 반영합니다. |
 
-- 저장소를 받아 `phase1.html` · `index.html` 을 그냥 열어도 된다 (서버 필요 없음)
-- GIF 다시 찍기 : `node docs/demo/record.mjs` → `python docs/demo/make_gif.py`
+### 시연 2. Hooks와 화면 갱신
 
-<details>
-<summary><b>데모에서 더 볼 수 있는 것</b></summary>
+![오목에서 착수할 때마다 엔진 패널의 hooks 0번 슬롯 판 기록과 1번 슬롯 현재 수가 증가하고, 커밋 1회에 새 돌 span이 CREATE되며 변경된 노드가 노란색으로 표시되는 화면](docs/demo/demo-2-hooks-render.gif)
 
-| 동작 | 보이는 것 |
+| 항목 | 내용 |
 | --- | --- |
-| 다섯 줄 완성 | 승리 칸 표시 · 판 잠김 (`useMemo` 로 승리 줄 계산) |
-| 무르기 · 기보 클릭 | 지난 수로 이동, 이동 뒤 새로 두면 뒤 기록은 잘림 |
-| 세부 목록의 path 확인 | 변경 명령의 `path` 가 가리키는 VDOM 노드 ↔ 실제 DOM 노드 |
+| 문제 | 함수 컴포넌트는 렌더마다 처음부터 다시 실행되므로, 착수 기록을 보존할 위치가 필요합니다. |
+| 설계 | Hook 호출 순서를 슬롯 번호로 사용하여 `hooks` 배열에 상태를 저장합니다. setter가 값을 변경하면 `App()`을 다시 실행하여 새 Virtual DOM을 만들고 Diff와 Patch를 수행합니다. |
+| 결과 | 착수할 때마다 `hooks[0]`(판 기록)이 `Array(1)`, `Array(2)`, `Array(3)`으로, `hooks[1]`(현재 수)이 0, 1, 2로 변경되고 렌더는 1회 발생합니다. 새 돌 `<span class="stone B">`는 `CREATE`로 생성되며, 차례와 기보처럼 변경된 노드만 강조됩니다. |
+| 선택 근거 | 루트에서만 상태를 관리하는 과제 제약에서 가장 단순한 저장 구조입니다. 225칸 Virtual DOM을 매번 다시 생성하는 비용이 있습니다([제한 사항](#제한-사항)). |
+| 검증하는 설계 | [착수 시 실행 흐름](#착수-시-실행-흐름): Virtual DOM은 루트부터 다시 만들고, DOM은 변경 명령만 반영합니다. |
 
-</details>
+### 시연 3. 배칭
 
-### 검증 근거
+![왼쪽 v0, 오른쪽 v2 엔진의 커밋 기록 비교. 착수 1회에 v0는 커밋 2회, v2는 1회. 타이머 1초에서도 v0는 2회, v2는 1회](docs/demo/demo-3-batching.gif)
 
-| 무엇 | 결과 | 근거 |
+| 항목 | 내용 |
+| --- | --- |
+| 문제 | 착수 한 번에 setter가 2회 호출됩니다. setter마다 렌더하면 렌더가 2회 발생하고 중간 상태가 생깁니다. v0 엔진에서는 이 중간 상태로 인해 렌더 오류가 발생한 적이 있습니다. |
+| 설계 | setter는 값만 저장하고, 렌더는 `queueMicrotask`로 한 번만 예약합니다(v2). |
+| 결과 | 착수 1회에 v0는 커밋 2회, v2는 1회입니다. 엔진 이벤트 외부에서 실행되는 타이머 1초에서도 v0는 2회, v2는 1회입니다. |
+| 선택 근거 | v1의 이벤트 경계 방식은 타이머와 `await` 이후의 변경을 묶지 못합니다. 작업의 끝을 호출 스택이 비는 시점으로 정의하면 호출 위치와 관계없이 변경을 묶을 수 있습니다. |
+| 검증하는 설계 | [설계 결정: 렌더 시점을 마이크로태스크로 지정](#설계-결정-렌더-시점을-마이크로태스크로-지정) |
+
+### 온라인 데모
+
+`feat-Jongeume` 브랜치를 raw.githack.com으로 제공합니다. 처음 접속하면 안내 화면이 표시되며, "Open the page"를 선택하면 데모가 열립니다.
+
+| 시연 | 링크 | 조작 |
 | --- | --- | --- |
-| 단위 테스트 `npm test` | **202개 통과 · 실패 0** | 11-11 직접 실행 (Node 내장 테스트 러너 + jsdom). 러너 집계는 203 — 도우미 파일 `test/helpers.js` 가 1개로 세짐 |
-| 그중 v2 엔진 전용 | 10개 | `test/v2-microtask.test.js` |
-| 나머지 192개 | v1 엔진 기준 (vdom · diff · patch · hooks · effect · 배칭 · 오목 페이지) | 각 테스트 파일의 `require` 경로 |
-| 무작위 트리 500쌍 | patch 결과를 다시 읽으면 새 VDOM 과 같다 | `test/patch.test.js` |
-| 실제 브라우저 | 엔진 3개 모두 착수 · 초기화 · 타이머 · 저장 동작, **콘솔 오류 0** | 3절 측정 표 |
+| 1. Diff와 Patch | [phase1.html](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/phase1.html) | 테스트 영역 수정 후 Patch |
+| 2. Hooks | [오목 (v2)](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html) | 엔진 패널에서 "바뀐 DOM 강조"와 "세부 목록" 선택 |
+| 3. 배칭 | [v0](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v0), [v1](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v1-batch), [v2](https://raw.githack.com/mg-2023/sw-ai-week11-12/feat-Jongeume/index.html?engine=v2-microtask) | 엔진 패널의 커밋 기록 비교 |
 
-**엣지 케이스 — 테스트로 고정한 것**
+시연 GIF는 `node docs/demo/record.mjs` 실행 후 `python docs/demo/make_gif.py`로 다시 생성할 수 있습니다.
 
-| 상황 | 기대 동작 | 테스트 엔진 |
+### 테스트
+
+| 항목 | 결과 | 비고 |
+| --- | --- | --- |
+| 단위 테스트 (`npm test`) | 202개 통과, 실패 0 | Node 내장 테스트 러너와 jsdom 사용. 러너 집계 203은 `test/helpers.js`를 포함한 값입니다. |
+| v2 엔진 전용 | 10개 | `test/v2-microtask.test.js` |
+| v1 엔진 기준 | 192개 | vdom, diff, patch, hooks, effect, 배칭, 오목 페이지 |
+| 무작위 트리 500쌍 | Patch 결과를 다시 읽으면 새 Virtual DOM과 일치 | `test/patch.test.js` |
+| 실제 브라우저 | 세 엔진 모두 착수, 초기화, 타이머, 저장 동작 확인, 콘솔 오류 0 | [엔진별 렌더 횟수](#엔진별-렌더-횟수) |
+
+### 예외 상황 처리
+
+| 상황 | 동작 | 테스트 엔진 |
 | --- | --- | :---: |
-| 조건문 때문에 Hook 개수 · 종류가 바뀜 | 예외로 알린다 | v1 |
-| 자식 컴포넌트에서 `useState` | 예외 (상태는 루트에만) | v1 |
-| 렌더 중 `setState` | 예외 | v1 |
-| 렌더 중 예외 | 바꾼 값을 되돌리고 이전 화면 유지 | v1 · v2 |
-| 값이 그대로인 setter 만 부름 | 렌더 0번 | v1 · v2 |
-| 함수형 setter `n => n + 1` 세 번 | `+3`, 렌더 1번 | v1 · v2 |
-| effect 가 끝없이 setter | 이어진 갱신 50번 뒤 `update loop` 예외, 마지막 묶음 값만 되돌림 | v1 |
-| 렌더 예약 뒤 `destroy` | 렌더하지 않음 | v2 |
-| 글자에 `<img onerror=…>` 같은 태그 문자 | 글자 노드 하나로만 그림, HTML 로 해석하지 않음 (`innerHTML` 미사용) | v1 |
+| 조건문으로 Hook 개수나 종류가 변경됨 | 예외 발생 | v1 |
+| 자식 컴포넌트에서 `useState` 호출 | 예외 발생 | v1 |
+| 렌더 중 `setState` 호출 | 예외 발생 | v1 |
+| 렌더 중 예외 발생 | 변경한 값을 되돌리고 이전 화면 유지 | v1, v2 |
+| 값이 변하지 않는 setter만 호출 | 렌더하지 않음 | v1, v2 |
+| 함수형 setter `n => n + 1` 3회 호출 | 결과 +3, 렌더 1회 | v1, v2 |
+| effect에서 setter를 반복 호출 | 후속 갱신 50회 초과 시 `update loop` 예외, 마지막 변경 묶음 복원 | v1 |
+| 렌더 예약 후 `destroy` 호출 | 렌더하지 않음 | v2 |
+| 텍스트에 `<img onerror=...>` 같은 태그 문자열 포함 | 텍스트 노드로만 생성하며 HTML로 해석하지 않음 (`innerHTML` 미사용) | v1 |
 
 ---
 
-## 5. 한계 및 개선 방향
+## 5. 제한 사항과 향후 계획
 
-### 현재 한계
+### 제한 사항
 
-| 한계 | 수치 · 근거 |
+| 항목 | 내용 |
 | --- | --- |
-| **VDOM 은 늘 루트부터 전부 다시 만든다** (실제 DOM 은 patch 만) | 빈 판 첫 착수에 비교한 노드 **291개** (225칸 바둑판 포함) |
-| **매 렌더 새 클릭 함수** — 안정된 핸들러(`useCallback` 류) 없음 | 같은 착수의 PROPS patch 233개 중 **227개가 이벤트 함수만 바뀐 것** |
-| `key` 없음 — 목록을 위치(번호)로만 비교 | 앞에 끼우기 · 뒤집기에서 변경 목록이 많아진다 (결과는 맞음) |
-| `useRef` 없음 | 오목 타이머는 파일 수준 `live` 객체로 흉내 |
-| 같은 종류 Hook 끼리 순서만 바뀌면 못 잡음 | 값이 뒤섞인다 (개수 · 종류 변화는 잡음) |
-| 데모 기본 엔진 v2 의 전용 테스트는 10개 | 나머지 단위 테스트는 v1 엔진 기준 |
+| 전체 트리 재생성 | Virtual DOM은 항상 루트부터 다시 생성합니다. 빈 판에서 첫 착수 시 비교 노드는 291개입니다. |
+| 이벤트 핸들러 재생성 | 렌더마다 클릭 핸들러가 새로 생성됩니다. 같은 착수의 `PROPS` 명령 233건 중 227건이 이벤트 핸들러만 변경된 경우입니다. |
+| `key` 미지원 | 목록을 위치 기준으로만 비교하므로 앞쪽 삽입이나 순서 변경 시 변경 명령이 증가합니다. 결과는 정확합니다. |
+| `useRef` 미지원 | 오목 타이머는 모듈 수준 객체로 최신 값을 참조합니다. |
+| Hook 순서 검사 | 같은 종류의 Hook끼리 순서만 바뀌는 경우는 감지하지 않습니다. 개수와 종류의 변경은 감지합니다. |
+| v2 테스트 범위 | v2 전용 테스트는 10개이며, 나머지 단위 테스트는 v1 엔진을 기준으로 합니다. |
 
-### 개선 예정 (v3 후보 — 아직 구현 안 함)
+### 향후 계획
 
-1. 안정된 핸들러 → 이벤트 함수만 바뀐 PROPS 줄이기
-2. `useRef` → 렌더 없이 남는 값
+아래 항목은 아직 구현되지 않았습니다.
+
+1. 안정적인 이벤트 핸들러 참조로 불필요한 `PROPS` 명령 감소
+2. `useRef` 추가
 3. `key` 기반 목록 비교
-4. 단위 테스트를 v2 기준으로 옮기기
+4. 단위 테스트를 v2 엔진 기준으로 전환
 
-### 얻은 것
+### 결론
 
-- "함수는 매번 새로 실행되는데 상태는 어떻게 남나?" → **컴포넌트 객체의 배열 + 부른 순서**라는 답을 직접 구현으로 확인했다
-- 배칭은 "모은다" 보다 **"작업이 언제 끝났다고 볼 것인가"** 를 정하는 문제였다 — 그 기준에 따라 v1 과 v2 의 결과가 갈렸다
-- 같은 앱을 엔진만 바꿔 열 수 있게 만들어, 설계 차이를 **숫자로** 비교했다
+- 컴포넌트 함수가 매번 새로 실행되어도 상태가 유지되는 원리를 컴포넌트 객체의 배열과 Hook 호출 순서로 구현하여 확인했습니다.
+- 배칭의 핵심은 변경을 모으는 방법보다 작업이 끝나는 시점을 정의하는 데 있으며, 이 정의에 따라 v1과 v2의 결과가 달라졌습니다.
+- 동일한 애플리케이션을 엔진만 바꾸어 실행할 수 있도록 구성하여 설계 차이를 수치로 비교했습니다.
 
 ---
 
-<details>
-<summary><b>실행 방법</b></summary>
+## 6. 시작하기
 
-| 하고 싶은 것 | 방법 |
+### 실행
+
+| 목적 | 방법 |
 | --- | --- |
-| 오목 데모 | `index.html` 을 브라우저로 열기 (서버 필요 없음) |
-| 엔진 버전 바꾸기 | 패널의 엔진 고르기, 또는 주소 뒤 `?engine=v0` · `v1-batch` · `v2-microtask` |
-| Phase 1 검증 페이지 | `phase1.html` |
-| 단위 테스트 | `npm install` 한 번 → `npm test` |
+| 오목 데모 | `index.html`을 브라우저에서 엽니다. 서버가 필요하지 않습니다. |
+| 엔진 버전 변경 | 엔진 패널에서 선택하거나 URL에 `?engine=v0`, `?engine=v1-batch`, `?engine=v2-microtask`를 추가합니다. |
+| Phase 1 검증 페이지 | `phase1.html`을 엽니다. |
+| 단위 테스트 | `npm install` 후 `npm test`를 실행합니다. |
 
-</details>
-
-<details>
-<summary><b>폴더 구조</b></summary>
+### 디렉터리 구조
 
 ```
-index.html          오목 (메인 데모)
-omok/               game.js 앱 · panel.js 엔진 패널 · loader.js 엔진 고르기 · style.css
+index.html          오목 데모
+omok/               game.js(애플리케이션), panel.js(엔진 상태 패널), loader.js(엔진 선택), style.css
 phase1.html         Phase 1 검증 페이지
-phase1/             app.js · history.js (State History) · style.css
+phase1/             app.js, history.js(State History), style.css
 engines/
-  v0/               배칭 없음 — setter 마다 렌더
-  v1-batch/         이벤트 경계 배칭 — 단위 테스트 기준 엔진
-  v2-microtask/     마이크로태스크 배칭 — 데모 기본
-test/               단위 테스트 (node --test + jsdom)
-docs/               설계 문서 · 발표 가이드 · 사실 확인
+  v0/               배칭 없음
+  v1-batch/         이벤트 경계 배칭, 단위 테스트 기준 엔진
+  v2-microtask/     마이크로태스크 배칭, 데모 기본 엔진
+test/               단위 테스트 (node --test, jsdom)
+docs/               설계 문서, 발표 가이드, 시연 녹화 스크립트
 ```
 
-</details>
+### 관련 문서
 
-<details>
-<summary><b>더 읽을 곳</b></summary>
+| 문서 | 내용 |
+| --- | --- |
+| [docs/README_DETAIL.md](docs/README_DETAIL.md) | Phase 1, Phase 2 상세 설명 (자료구조, Diff 알고리즘, 컴포넌트 계층, React 비교) |
+| [docs/phase1-design.md](docs/phase1-design.md) | Phase 1 설계 결정과 예외 상황 |
+| [docs/superpowers/specs/](docs/superpowers/specs/) | 배칭 v1, v2 설계 문서 |
+| [docs/README_FACT_CHECK.md](docs/README_FACT_CHECK.md) | README 내용과 코드 대조 결과 |
+| [docs/PRESENTATION_GUIDE.md](docs/PRESENTATION_GUIDE.md) | 4분 발표 가이드 |
 
-- [docs/README_DETAIL.md](docs/README_DETAIL.md) — Phase 1 · 2 상세 정리 (자료구조 · Diff 알고리즘 · 컴포넌트 계층도 · 실제 React 비교)
-- [docs/phase1-design.md](docs/phase1-design.md) — Phase 1 설계 결정 · 엣지 케이스
-- [docs/superpowers/specs/](docs/superpowers/specs/) — 배칭 v1 · v2 설계 문서
-- [docs/README_FACT_CHECK.md](docs/README_FACT_CHECK.md) — 이 README 의 주장과 코드 대조 결과
-- [docs/PRESENTATION_GUIDE.md](docs/PRESENTATION_GUIDE.md) — 4분 발표 가이드
+### 팀 저장소 운영 방식
 
-</details>
-
-<details>
-<summary><b>팀 레포지토리 관리 방식</b></summary>
-
-- 개인별 브랜치에서 작업 + README.md 작성
-- 코드별로 대략적인 리뷰 후 브랜치 하나를 선정해서 main에다가 PR + merge
-- 이 작업은 React에서 한번, Redis/RDBMS에서 한번으로 총 2번 이루어짐
-- 맨 왼쪽 탭은 전반적인 Kanban 보드, 나머지 탭 3개는 개인별 스케줄 (Todo/In Progress/Done)
-- 개인별로 이슈를 프로젝트에 등록할 때 **Assignee를 자기 자신으로 꼭 설정**
-
-</details>
+- 각자 개인 브랜치에서 작업하고 README.md를 작성합니다.
+- 코드 리뷰 후 브랜치 하나를 선정하여 `main`에 PR을 생성하고 병합합니다. 이 과정은 React와 Redis/RDBMS 과제에서 각각 한 번씩, 총 두 번 진행합니다.
+- 프로젝트 보드의 첫 번째 탭은 전체 Kanban 보드이며, 나머지 세 탭은 개인별 일정(Todo, In Progress, Done)입니다.
+- 이슈를 프로젝트에 등록할 때는 Assignee를 본인으로 지정합니다.
