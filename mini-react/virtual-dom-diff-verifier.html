@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual DOM · Diff 검증기</title>
+<style>
+:root{
+  --bg:#f6f7fa; --surface:#ffffff; --text:#1b2130; --muted:#586277; --border:#e2e6ee;
+  --accent:#2f5bea; --accent-soft:#e9efff; --ok:#12805c; --ok-soft:#e3f6ee;
+  --warn:#a35a00; --warn-soft:#fff3dd; --bad:#c0362c; --bad-soft:#fde9e7;
+  --purple:#7c3aed; --purple-soft:#f0e9ff;
+  --code-bg:#0f1729; --code-text:#e6edf7;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0c111d; --surface:#141b2c; --text:#e6eaf3; --muted:#98a3ba; --border:#252f47;
+    --accent:#86a5ff; --accent-soft:#1a2547; --ok:#4cd6a0; --ok-soft:#10302a;
+    --warn:#ffb85c; --warn-soft:#33260f; --bad:#ff8a80; --bad-soft:#3a1a1a;
+    --purple:#b79cff; --purple-soft:#271a47;
+    --code-bg:#080c17;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.7 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Noto Sans KR","Malgun Gothic",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+code,pre,textarea,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"D2Coding",monospace}
+.wrap{max-width:1200px;margin:0 auto;padding:28px 20px 80px}
+header h1{font-size:clamp(22px,3.4vw,30px);margin:0 0 4px;letter-spacing:-.02em}
+header p{margin:0;color:var(--muted)}
+.flow{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 4px;font-size:13px;color:var(--muted)}
+.flow span{background:var(--surface);border:1px solid var(--border);border-radius:99px;padding:2px 11px}
+.flow span.arr{border:0;background:none;padding:2px 0}
+
+/* 툴바 */
+.toolbar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  background:var(--bg);padding:12px 0;margin:10px 0 6px;border-bottom:1px solid var(--border)}
+.tb{font:inherit;font-size:14px;font-weight:600;padding:7px 16px;border-radius:9px;border:1px solid var(--border);
+  background:var(--surface);color:var(--text);cursor:pointer}
+.tb:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.tb:disabled{opacity:.4;cursor:not-allowed}
+.tb.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.tb.primary:hover:not(:disabled){filter:brightness(1.1);color:#fff}
+.tb[aria-pressed="true"]{background:var(--purple-soft);border-color:var(--purple);color:var(--purple)}
+.status{margin-left:auto;font-size:13.5px;color:var(--muted);display:flex;gap:10px;align-items:center}
+.status b{color:var(--text)}
+
+.badge{display:inline-block;font-size:12px;font-weight:700;padding:1px 9px;border-radius:99px;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
+.badge.ok{background:var(--ok-soft);color:var(--ok)}
+.badge.warn{background:var(--warn-soft);color:var(--warn)}
+.badge.bad{background:var(--bad-soft);color:var(--bad)}
+
+/* 두 영역 */
+.areas{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;margin-top:14px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.panel-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border)}
+.panel-head h2{font-size:15px;margin:0}
+.panel-head .sp{margin-left:auto}
+
+/* 두 영역 안에서 렌더링되는 샘플 HTML 의 스타일 */
+.canvas{padding:14px 18px;min-height:250px;font-size:15px;line-height:1.7;overflow-wrap:anywhere}
+.canvas h1,.canvas h2,.canvas h3{margin:.2em 0 .3em;line-height:1.3}
+.canvas p{margin:.4em 0}
+.canvas ul,.canvas ol{padding-left:1.4em;margin:.4em 0}
+.canvas li.done{text-decoration:line-through;color:var(--muted)}
+.canvas .hl{background:#ffe27a;color:#1b2130;padding:0 .2em;border-radius:3px}
+.canvas .big{font-size:1.25em}
+.canvas .btn{font:inherit;font-size:14px;padding:4px 14px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text)}
+.canvas .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.canvas .btn[disabled]{opacity:.5}
+.canvas .card{border:1px solid var(--border);border-radius:10px;padding:10px 14px}
+.canvas .btn-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+#test-src{display:block;flex:1;width:100%;min-height:250px;border:0;resize:vertical;padding:14px 18px;font-size:13px;line-height:1.6;tab-size:2;
+  background:var(--bg);color:var(--text);outline:2px solid transparent;outline-offset:-2px;transition:outline-color .15s}
+#test-src:focus{outline-color:var(--accent)}
+#test-src[readonly]{color:var(--muted);cursor:default}
+#test-src[readonly]:focus{outline-color:transparent}
+.canvas .btn:not([disabled]){cursor:pointer}
+.compo-mode #real-root{box-shadow:inset 0 0 0 2px var(--purple-soft)}
+.hint{font-size:12.5px;color:var(--muted);padding:8px 14px;border-top:1px solid var(--border);margin-top:auto}
+
+/* 하단: 로그 + 히스토리 */
+.lower{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:16px;margin-top:16px}
+.card2{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 14px}
+.card2>h2{font-size:15px;margin:0 0 8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.msg{font-size:14px;margin:4px 0;color:var(--muted)}
+.plist{margin-top:8px;max-height:300px;overflow:auto;background:var(--code-bg);color:var(--code-text);border-radius:10px;padding:8px 10px;font-size:12.5px}
+.prow{display:flex;gap:8px;align-items:baseline;padding:2px 0;border-bottom:1px dashed #243158}
+.prow:last-child{border:0}
+.prow .badge{flex:none;min-width:68px;text-align:center}
+.prow code{color:#9fb0d2;flex:none}
+.prow .d{word-break:break-all}
+.badge.CREATE{background:var(--ok-soft);color:var(--ok)}
+.badge.REMOVE{background:var(--bad-soft);color:var(--bad)}
+.badge.REPLACE{background:var(--warn-soft);color:var(--warn)}
+.badge.TEXT{background:var(--accent-soft);color:var(--accent)}
+.badge.PROPS{background:var(--purple-soft);color:var(--purple)}
+.hist{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto}
+.hist-item{font:inherit;text-align:left;font-size:13px;padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--bg);color:var(--text);cursor:pointer;line-height:1.5}
+.hist-item:hover:not(:disabled){border-color:var(--accent)}
+.hist-item:disabled{cursor:default}
+.hist-item.current{border-color:var(--accent);background:var(--accent-soft);font-weight:600}
+.hist-item.future{opacity:.5}
+.hist-item small{display:block;color:var(--muted);font-weight:400}
+details{margin-top:10px}
+summary{cursor:pointer;color:var(--accent);font-weight:600;font-size:14px}
+pre.json{margin:6px 0 0;max-height:260px;overflow:auto;background:var(--code-bg);color:var(--code-text);border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.55}
+.how{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:6px 16px;margin-top:14px;font-size:14px}
+.how ol{margin:6px 0;padding-left:1.3em}
+@media (max-width:860px){.areas,.lower{grid-template-columns:minmax(0,1fr)}.status{margin-left:0;width:100%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Virtual DOM · Diff 검증기</h1>
+  <p>테스트 영역에서 HTML을 수정하고 Patch를 누르면, 달라진 부분만 실제 영역에 반영됩니다. 컴포넌트 모드에서는 버튼 클릭 → state 변경 → 리렌더가 같은 Diff / Patch를 거칩니다.</p>
+</header>
+
+<div class="toolbar">
+  <button class="tb primary" id="btn-patch" type="button">Patch</button>
+  <button class="tb" id="btn-back" type="button">◀ 뒤로</button>
+  <button class="tb" id="btn-fwd" type="button">앞으로 ▶</button>
+  <button class="tb" id="btn-mode" type="button" aria-pressed="false">컴포넌트 모드</button>
+  <div class="status"><span>State <b id="st-pos">1 / 1</b></span><span class="badge ok" id="st-dirty">Patch 완료</span></div>
+</div>
+
+<div class="areas">
+  <!-- ───────── 실제 영역: 이 안의 HTML 이 "샘플 HTML" 이다 ───────── -->
+  <section class="panel">
+    <div class="panel-head"><h2>실제 영역 (Real)</h2><span class="badge">Patch / 렌더로만 갱신</span></div>
+    <div class="canvas" id="real-root" inert>
+      <div class="card" id="profile">
+        <h2 class="title">Virtual DOM 연습</h2>
+        <p class="desc">카운터: <b>0</b></p>
+        <ul class="list">
+          <li>React</li>
+          <li class="done">Virtual DOM</li>
+          <li>Diff 알고리즘</li>
+        </ul>
+        <button class="btn" disabled>저장</button>
+      </div>
+    </div>
+    <div class="hint" id="real-hint">여기는 직접 수정·조작할 수 없어요(inert). Patch / 뒤로(앞으로)의 결과만 보입니다.</div>
+  </section>
+
+  <!-- ───────── 테스트 영역: 자유롭게 수정 ───────── -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>테스트 영역 (Test)</h2><span class="badge warn" id="test-badge">HTML 소스를 자유롭게 수정</span>
+    </div>
+    <textarea id="test-src" spellcheck="false" aria-label="테스트 영역 HTML 소스"></textarea>
+    <div class="hint" id="test-hint">HTML 코드를 직접 고친 뒤 Patch를 누르세요. 뒤로(앞으로) 이동하면 Patch하지 않은 수정은 사라집니다.</div>
+  </section>
+</div>
+
+<div class="lower">
+  <section class="card2" aria-live="polite">
+    <h2>Diff / Patch 결과</h2>
+    <div id="log-title" class="msg"></div>
+    <div id="log-chips" class="chips"></div>
+    <div id="log-msg" class="msg"></div>
+    <div id="log-patches" class="plist" hidden></div>
+    <details><summary>현재 State의 Virtual DOM (JSON)</summary><pre class="json" id="vdom-json"></pre></details>
+  </section>
+  <section class="card2">
+    <h2>State History <small id="hist-note" style="font-weight:400;color:var(--muted)">(클릭하면 해당 State로 이동)</small></h2>
+    <div class="hist" id="hist"></div>
+  </section>
+</div>
+
+<div class="how">
+  <b>사용 방법</b>
+  <ol>
+    <li>테스트 영역의 HTML 코드를 직접 고칩니다. (예: <code>&lt;li&gt;</code> 추가, <code>class="done"</code> 부여, <code>&lt;p&gt;</code> → <code>&lt;h3&gt;</code>, 글자 수정)</li>
+    <li><b>Patch</b>: 테스트 영역의 HTML → 새 Virtual DOM → 이전 VDOM과 Diff → 변경된 부분만 실제 영역에 반영(노란 깜빡임) → State History에 저장.</li>
+    <li><b>컴포넌트 모드</b>: <code>App</code> 컴포넌트를 마운트하고 실제 영역 카드 아래에 카운터 버튼들이 생깁니다. <code>+1</code>을 누르면 <code>setCount</code> → 리렌더 → 이전 VDOM과 Diff → 바뀐 텍스트만 <code>TEXT</code> 패치로 반영됩니다. 소수 개수는 <code>useMemo</code>로 계산하므로 <code>제목 강조</code>처럼 카운터와 무관한 state만 바뀌면 다시 계산하지 않고(콘솔 로그로 확인), <code>useEffect</code>가 탭 제목 갱신과 <code>자동 증가</code> 타이머의 시작 / 해제를 맡습니다. 이 모드에서는 Patch · 뒤로 / 앞으로 · History 이동이 꺼지고 테스트 영역은 렌더 결과를 보여 주는 읽기 전용이 됩니다.</li>
+    <li><b>뒤로 / 앞으로</b> (HTML 편집 모드): 저장된 VDOM으로 이동. 실제 영역은 두 State 사이의 Diff 패치로 바뀌고, 테스트 영역은 해당 VDOM의 HTML 코드로 바뀝니다. State History 항목을 눌러도 같은 방식으로 이동해요.</li>
+    <li>컴포넌트 모드에서는 State History를 보기만 할 수 있어요. state는 훅 배열이 관리하므로, VDOM만 되돌리면 화면과 state가 어긋나기 때문입니다.</li>
+  </ol>
+  <p class="msg" style="margin:4px 0 10px">이 구현은 key 없이 “같은 위치끼리” 비교합니다. 보안을 위해 <code>script/style/iframe</code> 등과 <code>on*</code> 속성, <code>javascript:</code> 링크는 VDOM 변환에서 제외돼요.</p>
+</div>
+
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
