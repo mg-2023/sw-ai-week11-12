@@ -33,6 +33,26 @@
     return s.length > 40 ? s.slice(0, 40) + '…' : s;
   }
 
+  /* 이번 커밋에서 MutationObserver 가 실제로 기록한 노드만 잠깐 노랗게 칠하는 함수 (글자 변경은 부모 요소를, 추가는 새 요소를) */
+  function flashMutations(records) {
+    const targets = new Set();
+    for (const r of records) {
+      if (r.type === 'childList') {
+        for (const n of r.addedNodes) targets.add(n.nodeType === 1 ? n : n.parentElement);
+        if (r.removedNodes.length > 0) targets.add(r.target);
+      } else {
+        targets.add(r.type === 'characterData' ? r.target.parentElement : r.target);
+      }
+    }
+    for (const el of targets) {
+      if (!el || !el.animate) continue;
+      el.animate(
+        [{ outline: '3px solid #f5a300', backgroundColor: 'rgba(255, 210, 0, 0.45)' }, { outline: '3px solid transparent', backgroundColor: 'transparent' }],
+        { duration: 1200, easing: 'ease-out' },
+      );
+    }
+  }
+
   /* 패널을 펼치거나 접는 함수 */
   function setOpen(open) {
     panel.classList.toggle('open', open);
@@ -60,7 +80,9 @@
 
   /* 커밋 보고 하나를 받아 누계 · 마지막 커밋 · 기록 · Hooks 를 패널에 그리는 함수 */
   function onCommit(report) {
-    totals.dom += observer.takeRecords().length;
+    const records = observer.takeRecords();
+    totals.dom += records.length;
+    if (panel.querySelector('#flash-dom').checked) flashMutations(records);
     totals.commits += 1;
     const p = report.patches;
     const patchSum = p.CREATE + p.REMOVE + p.REPLACE + p.TEXT + p.PROPS;
