@@ -91,7 +91,8 @@
 
   fillEngineSelect();
   setCell('engine', info.engines[info.key].label);
-  setCell('batch', typeof root.MiniReact.batch === 'function' ? '있음 — 엔진 이벤트 경계' : '없음 — setter 마다 갱신');
+  setCell('batch', typeof root.MiniReact.flushSync === 'function' ? '마이크로태스크 — 어디서 부르든 한 번'
+    : typeof root.MiniReact.batch === 'function' ? '있음 — 엔진 이벤트 경계' : '없음 — setter 마다 갱신');
   toggle.addEventListener('click', () => setOpen(!panel.classList.contains('open')));
   panel.querySelector('.panel-close').addEventListener('click', () => setOpen(false));
 

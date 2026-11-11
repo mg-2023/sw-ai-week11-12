@@ -4,6 +4,7 @@
 
   const ENGINES = {
     src: { base: 'src/', label: '현재 작업본 (src)' },
+    'v2-microtask': { base: 'engines/v2-microtask/', label: 'v2 마이크로태스크 배칭 (고정본)' },
     'v1-batch': { base: 'engines/v1-batch/', label: 'v1 이벤트 경계 배칭 (고정본)' },
     v0: { base: 'engines/v0/', label: 'v0 배칭 없음 (고정본)' },
   };
