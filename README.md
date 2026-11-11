@@ -32,8 +32,15 @@ http://localhost:8000/virtual-dom-diff-verifier.html
 - **이벤트 위임**: `#real-root`에 click 리스너 하나만 두고, 클릭된 노드의 경로로 최신 VDOM에서 핸들러를 찾아 실행 (핸들러를 DOM에 붙이지 않음)
   - 이벤트 위임 작업은 `src/events.js`의 `delegate` 함수에서 한다
 - **State History**: Patch / 렌더 기록을 저장하고, HTML 편집 모드에서는 뒤로 / 앞으로 / 항목 클릭으로 이동 가능, 컴포넌트 모드에서는 보기 전용
+
+## 2. Diff patch를 반영하는 5가지 핵심 케이스
+- CREATE: VDOM 요소가 추가됐을 때 (여러개라면 앞에서부터 생성)
+- DELETE: VDOM 요소가 삭제됐을 때 (여러개라면 뒤에서부터 삭제)
+- REPLACE: 상위 VDOM 요소의 태그가 바뀌거나 했을 때 (해당 노드를 전부 다시 그림)
+- PROPS: VDOM 요소의 속성이 바뀌었을 때 (disabled 속성이 추가되거나 없어지는 등)
+- TEXT: VDOM 요소가 텍스트 뿐이고, 이 텍스트가 바뀌었을 때
   
-## 2. deps에 따른 useMemo / useEffect 동작
+## 3. deps에 따른 useMemo / useEffect 동작
 | 훅 | deps | 다시 실행되는 때 | 확인 방법 |
 |---|---|---|---|
 | `useMemo` (소수 개수) | `[count]` | count가 바뀐 렌더 | `제목 강조` / `증가 폭`만 누르면 콘솔에 `[useMemo]` 로그가 찍히지 않음 |
@@ -45,7 +52,7 @@ http://localhost:8000/virtual-dom-diff-verifier.html
 
 다시 말해, `highlight` state는 `count` state와 아무런 상관이 없다.
 
-## 3. 카운터 +1 버튼을 눌렀을 때의 흐름
+## 4. 카운터 +1 버튼을 눌렀을 때의 흐름
 ```mermaid
 flowchart TB
   subgraph event["① 이벤트 → state 변경"]
@@ -80,7 +87,7 @@ flowchart TB
 
 핸들러는 DOM이 아니라 VDOM에 있으므로, 렌더마다 함수가 새로 만들어져도 패치가 생기지 않는다
 
-## 4. 어떻게 이 방식이 나오게 되었는가
+## 5. 어떻게 이 방식이 나오게 되었는가
 기본적으로 버튼에다가 이벤트를 다는 방법은 onClick을 사용하는 방법이 있다.
 ```html
 <button class="btn primary" onclick="onPlus"></button>
