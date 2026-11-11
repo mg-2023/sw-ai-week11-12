@@ -12,6 +12,7 @@
 
   const Omok = { App: null, SIZE, tick: () => {}, cause: '처음 그리기', setCause };
   root.Omok = Omok;
+  const live = { turn: 'B', over: false };
 
   /* 패널에 보일 "이번 갱신을 일으킨 동작" 이름을 정하는 함수 (엔진과 무관한 측정용 표시) */
   function setCause(name) {
@@ -162,17 +163,24 @@
       doc.title = winner ? `${NAME[winner]} 승리 — 미니 리액트 오목` : `${NAME[turn]} 차례 — 미니 리액트 오목`;
     }, [turn, winner]);
 
-    // 1초마다 setter 두 개 — 엔진 이벤트 밖(타이머)에서 부르는 갱신의 예
+    // 타이머가 읽을 "지금 차례 · 끝남" 을 렌더마다 적어 둔다 (실제 React 의 useRef 대신 — 우리 엔진엔 아직 없음)
+    live.turn = turn;
+    live.over = over;
+
+    // 1초마다 setter 두 개 — 엔진 이벤트 밖(타이머)에서 부르는 갱신의 예.
+    // 의존성을 [] 로 두어 타이머를 한 번만 켠다. [turn] 으로 두면 착수마다 타이머를 껐다 켜서
+    // 1초 안에 계속 두면 시간이 한 번도 오르지 않는다(전체 시간이 멈춘 것처럼 보임).
     useEffect(() => {
-      if (over) { Omok.tick = () => {}; return undefined; }
       Omok.tick = () => {
+        if (live.over) return;
+        const side = live.turn;
         setCause('타이머 1초');
-        setTimes((t) => ({ ...t, [turn]: t[turn] + 1 }));
+        setTimes((t) => ({ ...t, [side]: t[side] + 1 }));
         setTotal((s) => s + 1);
       };
       const id = root.setInterval(() => Omok.tick(), 1000);
       return () => root.clearInterval(id);
-    }, [turn, over]);
+    }, []);
 
     /* 누른 칸에 돌을 두는 함수 (판 기록과 현재 수 — setter 두 개) */
     const place = (e) => {

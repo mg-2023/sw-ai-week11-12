@@ -10,7 +10,14 @@
   --line: #e5e8eb;
   --bg: #f2f4f6;
   --card: #ffffff;
-  --cell: min(36px, calc((100vw - 48px) / 15));
+  --panel-w: min(360px, 92vw);
+}
+
+/* 게임 영역은 자기 너비(패널이 밀어낸 뒤의 너비)를 기준으로 배치를 바꾼다 */
+#app { container-type: inline-size; }
+.top, #app { transition: margin-left .2s ease; }
+@media (min-width: 760px) {
+  body.panel-open .top, body.panel-open #app { margin-left: var(--panel-w); }
 }
 
 * { box-sizing: border-box; }
@@ -34,6 +41,7 @@ button { font: inherit; }
 
 /* 세 단 배치 */
 .layout {
+  --cell: min(36px, calc((100cqw - 48px) / 15));
   display: grid;
   grid-template-columns: 240px auto 240px;
   gap: 20px;
@@ -228,7 +236,7 @@ button { font: inherit; }
   left: 0;
   bottom: 0;
   z-index: 30;
-  width: min(360px, 92vw);
+  width: var(--panel-w);
   padding: 20px;
   overflow-y: auto;
   background: #fff;
@@ -260,9 +268,11 @@ button { font: inherit; }
 .log li:first-child { color: var(--blue-dark); font-weight: 700; }
 .log:empty, .hooks:empty { display: none; }
 
-@media (max-width: 1180px) {
+@container (max-width: 1180px) {
   .layout { grid-template-columns: 1fr; justify-items: center; }
   .side { width: min(100%, calc(var(--cell) * 15 + 24px)); }
   .center { order: -1; }
+}
+@media (max-width: 1180px) {
   .top { padding-top: 64px; }
 }

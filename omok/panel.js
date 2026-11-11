@@ -35,6 +35,7 @@
   /* 패널을 펼치거나 접는 함수 */
   function setOpen(open) {
     panel.classList.toggle('open', open);
+    doc.body.classList.toggle('panel-open', open);
     toggle.setAttribute('aria-expanded', String(open));
   }
 

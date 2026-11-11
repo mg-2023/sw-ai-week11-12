@@ -97,6 +97,27 @@ test('타이머 1초(엔진 이벤트 밖)의 setter 두 개는 지금 엔진에
   assert.match(win.document.querySelector('.player.active .player-time').textContent, /00:01/);
 });
 
+test('착수 뒤 타이머는 바뀐 차례(백)의 시간을 올리고, 승부가 나면 멈춘다', (t) => {
+  const { win } = loadPage(t);
+  place(win, 112);
+  win.Omok.tick();
+  const times = Array.from(win.document.querySelectorAll('.player-time')).map((e) => e.textContent);
+  assert.deepStrictEqual(times, ['00:00', '00:01']);
+  for (let k = 0; k < 4; k++) { place(win, k); place(win, 15 + k); }
+  place(win, 4);
+  const before = win.document.querySelector('.info dd:last-child').textContent;
+  win.Omok.tick();
+  assert.strictEqual(win.document.querySelector('.info dd:last-child').textContent, before);
+});
+
+test('엔진 패널을 펼치면 게임 화면을 오른쪽으로 민다 (body.panel-open)', (t) => {
+  const { win } = loadPage(t);
+  win.document.getElementById('panel-toggle').click();
+  assert.ok(win.document.body.classList.contains('panel-open'));
+  win.document.querySelector('.panel-close').click();
+  assert.ok(!win.document.body.classList.contains('panel-open'));
+});
+
 test('왼쪽 위 엔진 버튼이 패널을 펼치고 접는다, 패널에 커밋 누계가 보인다', (t) => {
   const { win } = loadPage(t);
   const toggle = win.document.getElementById('panel-toggle');
