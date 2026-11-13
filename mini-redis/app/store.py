@@ -13,6 +13,11 @@ NOT_INTEGER_ERR = "value is not an integer or out of range"
 OVERFLOW_ERR = "increment or decrement would overflow"
 DECR_OVERFLOW_ERR = "decrement would overflow"
 
+# 능동 만료 설정 (Redis의 ACTIVE_EXPIRE_CYCLE_* 값을 따라 함)
+ACTIVE_EXPIRE_SAMPLE = 20            # 한 라운드에 검사할 TTL 키 수
+ACTIVE_EXPIRE_REPEAT_RATIO = 0.25    # 검사한 키 중 이 비율 이상이 만료됐으면 한 라운드 더
+ACTIVE_EXPIRE_TIME_LIMIT = 0.025     # 한 번의 정리에 쓸 최대 시간(초). 만료 키가 아주 많아도 여기서 멈춤
+
 # 공백, '+', 앞자리 0, '_', 유니코드 숫자를 모두 거부 ("0"만 단독 허용)
 _INT_RE = re.compile(r"-?(0|[1-9][0-9]*)")
 
@@ -81,15 +86,28 @@ class RedisStore:
     # ------------------------------------------------------------------
     # 기본 명령: SET / GET / DEL / EXISTS
     # ------------------------------------------------------------------
-    def set(self, key, value, ttl=None):
+    def set(self, key, value, ttl=None, nx=False, xx=False):
+        """
+        SET key value [EX ttl] [NX | XX]
+          nx: 키가 없을 때만 씀 / xx: 키가 있을 때만 씀
+          썼으면 True(Redis의 OK), 조건 때문에 안 썼으면 False(Redis의 nil)
+        NX/XX 판단은 HashTable이 아니라 여기서 함.
+        HashTable은 TTL을 모르므로, 만료됐지만 아직 안 지워진 키를 '있는 키'로 잘못 볼 수 있음.
+        """
+        if nx and xx:
+            raise ValueError("syntax error")    # Redis도 NX와 XX를 같이 주면 에러
         if ttl is not None and ttl <= 0:
             raise ValueError("ttl must be positive")
         with self._lock:
+            exists = self._exists(key)           # 만료된 키는 여기서 지워지고 False
+            if (nx and exists) or (xx and not exists):
+                return False                     # 조건 불만족 → 값과 TTL 모두 그대로
             self._data.put(key, value)
             if ttl is not None:
                 self._expires.put(key, self._clock() + ttl)
             else:
                 self._expires.delete(key)    # Redis SET은 기존 TTL을 지움
+            return True
 
     def get(self, key):
         with self._lock:
@@ -173,8 +191,9 @@ class RedisStore:
             return [k for k in self._data.keys() if self._exists(k)]
 
     def dbsize(self):
+        # 정확한 개수를 위해 전체를 훑음 (O(n)). 실제 Redis DBSIZE는 아직 안 지운 만료 키도 셈
         with self._lock:
-            self._purge_expired()
+            self._purge_all_expired()
             return len(self._data)
 
     def flushall(self):
@@ -186,10 +205,27 @@ class RedisStore:
     # 능동 만료(active expiration)
     #   지연 삭제만 있으면 다시 조회되지 않는 만료 키가 메모리에 계속 남는다.
     #   백그라운드 스레드가 주기적으로 만료 키를 정리한다.
-    #   (실제 Redis는 전체를 훑지 않고 TTL 있는 키 20개를 무작위로 뽑아 검사하고,
-    #    25% 넘게 만료돼 있으면 한 번 더 반복한다. 여기서는 단순하게 전체를 훑는다.)
+    #
+    #   Redis 방식 (전체를 훑지 않음):
+    #     1) TTL 있는 키 20개를 무작위로 뽑아 만료된 것을 지운다.
+    #     2) 뽑은 것 중 25% 이상이 만료돼 있었다면 → 아직 만료 키가 많다는 뜻이므로 1)을 반복.
+    #        25% 미만이면 → 남은 만료 키가 적다고 보고 멈춤 (나머지는 다음 주기나 지연 삭제가 처리)
+    #     3) 반복이 길어지면 시간 상한에서 멈춤.
+    #   → 키가 백만 개여도 한 번에 하는 일은 "20개 × 몇 라운드"라 락을 오래 잡지 않는다.
     # ------------------------------------------------------------------
-    def _purge_expired(self):
+    def _expire_round(self, sample_size):
+        """한 라운드: 무작위 sample_size개를 검사해 만료된 것을 삭제. (검사 수, 삭제 수) 반환"""
+        now = self._clock()
+        sampled = self._expires.sample(sample_size)
+        expired = 0
+        for key, exp_time in sampled:
+            if exp_time < now:
+                self._delete(key)
+                expired += 1
+        return len(sampled), expired
+
+    def _purge_all_expired(self):
+        """전체를 훑어 만료 키를 모두 삭제 (O(n)). 정확한 결과가 필요한 dbsize 전용"""
         now = self._clock()
         removed = 0
         for key, exp_time in self._expires.items():   # items()는 복사본이라 순회 중 삭제 OK
@@ -198,10 +234,23 @@ class RedisStore:
                 removed += 1
         return removed
 
-    def purge_expired(self):
-        """만료 키를 한 번 정리하고 지운 개수를 반환"""
-        with self._lock:
-            return self._purge_expired()
+    def purge_expired(self, sample_size=ACTIVE_EXPIRE_SAMPLE,
+                      time_limit=ACTIVE_EXPIRE_TIME_LIMIT):
+        """Redis 방식으로 만료 키를 정리하고 지운 개수를 반환. time_limit=None이면 시간 제한 없음"""
+        # 시간 상한은 주입된 clock(가짜일 수 있음)이 아니라 실제 경과 시간으로 잼
+        start = time.perf_counter()
+        total = 0
+        while True:
+            # 라운드마다 락을 잡았다 풀어서, 정리 중에도 다른 요청이 사이사이 처리될 수 있게 함
+            with self._lock:
+                sampled, expired = self._expire_round(sample_size)
+            total += expired
+
+            if sampled == 0 or expired / sampled < ACTIVE_EXPIRE_REPEAT_RATIO:
+                break
+            if time_limit is not None and time.perf_counter() - start >= time_limit:
+                break
+        return total
 
     def start_active_expire(self, interval=0.1):
         if self._expire_thread is not None:

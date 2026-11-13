@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 import threading
 import time
@@ -41,6 +42,36 @@ class HashTableTest(unittest.TestCase):
         self.assertEqual(len(t), 100)
         self.assertEqual(sorted(t.keys()), sorted(f"k{i}" for i in range(100)))
 
+    def test_sample_returns_unique_real_entries(self):
+        random.seed(0)
+        t = HashTable()
+        for i in range(100):
+            t.put(f"k{i}", i)
+        for _ in range(50):
+            got = t.sample(20)
+            self.assertEqual(len(got), 20)
+            self.assertEqual(len(set(got)), 20)            # 중복 없음
+            for k, v in got:
+                self.assertEqual(t.get(k), v)              # 실제로 있는 엔트리
+
+    def test_sample_small_and_empty(self):
+        t = HashTable()
+        self.assertEqual(t.sample(20), [])
+        for i in range(5):
+            t.put(f"k{i}", i)
+        self.assertEqual(sorted(t.sample(20)), sorted((f"k{i}", i) for i in range(5)))
+
+    def test_sample_on_sparse_table_terminates(self):
+        # 대량 삭제 후 빈 버킷이 대부분이어도 상한 덕분에 금방 끝나고, 결과는 항상 올바름
+        t = HashTable()
+        for i in range(1000):
+            t.put(f"k{i}", i)
+        for i in range(997):
+            t.delete(f"k{i}")
+        got = t.sample(20)
+        self.assertLessEqual(len(got), 3)
+        self.assertTrue(set(got) <= {("k997", 997), ("k998", 998), ("k999", 999)})
+
 
 class BasicCommandTest(unittest.TestCase):
     def setUp(self):
@@ -63,6 +94,43 @@ class BasicCommandTest(unittest.TestCase):
     def test_set_rejects_non_positive_ttl(self):
         with self.assertRaises(ValueError):
             self.store.set("a", "1", ttl=0)
+
+    def test_set_returns_true(self):
+        self.assertTrue(self.store.set("a", "1"))
+
+    def test_set_nx_only_when_missing(self):
+        self.assertTrue(self.store.set("a", "1", nx=True))
+        self.assertFalse(self.store.set("a", "2", nx=True))
+        self.assertEqual(self.store.get("a"), "1")
+
+    def test_set_xx_only_when_present(self):
+        self.assertFalse(self.store.set("a", "1", xx=True))
+        self.assertIsNone(self.store.get("a"))
+        self.store.set("a", "1")
+        self.assertTrue(self.store.set("a", "2", xx=True))
+        self.assertEqual(self.store.get("a"), "2")
+
+    def test_set_nx_and_xx_together_is_error(self):
+        with self.assertRaises(ValueError):
+            self.store.set("a", "1", nx=True, xx=True)
+
+    def test_set_nx_treats_expired_key_as_missing(self):
+        self.store.set("a", "1", ttl=1)
+        self.clock.advance(2)                     # 만료됐지만 아직 지연 삭제 전
+        self.assertTrue(self.store.set("a", "2", nx=True))
+        self.assertEqual(self.store.get("a"), "2")
+        self.assertEqual(self.store.ttl("a"), -1)
+
+    def test_set_xx_fails_on_expired_key(self):
+        self.store.set("a", "1", ttl=1)
+        self.clock.advance(2)
+        self.assertFalse(self.store.set("a", "2", xx=True))
+        self.assertIsNone(self.store.get("a"))
+
+    def test_failed_set_nx_keeps_existing_ttl(self):
+        self.store.set("a", "1", ttl=10)
+        self.assertFalse(self.store.set("a", "2", nx=True))
+        self.assertEqual(self.store.ttl("a"), 10)
 
     def test_delete_counts_only_existing(self):
         self.store.set("a", "1")
@@ -253,6 +321,60 @@ class AdminAndActiveExpireTest(unittest.TestCase):
         # 조회하지 않았는데도 내부 테이블에서 실제로 사라졌는지 확인
         self.assertEqual(len(self.store._data), 1)
         self.assertEqual(len(self.store._expires), 0)
+
+    def _record_rounds(self):
+        """_expire_round 호출을 가로채 라운드별 (검사 수, 삭제 수)를 기록"""
+        rounds = []
+        original = self.store._expire_round
+
+        def wrapper(sample_size):
+            result = original(sample_size)
+            rounds.append(result)
+            return result
+
+        self.store._expire_round = wrapper
+        return rounds
+
+    def test_purge_repeats_while_many_expired(self):
+        random.seed(0)
+        for i in range(1000):
+            self.store.set(f"k{i}", i, ttl=1)
+        self.clock.advance(2)
+        rounds = self._record_rounds()
+
+        removed = self.store.purge_expired(time_limit=None)
+
+        self.assertGreater(len(rounds), 1)                    # 100% 만료라 계속 반복
+        self.assertTrue(all(s <= 20 for s, _ in rounds))      # 한 라운드에 최대 20개
+        self.assertGreaterEqual(removed, 500)
+        self.assertEqual(removed, 1000 - len(self.store._expires))
+
+    def test_purge_stops_when_few_expired(self):
+        random.seed(0)
+        for i in range(5):
+            self.store.set(f"dead{i}", i, ttl=1)
+        for i in range(195):
+            self.store.set(f"live{i}", i, ttl=100)
+        self.clock.advance(2)
+        rounds = self._record_rounds()
+
+        removed = self.store.purge_expired(time_limit=None)
+
+        self.assertEqual(len(rounds), 1)                      # 만료 비율 < 25% → 한 라운드로 끝
+        self.assertLessEqual(removed, 5)
+        live = [k for k in self.store._expires.keys() if k.startswith("live")]
+        self.assertEqual(len(live), 195)                      # 안 만료된 키는 건드리지 않음
+
+    def test_purge_respects_time_limit(self):
+        for i in range(1000):
+            self.store.set(f"k{i}", i, ttl=1)
+        self.clock.advance(2)
+        rounds = self._record_rounds()
+
+        removed = self.store.purge_expired(time_limit=0)
+
+        self.assertEqual(len(rounds), 1)                      # 시간 상한에 바로 걸려 한 라운드만
+        self.assertLessEqual(removed, 20)
 
     def test_background_thread(self):
         store = RedisStore()   # 실제 시계 사용
