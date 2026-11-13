@@ -1,2 +1,10 @@
 __pycache__/
 *.py[cod]
+/mini-redis
+/mini-redis.exe
+/report-api
+/report-api.exe
+/test-store
+/test-store.exe
+/test-resp
+/test-resp.exe
