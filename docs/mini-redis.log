@@ -1,0 +1,17 @@
+[+   1890ms] CONN conn=1 opened (slot 0)
+[+   1890ms] EXEC #1 conn=1 DEL "gomoku:recent-summary" -> (integer) 0 | reply queued in output buffer (4 bytes)
+[+   1890ms] SENT #1 conn=1 4 bytes written to socket
+[+   1921ms] EXEC #2 conn=1 DEL "gomoku:recent-summary" -> (integer) 0 | reply queued in output buffer (4 bytes)
+[+   1921ms] SENT #2 conn=1 4 bytes written to socket
+[+   1921ms] EXEC #3 conn=1 GET "gomoku:recent-summary" -> (nil) | reply queued in output buffer (5 bytes)
+[+   1921ms] SENT #3 conn=1 5 bytes written to socket
+[+   1937ms] EXEC #4 conn=1 SET "gomoku:recent-summary" "{\"recent\":[{\"id\":2,\"winner\":\"B\",\"moves\":17},{\"id"...(+115 bytes) "EX" "30" -> OK | reply queued in output buffer (5 bytes)
+[+   1937ms] SENT #4 conn=1 5 bytes written to socket
+[+   4890ms] EXEC #5 conn=1 GET "gomoku:recent-summary" -> "{\"recent\":[{\"id\":2,\"winner\":\"B\",\"moves\":17},{\"id"...(+115 bytes) | reply queued in output buffer (171 bytes)
+[+   4890ms] SENT #5 conn=1 171 bytes written to socket
+[+   5781ms] EXEC #6 conn=1 DEL "gomoku:recent-summary" -> (integer) 1 | reply queued in output buffer (4 bytes)
+[+   5781ms] SENT #6 conn=1 4 bytes written to socket
+[+   6109ms] EXEC #7 conn=1 GET "gomoku:recent-summary" -> (nil) | reply queued in output buffer (5 bytes)
+[+   6109ms] SENT #7 conn=1 5 bytes written to socket
+[+   6109ms] EXEC #8 conn=1 SET "gomoku:recent-summary" "{\"recent\":[{\"id\":3,\"winner\":\"B\",\"moves\":9},{\"id\""...(+147 bytes) "EX" "30" -> OK | reply queued in output buffer (5 bytes)
+[+   6109ms] SENT #8 conn=1 5 bytes written to socket
