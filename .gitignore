@@ -1,2 +1,2 @@
-./mini-redis/app/__pycache__
-./mini-redis/tests/__pycache__
+./mini-redis/app/__pycache__/
+./mini-redis/tests/__pycache__/

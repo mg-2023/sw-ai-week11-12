@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from main import create_app  # noqa: E402
 from store import NOT_INTEGER_ERR, RedisStore  # noqa: E402
+from store2 import QueueFullError  # noqa: E402
 
 
 class FakeClock:
@@ -158,6 +159,19 @@ class TestAdminCommands(ApiTestBase):
 
         self.assertEqual(self.client.post("/flushall").json(), {"ok": True})
         self.assertEqual(self.client.get("/dbsize").json(), {"size": 0})
+
+
+class TestQueueFull(ApiTestBase):
+    def test_queue_full_is_503(self):
+        # 대기열이 가득 찬 상황을 흉내: store가 QueueFullError를 던지면 503 + Retry-After
+        def reject(*args, **kwargs):
+            raise QueueFullError(1)
+
+        self.store.get = reject
+        res = self.client.get("/keys/foo")
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.headers["retry-after"], "1")
+        self.assertIn("queue is full", res.json()["detail"])
 
 
 class TestLifespan(unittest.TestCase):

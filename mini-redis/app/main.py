@@ -23,6 +23,9 @@ from pydantic import BaseModel, StrictInt
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from store import RedisStore  # noqa: E402
+# 대기열 방식(store2)이 요청을 거부할 때 던지는 예외. 락 방식(store)을 쓸 때는 발생하지 않으므로
+# 위의 RedisStore import를 어느 쪽으로 바꾸든 이 줄은 그대로 둬도 된다.
+from store2 import QueueFullError  # noqa: E402
 
 
 # ----------------------------------------------------------------------
@@ -84,6 +87,13 @@ def create_app(store: RedisStore | None = None) -> FastAPI:
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    # 대기열이 가득 차서 store가 요청을 거부한 경우.
+    # 클라이언트 잘못(4xx)이 아니라 서버가 바쁜 것이므로 503, Retry-After로 잠시 뒤 재시도하라고 알려준다.
+    @app.exception_handler(QueueFullError)
+    async def queue_full_handler(request: Request, exc: QueueFullError):
+        return JSONResponse(status_code=503, content={"detail": str(exc)},
+                            headers={"Retry-After": "1"})
 
     # 핸들러를 async가 아닌 일반 def로 둔 이유:
     #   FastAPI가 스레드풀에서 동시에 실행하므로, store의 threading.Lock이 실제로 동시 요청을 보호한다.
