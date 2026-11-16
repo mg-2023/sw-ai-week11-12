@@ -1,11 +1,5 @@
 /*
- * net.h
- *
- * 정의 : 운영체제별 소켓 API 차이(Windows Winsock, POSIX)를 가리는 얇은 네트워크 인터페이스.
- * 책임 :
- *   - 맡는 것 : 소켓 생성 · 접속 · 수신 · 송신, 논블로킹 설정, poll, 시계, sleep, 포트 문자열 파싱
- *   - 맡지 않는 것 : 프로토콜(RESP) 해석, 클라이언트 상태 관리
- * 위치 : server.c(서버)와 examples/report_api.c(클라이언트 겸 작은 HTTP 서버)가 쓰고, 구현은 net.c 에 있다.
+ * net.h : 운영체제별 소켓 API 차이를 가리는 얇은 인터페이스(server.c 와 examples/report_api.c 가 사용).
  */
 
 #ifndef MINI_REDIS_NET_H
@@ -31,7 +25,7 @@ typedef struct pollfd PollFd;
 #define INVALID_FD (-1)
 #endif
 
-/* 함수별 정의 · 설명 · 동작은 net.c 의 각 함수 위 주석을 본다. */
+/* 실패하면 INVALID_FD · false · 음수. net_send 는 일부만 보낼 수 있고, net_recv 0 은 상대가 닫았다는 뜻이다. */
 bool net_init(void);
 void net_cleanup(void);
 void net_close(Socket fd);
@@ -47,6 +41,7 @@ Socket net_accept(Socket listener);
 Socket net_connect(const char *address, uint16_t port);
 bool net_parse_port(const char *text, uint16_t *port);
 uint64_t net_now_ms(void);
+uint64_t net_unix_ms(void);
 void net_sleep_ms(unsigned ms);
 
 #endif
