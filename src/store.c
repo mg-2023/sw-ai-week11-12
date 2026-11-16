@@ -280,6 +280,20 @@ static void remove_entry(Store *store, Entry **link) {
 }
 
 /*
+ * 정의 : 만료 항목을 지우기 직전에 등록된 알림 함수를 부르는 함수.
+ * 설명 : 조회 시 만료와 주기 정리는 같은 remove_entry 로 지우므로 결과만 보면 구분이 안 된다. 지우는 경로를 알림으로 넘겨 시연 로그가 두 경로를 나눠 기록하게 한다.
+ * 입력 : store : 저장소, entry : 지울 항목(아직 해제 전), cause : 지우는 경로
+ * 출력 : 없음. 알림 함수가 없으면 아무것도 하지 않는다.
+ * 동작 :
+ *   1. on_expire 가 있으면 항목의 키 view 와 경로를 넘겨 부른다.
+ */
+static void notify_expired(Store *store, const Entry *entry, StoreExpireCause cause) {
+    if (store->on_expire) {
+        store->on_expire(store->expire_context, (Bytes){entry->data, entry->key_length}, cause);
+    }
+}
+
+/*
  * 정의 : 살아 있는(만료되지 않은) 항목만 찾아 주는 함수. 만료된 항목은 이때 지운다.
  * 설명 : 조회 시 만료(lazy expiration)의 핵심이다. 주기 정리가 아직 못 본 항목이라도 접근하는 순간 만료를 확인하므로 사용자는 만료된 값을 절대 보지 않는다. 모든 읽기 · 쓰기 명령이 이 함수를 거친다.
  * 입력 : store : 저장소, key : 찾을 키, now_ms : 현재 시각(ms)
@@ -287,7 +301,7 @@ static void remove_entry(Store *store, Entry **link) {
  * 동작 :
  *   1. rehash 를 2단계 진행한다(접근할 때 덤으로 확장을 조금 진행).
  *   2. 키를 찾는다.
- *   3. 찾았고 만료 시각이 now_ms 이하이면 항목을 지우고 NULL 을 돌려준다.
+ *   3. 찾았고 만료 시각이 now_ms 이하이면 알림(조회 시 만료)을 보내고 항목을 지운 뒤 NULL 을 돌려준다.
  *   4. 그 외에는 찾은 링크를 돌려준다.
  */
 static Entry **find_live(Store *store, Bytes key, uint64_t now_ms) {
@@ -295,6 +309,7 @@ static Entry **find_live(Store *store, Bytes key, uint64_t now_ms) {
     Entry **link = find_link(store, key, hash_key(key));
     /* lazy expiration: deadline_ms 가 0 이면 TTL 없음이라 건너뛰고, 현재 시각 이하이면 만료된 것으로 본다. */
     if (link && (*link)->deadline_ms && (*link)->deadline_ms <= now_ms) {
+        notify_expired(store, *link, STORE_EXPIRED_ON_ACCESS);
         remove_entry(store, link);
         return NULL;
     }
@@ -441,27 +456,59 @@ int64_t store_pttl(Store *store, Bytes key, uint64_t now_ms) {
  * 정의 : 주기적으로 불려 만료된 항목을 일부 지우는 함수(주기 정리, active expiration).
  * 설명 : 조회 시 만료만으로는 아무도 다시 읽지 않는 만료 키가 메모리에 남는다. 그래서 이벤트 루프가 일정 간격으로 이 함수를 불러 청소한다. 한 번에 보는 개수를 제한해 한 번의 호출이 길어지지 않게 한다(단일 스레드 이벤트 루프의 응답 지연 보호).
  * 입력 : store : 저장소, now_ms : 현재 시각(ms)
- * 출력 : 없음
+ * 출력 : 이번 호출에서 검사한 항목 수와 지운 항목 수
  * 동작 :
  *   1. rehash 를 32단계 진행한다.
  *   2. 검사 개수(budget)를 min(만료 시각이 있는 항목 수, 32)로 정한다.
  *   3. 정리 커서가 가리키는 항목을 보고 커서를 다음으로 옮긴다.
- *   4. 만료됐으면 키로 링크를 다시 찾아 항목을 지운다.
- *   5. budget 만큼 반복한다.
+ *   4. 만료됐으면 알림(주기 정리)을 보내고 키로 링크를 다시 찾아 항목을 지운다.
+ *   5. budget 만큼 반복하고 검사 · 삭제 수를 돌려준다.
  */
-void store_maintain(Store *store, uint64_t now_ms) {
+StoreCycle store_maintain(Store *store, uint64_t now_ms) {
     rehash_step(store, 32);
     /* 한 번에 최대 32개까지만 검사한다. 만료 리스트는 원형이라 커서가 다음 호출에서 이어 돈다. */
-    size_t budget = store->expiring < 32 ? store->expiring : 32;
-    for (size_t checked = 0; checked < budget; ++checked) {
+    StoreCycle cycle = {.checked = store->expiring < 32 ? store->expiring : 32};
+    for (size_t checked = 0; checked < cycle.checked; ++checked) {
         Entry *entry = store->expire_cursor;
         /* 지우기 전에 커서를 먼저 옮겨 둔다(지워지는 항목을 커서가 가리키지 않게). */
         store->expire_cursor = entry->expire_next;
         if (entry->deadline_ms <= now_ms) {
             Bytes key = {entry->data, entry->key_length};
             Entry **link = find_link(store, key, entry->hash);
-            assert(link && *link == entry); /* The expiration list only holds indexed entries. */
+            assert(link && *link == entry); /* 만료 리스트에는 테이블에 들어 있는 항목만 있다. */
+            notify_expired(store, entry, STORE_EXPIRED_BY_CYCLE);
             remove_entry(store, link);
+            ++cycle.removed;
         }
     }
+    return cycle;
+}
+
+/*
+ * 정의 : 만료되지 않은 모든 항목을 차례로 방문하는 함수.
+ * 설명 : 스냅샷은 특정 시점의 키 · 값 · 만료 시각을 통째로 써야 한다. 저장소 내부 구조(두 테이블, 체인)를 밖에 드러내지 않고 항목만 넘긴다. 읽기만 하므로 rehash 나 만료 삭제를 하지 않는다.
+ * 입력 : store : 저장소, now_ms : 현재 시각(이 시각에 만료된 항목은 건너뜀), visit : 방문 함수, context : 방문 함수에 넘길 값
+ * 출력 : 끝까지 방문했으면 true, 방문 함수가 false 를 돌려주면 그 자리에서 false
+ * 동작 :
+ *   1. current, next 두 테이블의 버킷 체인을 차례로 따라간다.
+ *   2. 만료 시각이 있고 now_ms 이하인 항목은 건너뛴다.
+ *   3. 나머지는 키 · 값 view 와 만료 시각을 visit 에 넘긴다.
+ */
+bool store_foreach(const Store *store, uint64_t now_ms, StoreVisitor visit, void *context) {
+    const Table tables[] = {store->current, store->next};
+    for (size_t t = 0; t < 2; ++t) {
+        for (size_t i = 0; i < tables[t].capacity; ++i) {
+            for (const Entry *entry = tables[t].buckets[i]; entry; entry = entry->next) {
+                if (entry->deadline_ms && entry->deadline_ms <= now_ms) {
+                    continue;
+                }
+                Bytes key = {entry->data, entry->key_length};
+                Bytes value = {entry->data + entry->key_length, entry->value_length};
+                if (!visit(context, key, value, entry->deadline_ms)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }
