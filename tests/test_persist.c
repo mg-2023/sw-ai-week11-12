@@ -1,7 +1,7 @@
 /*
  * test_persist.c
  *
- * 스냅샷 단위 시험. 시각(단조 ms, Unix ms)을 직접 넘겨 "서버가 꺼져 있던 시간" 을 정확히 만든다.
+ * 스냅샷 · AOF 단위 시험. 시각(단조 ms, Unix ms)을 직접 넘겨 "서버가 꺼져 있던 시간" 을 정확히 만든다.
  * 파일은 현재 폴더에 test-persist-*.tmpdata 이름으로 만들고 끝나면 지운다.
  */
 
@@ -15,6 +15,7 @@
 
 static const char SNAP[] = "test-persist-snapshot.tmpdata";
 static const char SNAP_TMP[] = "test-persist-snapshot.tmpdata.tmp";
+static const char AOF[] = "test-persist-aof.tmpdata";
 
 /* 첫 실행의 시각과, 3초 꺼져 있다가 재시작한 뒤의 시각. 단조 시계는 재시작하면 작은 값부터 다시 센다. */
 enum { RUN1_MONO = 500000, RUN2_MONO = 1000 };
@@ -31,6 +32,15 @@ static void write_bytes(const char *path, const char *mode, const char *data, si
     FILE *file = fopen(path, mode);
     assert(file && fwrite(data, 1, length, file) == length);
     fclose(file);
+}
+
+static long file_size(const char *path) {
+    FILE *file = fopen(path, "rb");
+    assert(file);
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fclose(file);
+    return size;
 }
 
 /* 스냅샷 : 값 · TTL 을 저장하고, 꺼져 있던 3초를 반영해 복원한다 */
@@ -99,11 +109,122 @@ static void test_snapshot_interrupted_and_corrupt(void) {
     store_destroy(&store);
 }
 
+/* AOF 에 Change 하나를 덧붙이는 짧은 도우미 */
+static void append(Aof *aof, ChangeType type, Bytes key, Bytes value, uint64_t deadline) {
+    Change change = {.type = type, .key = key, .value = value, .deadline_ms = deadline};
+    AofWrite written;
+    assert(aof_append(aof, &change, RUN1_MONO, RUN1_UNIX, &written));
+    assert(written.bytes > 0 && written.synced == (aof->policy == FSYNC_ALWAYS));
+}
+
+/* AOF : 저장 · 덮어쓰기 · 삭제 · TTL 변경을 순서대로 재생하고, 꺼져 있던 시간을 TTL 에서 뺀다 */
+static void test_aof_replay(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report) && report.loaded == 0);
+    append(&aof, CHANGE_SET, BYTES("user"), BYTES("v1"), 0);
+    append(&aof, CHANGE_SET, BYTES("user"), BYTES("v2"), 0);                       /* 덮어쓰기 */
+    append(&aof, CHANGE_SET, BYTES("deleted"), BYTES("x"), 0);
+    append(&aof, CHANGE_DEL, BYTES("deleted"), (Bytes){0}, 0);                     /* 삭제 */
+    append(&aof, CHANGE_SET, BYTES("short"), BYTES("s"), RUN1_MONO + 2000);        /* 꺼져 있는 동안 만료 */
+    append(&aof, CHANGE_SET, BYTES("ttl"), BYTES("t"), 0);
+    append(&aof, CHANGE_EXPIRE, BYTES("ttl"), (Bytes){0}, RUN1_MONO + 10000);      /* TTL 변경 */
+    append(&aof, CHANGE_SET, BYTES("old"), BYTES("o"), RUN1_MONO + 60000);
+    append(&aof, CHANGE_SET, BYTES("old"), BYTES("o2"), 0);                        /* TTL 없는 값으로 덮어써 TTL 제거 */
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 9 && report.skipped_expired == 1 && report.truncated_bytes == 0);
+    expect_value(&store, BYTES("user"), RUN2_MONO, "v2");
+    assert(store_pttl(&store, BYTES("deleted"), RUN2_MONO) == -2);
+    assert(store_pttl(&store, BYTES("short"), RUN2_MONO) == -2);
+    assert(store_pttl(&store, BYTES("ttl"), RUN2_MONO) == 7000);
+    assert(store_pttl(&store, BYTES("old"), RUN2_MONO) == -1);
+    aof_close(&aof);
+    store_destroy(&store);
+}
+
+/* AOF : 마지막 레코드가 쓰다 만 채로 끝나면 그 부분만 잘라 내고, 그 뒤 새 레코드는 온전한 끝에 붙는다 */
+static void test_aof_incomplete_tail(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_EVERYSEC, &store, RUN1_MONO, RUN1_UNIX, &report));
+    append(&aof, CHANGE_SET, BYTES("a"), BYTES("1"), 0);
+    aof_close(&aof);
+    store_destroy(&store);
+    long complete = file_size(AOF);
+    const char torn[] = "*3\r\n$3\r\nSET\r\n$1\r\nb\r\n$5\r\n12"; /* 값 5바이트 중 2바이트만 쓴 상태 */
+    write_bytes(AOF, "ab", torn, sizeof(torn) - 1);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_EVERYSEC, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 1 && report.truncated_bytes == sizeof(torn) - 1);
+    assert(file_size(AOF) == complete);
+    expect_value(&store, BYTES("a"), RUN2_MONO, "1");
+    assert(store_pttl(&store, BYTES("b"), RUN2_MONO) == -2);
+    append(&aof, CHANGE_SET, BYTES("c"), BYTES("3"), 0);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_EVERYSEC, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 2 && report.truncated_bytes == 0);
+    expect_value(&store, BYTES("c"), RUN2_MONO, "3");
+    aof_close(&aof);
+    store_destroy(&store);
+}
+
+/* AOF : 중간 레코드가 깨졌으면 일부만 복원한 채 시작하지 않고 거부한다 */
+static void test_aof_corrupt_middle(void) {
+    const char data[] = "*2\r\n$3\r\nDEL\r\n$1\r\na\r\nGARBAGE\r\n*2\r\n$3\r\nDEL\r\n$1\r\nb\r\n";
+    write_bytes(AOF, "wb", data, sizeof(data) - 1);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(!aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(strstr(report.error, "corrupt record"));
+    store_destroy(&store);
+}
+
+/* AOF : 쓰기 실패(장애 주입)는 false 로 알리고 파일에 아무것도 쓰지 않는다 */
+static void test_aof_write_failure(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {.fail_at = 2};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    append(&aof, CHANGE_SET, BYTES("a"), BYTES("1"), 0);
+    long before = file_size(AOF);
+    Change change = {.type = CHANGE_SET, .key = BYTES("b"), .value = BYTES("2")};
+    AofWrite written;
+    assert(!aof_append(&aof, &change, RUN1_MONO, RUN1_UNIX, &written));
+    assert(strstr(aof.error, "injected"));
+    assert(file_size(AOF) == before);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
 int main(void) {
     test_snapshot_round_trip_with_downtime();
     test_snapshot_interrupted_and_corrupt();
+    test_aof_replay();
+    test_aof_incomplete_tail();
+    test_aof_corrupt_middle();
+    test_aof_write_failure();
     remove(SNAP);
     remove(SNAP_TMP);
-    puts("2 persistence unit scenarios passed");
+    remove(AOF);
+    puts("6 persistence unit scenarios passed");
     return 0;
 }

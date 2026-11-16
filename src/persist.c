@@ -1,18 +1,21 @@
 /*
  * persist.c
  *
- * 정의 : persist.h 의 구현. RDB 방식의 스냅샷 파일을 쓰고 읽는다.
+ * 정의 : persist.h 의 구현. RDB 방식의 스냅샷 파일과 AOF 파일을 쓰고 읽는다.
  * 책임 :
  *   - 스냅샷 형식(자체 형식, 리틀 엔디언) :
  *       "MRSNAP01" | 저장 시각 u64 | { 'E' 만료 시각 u64 | 키 길이 u32 | 값 길이 u32 | 키 | 값 }* | 'Z' 항목 수 u64 | 체크섬 u64
  *       만료 시각은 Unix ms(0 이면 TTL 없음), 체크섬은 앞의 모든 바이트에 대한 FNV-1a 64비트다.
  *   - 스냅샷 교체 : "경로.tmp" 에 끝까지 쓰고 fsync 한 뒤에만 원래 경로로 이름을 바꾼다. 쓰는 도중 멈추면 원래 파일은 그대로 남는다.
+ *   - AOF 형식 : 요청과 같은 RESP2 배열을 실행 순서대로 이어 쓴다. SET key value [PXAT unix_ms], DEL key, PEXPIREAT key unix_ms
+ *   - AOF 끝의 불완전한 레코드(쓰는 도중 종료)는 잘라 내고 앞의 레코드만 재생한다. 중간이 깨졌으면 시작을 거부한다.
  *   - 맡지 않는 것 : 명령 해석, 언제 저장할지, 소켓
  * 위치 : server.c 가 부른다. 파일 입출력 차이(Windows / POSIX)는 이 파일 안의 작은 도우미 함수가 가린다.
  */
 
 #define _POSIX_C_SOURCE 200809L
 #include "persist.h"
+#include "resp.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -112,6 +115,22 @@ static bool sync_file(int fd) {
     return _commit(fd) == 0;
 #else
     return fsync(fd) == 0;
+#endif
+}
+
+/*
+ * 정의 : 파일 길이를 length 로 자르는 함수.
+ * 설명 : AOF 끝의 불완전한 레코드를 버린 뒤, 새 레코드가 깨진 바이트 뒤가 아니라 마지막 온전한 레코드 바로 뒤에 붙게 한다.
+ * 입력 : fd : 파일 기술자, length : 남길 길이
+ * 출력 : 성공하면 true
+ * 동작 :
+ *   1. Windows : _chsize_s, POSIX : ftruncate 를 부른다.
+ */
+static bool truncate_file(int fd, size_t length) {
+#ifdef _WIN32
+    return _chsize_s(fd, (long long)length) == 0;
+#else
+    return ftruncate(fd, (off_t)length) == 0;
 #endif
 }
 
@@ -481,4 +500,300 @@ bool snapshot_load(Store *store, const char *path, uint64_t now_ms, uint64_t uni
 done:
     free(data);
     return ok;
+}
+
+/* ───────── AOF ───────── */
+
+/*
+ * 정의 : 한 레코드를 재생해 저장소에 반영하는 함수.
+ * 설명 : AOF 의 만료 시각은 절대 Unix ms 라서 서버가 꺼져 있던 시간이 TTL 에 포함된다. 이미 지난 만료 시각을 가진 SET 은 "덮어쓴 뒤 만료" 이므로 키를 지운 결과가 맞다.
+ * 입력 : store : 저장소, args/count : 레코드 인자, now_ms/unix_ms : 지금 시각, report : 결과
+ * 출력 : 알 수 있는 레코드면 true, 모르는 형식이면 false
+ * 동작 :
+ *   1. SET key value [PXAT t] : t 가 지났으면 키 삭제, 아니면 store_set.
+ *   2. DEL key : store_delete.
+ *   3. PEXPIREAT key t : t 가 지났으면 키 삭제, 아니면 store_expire_at.
+ */
+static bool replay_record(Store *store, const Bytes *args, size_t count, uint64_t now_ms, uint64_t unix_ms,
+                          LoadReport *report) {
+    int64_t unix_deadline = 0;
+    uint64_t deadline_ms = 0;
+    if (resp_equals(args[0], "SET") && (count == 3 || count == 5)) {
+        if (count == 5 && (!resp_equals(args[3], "PXAT") || !resp_integer(args[4], &unix_deadline) || unix_deadline <= 0)) {
+            return false;
+        }
+        if (!to_monotonic((uint64_t)unix_deadline, now_ms, unix_ms, &deadline_ms)) {
+            store_delete(store, args[1], now_ms);
+            ++report->skipped_expired;
+            return true;
+        }
+        return store_set(store, args[1], args[2], deadline_ms);
+    }
+    if (resp_equals(args[0], "DEL") && count == 2) {
+        store_delete(store, args[1], now_ms);
+        return true;
+    }
+    if (resp_equals(args[0], "PEXPIREAT") && count == 3 && resp_integer(args[2], &unix_deadline) && unix_deadline > 0) {
+        if (!to_monotonic((uint64_t)unix_deadline, now_ms, unix_ms, &deadline_ms)) {
+            store_delete(store, args[1], now_ms);
+            ++report->skipped_expired;
+            return true;
+        }
+        store_expire_at(store, args[1], now_ms, deadline_ms);
+        return true;
+    }
+    return false;
+}
+
+/*
+ * 정의 : AOF 를 열고, 있던 레코드를 재생해 저장소를 채우는 함수.
+ * 설명 : 시작할 때 한 번 부른다. 마지막 레코드가 쓰는 도중 끊겼으면(RESP_INCOMPLETE) 그 부분만 잘라 내고 계속한다. 그 레코드는 응답을 받지 못한 명령이라 버려도 클라이언트에게 성공이라고 알린 데이터를 잃지 않는다(always 정책 기준). 중간 레코드가 깨졌으면 시작을 거부한다.
+ * 입력 : aof : 채울 AOF 상태, path : 경로, policy : 동기화 정책, store : 빈 저장소, now_ms/unix_ms : 지금 시각, report : 결과
+ * 출력 : 성공하면 true(aof->fd 가 열림), 실패하면 false(report->error)
+ * 동작 :
+ *   1. 파일 전체를 읽는다.
+ *   2. resp_parse 로 레코드를 하나씩 꺼내 replay_record 한다.
+ *   3. 끝에서 INCOMPLETE 면 그 위치를 온전한 끝으로 기억하고, INVALID 이거나 모르는 레코드면 실패.
+ *   4. 파일을 덧붙이기 모드로 열고, 잘라 낼 바이트가 있으면 온전한 끝까지 자른 뒤 fsync 한다.
+ */
+bool aof_open(Aof *aof, const char *path, FsyncPolicy policy, Store *store,
+              uint64_t now_ms, uint64_t unix_ms, LoadReport *report) {
+    uint64_t fail_at = aof->fail_at;
+    *aof = (Aof){.fd = -1, .policy = policy, .last_sync_ms = now_ms, .fail_at = fail_at};
+    *report = (LoadReport){0};
+    char *data;
+    size_t length;
+    bool exists;
+    if (!read_file(path, &data, &length, &exists)) {
+        snprintf(report->error, sizeof(report->error), "cannot read %s", path);
+        return false;
+    }
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < length) {
+        RespParser parser = {0};
+        RespResult result = resp_parse(&parser, data + offset, length - offset);
+        if (result == RESP_INCOMPLETE) {
+            report->truncated_bytes = length - offset;
+            break;
+        }
+        Bytes args[RESP_MAX_ARGS];
+        for (size_t i = 0; i < parser.count && result == RESP_READY; ++i) {
+            args[i] = (Bytes){data + offset + parser.start[i], parser.length[i]};
+        }
+        if (result != RESP_READY || !replay_record(store, args, parser.count, now_ms, unix_ms, report)) {
+            snprintf(report->error, sizeof(report->error), "%s has a corrupt record at byte %zu", path, offset);
+            ok = false;
+            break;
+        }
+        ++report->loaded;
+        offset += parser.offset;
+    }
+    free(data);
+    if (!ok) {
+        return false;
+    }
+    aof->fd = open_file(path, true);
+    if (aof->fd < 0) {
+        snprintf(report->error, sizeof(report->error), "cannot open %s: %s", path, strerror(errno));
+        return false;
+    }
+    if (report->truncated_bytes && !(truncate_file(aof->fd, offset) && sync_file(aof->fd))) {
+        snprintf(report->error, sizeof(report->error), "cannot truncate incomplete tail of %s", path);
+        aof_close(aof);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * 정의 : 바이트 조각을 늘어나는 버퍼 끝에 덧붙이는 함수.
+ * 설명 : AOF 레코드를 한 덩어리로 만든 뒤 write 한 번에 쓰기 위해 모은다(레코드가 여러 write 로 쪼개지면 중간 실패 때 끝이 더 많이 깨진다).
+ * 입력 : buffer/used/capacity : 레코드 버퍼(필요하면 두 배로 늘림), data/length : 덧붙일 바이트
+ * 출력 : 성공하면 true, 메모리 부족이면 false
+ * 동작 :
+ *   1. 필요한 크기가 될 때까지 용량을 두 배로 늘려 realloc 한다.
+ *   2. 끝에 복사한다.
+ */
+static bool append_raw(char **buffer, size_t *used, size_t *capacity, const char *data, size_t length) {
+    size_t need = *used + length;
+    if (need > *capacity) {
+        size_t grown = *capacity ? *capacity : 256;
+        while (grown < need) {
+            grown *= 2;
+        }
+        char *bigger = realloc(*buffer, grown);
+        if (!bigger) {
+            return false;
+        }
+        *buffer = bigger;
+        *capacity = grown;
+    }
+    memcpy(*buffer + *used, data, length);
+    *used = need;
+    return true;
+}
+
+/*
+ * 정의 : RESP bulk string 하나("$길이\r\n본문\r\n")를 버퍼에 덧붙이는 함수.
+ * 설명 : AOF 레코드를 요청과 같은 RESP2 배열로 만들 때 인자마다 부른다. 재생할 때 같은 resp_parse 로 읽을 수 있다.
+ * 입력 : buffer/used/capacity : 레코드 버퍼, data/length : 인자
+ * 출력 : 성공하면 true
+ * 동작 :
+ *   1. 길이 머리, 본문, CRLF 를 차례로 append_raw 한다.
+ */
+static bool append_bulk(char **buffer, size_t *used, size_t *capacity, const char *data, size_t length) {
+    char header[32];
+    int header_length = snprintf(header, sizeof(header), "$%zu\r\n", length);
+    return append_raw(buffer, used, capacity, header, (size_t)header_length) &&
+           append_raw(buffer, used, capacity, data, length) && append_raw(buffer, used, capacity, "\r\n", 2);
+}
+
+/*
+ * 정의 : 상태를 바꾼 연산 하나를 AOF 끝에 덧붙이는 함수.
+ * 설명 : 명령이 실행된 직후, 응답을 출력 버퍼에 넣기 전에 부른다. 그래서 always 정책에서는 "+OK 를 받은 쓰기는 디스크에 있다" 가 성립한다. 만료 시각은 Unix ms 로 바꿔 PXAT/PEXPIREAT 로 쓴다.
+ * 입력 : aof : 열린 AOF, change : 바뀐 내용, now_ms/unix_ms : 이 명령의 시각, result : 쓴 바이트와 fsync 여부
+ * 출력 : 성공하면 true. 실패하면 false 이고 aof->error 에 이유가 있다(호출자는 응답하지 않고 서버를 멈춘다).
+ * 동작 :
+ *   1. 변경 종류에 따라 SET/DEL/PEXPIREAT 인자를 RESP 배열로 만든다.
+ *   2. 시험용 장애 주입 번호면 쓰지 않고 실패한다.
+ *   3. write_all 로 덧붙인다.
+ *   4. always 면 바로 fsync, 아니면 pending_sync 만 켠다.
+ */
+bool aof_append(Aof *aof, const Change *change, uint64_t now_ms, uint64_t unix_ms, AofWrite *result) {
+    *result = (AofWrite){0};
+    char number[32];
+    Bytes args[5];
+    size_t count = 0;
+    if (change->type == CHANGE_SET) {
+        args[count++] = (Bytes){"SET", 3};
+        args[count++] = change->key;
+        args[count++] = change->value;
+        if (change->deadline_ms) {
+            int n = snprintf(number, sizeof(number), "%llu",
+                             (unsigned long long)to_unix(change->deadline_ms, now_ms, unix_ms));
+            args[count++] = (Bytes){"PXAT", 4};
+            args[count++] = (Bytes){number, (size_t)n};
+        }
+    } else if (change->type == CHANGE_DEL) {
+        args[count++] = (Bytes){"DEL", 3};
+        args[count++] = change->key;
+    } else {
+        int n = snprintf(number, sizeof(number), "%llu",
+                         (unsigned long long)to_unix(change->deadline_ms, now_ms, unix_ms));
+        args[count++] = (Bytes){"PEXPIREAT", 9};
+        args[count++] = change->key;
+        args[count++] = (Bytes){number, (size_t)n};
+    }
+
+    char *buffer = NULL;
+    size_t used = 0, capacity = 0;
+    char header[16];
+    int header_length = snprintf(header, sizeof(header), "*%zu\r\n", count);
+    bool ok = append_raw(&buffer, &used, &capacity, header, (size_t)header_length);
+    for (size_t i = 0; ok && i < count; ++i) {
+        ok = append_bulk(&buffer, &used, &capacity, args[i].data, args[i].length);
+    }
+    if (!ok) {
+        free(buffer);
+        snprintf(aof->error, sizeof(aof->error), "out of memory building AOF record");
+        return false;
+    }
+    ++aof->appended;
+    if (aof->fail_at && aof->appended == aof->fail_at) {
+        free(buffer);
+        snprintf(aof->error, sizeof(aof->error), "injected write failure on record %llu",
+                 (unsigned long long)aof->appended);
+        return false;
+    }
+    ok = write_all(aof->fd, buffer, used);
+    free(buffer);
+    if (!ok) {
+        snprintf(aof->error, sizeof(aof->error), "write failed: %s", strerror(errno));
+        return false;
+    }
+    result->bytes = used;
+    if (aof->policy == FSYNC_ALWAYS) {
+        if (!sync_file(aof->fd)) {
+            snprintf(aof->error, sizeof(aof->error), "fsync failed: %s", strerror(errno));
+            return false;
+        }
+        aof->last_sync_ms = now_ms;
+        result->synced = true;
+    } else {
+        aof->pending_sync = true;
+    }
+    return true;
+}
+
+/*
+ * 정의 : everysec 정책에서 1초가 지났으면 fsync 하는 함수.
+ * 설명 : 이벤트 루프가 반복마다 부른다. write 는 이미 끝났으므로 프로세스가 죽어도 운영체제가 가진 데이터는 남는다. fsync 는 운영체제 · 전원 장애에서 잃을 수 있는 범위를 약 1초로 묶는다.
+ * 입력 : aof : 열린 AOF, now_ms : 지금 시각, synced : 이번에 fsync 했는지
+ * 출력 : 실패가 없으면 true, fsync 실패면 false(aof->error)
+ * 동작 :
+ *   1. everysec 이 아니거나 밀린 데이터가 없거나 1초가 안 됐으면 아무것도 하지 않는다.
+ *   2. fsync 하고 시각을 기록한다.
+ */
+bool aof_sync_if_due(Aof *aof, uint64_t now_ms, bool *synced) {
+    *synced = false;
+    if (aof->fd < 0 || aof->policy != FSYNC_EVERYSEC || !aof->pending_sync || now_ms - aof->last_sync_ms < 1000) {
+        return true;
+    }
+    if (!sync_file(aof->fd)) {
+        snprintf(aof->error, sizeof(aof->error), "fsync failed: %s", strerror(errno));
+        return false;
+    }
+    aof->pending_sync = false;
+    aof->last_sync_ms = now_ms;
+    *synced = true;
+    return true;
+}
+
+/*
+ * 정의 : AOF 를 닫는 함수(정상 종료).
+ * 설명 : 밀린 데이터가 있으면 마지막으로 fsync 한다.
+ * 입력 : aof : 닫을 AOF
+ * 출력 : 없음
+ * 동작 :
+ *   1. 열려 있으면 fsync 하고 닫는다.
+ */
+void aof_close(Aof *aof) {
+    if (aof->fd >= 0) {
+        sync_file(aof->fd);
+        close_file(aof->fd);
+        aof->fd = -1;
+    }
+}
+
+/*
+ * 정의 : 명령줄의 동기화 정책 이름을 값으로 바꾸는 함수.
+ * 설명 : --appendfsync always|everysec|no 를 해석한다(Redis 와 같은 이름).
+ * 입력 : text : 이름, policy : 결과
+ * 출력 : 아는 이름이면 true
+ * 동작 :
+ *   1. 세 이름과 비교한다.
+ */
+bool persist_parse_policy(const char *text, FsyncPolicy *policy) {
+    static const char *names[] = {"always", "everysec", "no"};
+    for (int i = 0; i < 3; ++i) {
+        if (strcmp(text, names[i]) == 0) {
+            *policy = (FsyncPolicy)i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * 정의 : 동기화 정책 값을 이름으로 바꾸는 함수.
+ * 설명 : 로그에 실제로 쓴 정책을 남긴다.
+ * 입력 : policy : 정책
+ * 출력 : "always", "everysec", "no"
+ * 동작 :
+ *   1. 표에서 꺼낸다.
+ */
+const char *persist_policy_name(FsyncPolicy policy) {
+    static const char *names[] = {"always", "everysec", "no"};
+    return names[policy];
 }

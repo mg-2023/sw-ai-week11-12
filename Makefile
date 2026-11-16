@@ -32,8 +32,8 @@ $(UNIT): tests/test_store.c src/store.c src/store.h
 $(RESP_TEST): tests/test_resp.c src/resp.c src/resp.h src/store.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_resp.c src/resp.c
 
-$(PERSIST_TEST): tests/test_persist.c src/persist.c src/persist.h src/store.c src/store.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_persist.c src/persist.c src/store.c
+$(PERSIST_TEST): tests/test_persist.c src/persist.c src/persist.h src/store.c src/store.h src/resp.c src/resp.h src/commands.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_persist.c src/persist.c src/store.c src/resp.c
 
 test: $(UNIT) $(RESP_TEST) $(PERSIST_TEST)
 	./$(UNIT)

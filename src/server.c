@@ -8,7 +8,7 @@
  *   - 연결마다 응답이 다 나가야 다음 명령을 처리해 응답 순서를 지키고 버퍼를 한 개로 유지한다.
  *   - 주기(--expire-cycle-ms, 기본 100ms)마다 store_maintain 을 불러 만료 항목을 정리한다(주기 정리).
  *   - 시연 로그(--log) : 연결 ID, 명령 실행 순번, 명령과 키, 결과를 "응답을 출력 버퍼에 넣은 시점(EXEC)" 과 "소켓으로 다 보낸 시점(SENT)" 으로 나눠 기록한다.
- *   - 영속성(--snapshot) : 시작할 때 스냅샷 파일에서 복원하고, SAVE 명령이 오면 스냅샷을 저장한다.
+ *   - 영속성(--snapshot 또는 --aof) : 시작할 때 파일에서 복원하고, 상태를 바꾼 명령을 응답 전에 AOF 에 기록한다. AOF 기록이 실패하면 응답하지 않고 종료한다.
  *   - 맡지 않는 것 : RESP 바이트 해석(resp.c), 명령 의미(commands.c), 저장 구조(store.c), 파일 형식(persist.c), OS 소켓 차이(net.c)
  * 위치 : 프로그램의 최상위다. 아래 모듈을 모두 사용한다(net -> resp -> commands -> store, persist).
  */
@@ -58,7 +58,8 @@ typedef struct {
  * 서버 전체 상태(프로세스에 하나).
  * log : 시연 로그 출력 대상(NULL 이면 끔), started_ms : 로그 시각의 기준, next_client_id/exec_seq : 연결 ID · 실행 순번 발급기
  * current_client : 지금 실행 중인 명령의 연결 ID(조회 시 만료 로그용), command_ms/command_unix_ms : 지금 명령의 단조 · 벽시계 시각
- * expire_cycle_ms : 주기 정리 간격(0 이면 주기 정리 끔), snapshot_path : 스냅샷 경로(NULL 이면 끔), store : 저장소
+ * expire_cycle_ms : 주기 정리 간격(0 이면 주기 정리 끔), snapshot_path : 스냅샷 경로(NULL 이면 끔)
+ * aof/aof_enabled : AOF 상태, persistence_failed : AOF 기록 실패(응답하지 않고 종료해야 함), store : 저장소
  */
 typedef struct {
     FILE *log;
@@ -70,10 +71,13 @@ typedef struct {
     uint64_t command_unix_ms;
     uint64_t expire_cycle_ms;
     const char *snapshot_path;
+    Aof aof;
+    bool aof_enabled;
+    bool persistence_failed;
     Store *store;
 } Server;
 
-static Server server = {.expire_cycle_ms = MAINTENANCE_MS};
+static Server server = {.expire_cycle_ms = MAINTENANCE_MS, .aof = {.fd = -1}};
 
 /* 종료 신호를 받았는지 나타내는 플래그. 이벤트 루프가 매 반복 확인한다. */
 static volatile sig_atomic_t stopped;
@@ -194,6 +198,36 @@ static void log_expired(void *context, Bytes key, StoreExpireCause cause) {
 }
 
 /* ───────── 영속성 연결 ───────── */
+
+/*
+ * 정의 : 명령이 상태를 바꿀 때 불리는 기록 함수(CommandContext.record_change).
+ * 설명 : AOF 모드에서 바뀐 내용을 응답 전에 파일에 덧붙인다. 실패하면 persistence_failed 를 켜서 호출자가 응답하지 않고 서버를 멈추게 한다.
+ * 입력 : context : 사용하지 않음, change : 바뀐 내용
+ * 출력 : 없음
+ * 동작 :
+ *   1. AOF 가 꺼져 있거나 이미 실패했으면 끝낸다.
+ *   2. aof_append 하고 결과(바이트, fsync 여부와 정책)를 로그에 남긴다.
+ *   3. 실패하면 로그 · 표준 오류에 이유를 쓰고 persistence_failed 를 켠다.
+ */
+static void record_change(void *context, const Change *change) {
+    (void)context;
+    if (!server.aof_enabled || server.persistence_failed) {
+        return;
+    }
+    static const char *names[] = {"SET", "DEL", "PEXPIREAT"};
+    char key[LOG_PREVIEW * 4 + 64];
+    AofWrite written;
+    if (!aof_append(&server.aof, change, server.command_ms, server.command_unix_ms, &written)) {
+        server.persistence_failed = true;
+        log_line("AOF  #%" PRIu64 " %s %s FAILED: %s -> no reply, server stops", server.exec_seq, names[change->type],
+                 quote(change->key, key, sizeof(key)), server.aof.error);
+        fprintf(stderr, "AOF write failed (%s); stopping without replying\n", server.aof.error);
+        return;
+    }
+    log_line("AOF  #%" PRIu64 " append %s %s (%zu bytes, appendfsync=%s, %s)", server.exec_seq, names[change->type],
+             quote(change->key, key, sizeof(key)), written.bytes, persist_policy_name(server.aof.policy),
+             written.synced ? "fsync done before reply" : "fsync deferred");
+}
 
 /*
  * 정의 : SAVE 명령이 부르는 스냅샷 저장 함수(CommandContext.save_snapshot).
@@ -351,9 +385,14 @@ static bool process_input(Client *client, Store *store) {
     CommandContext context = {
         .store = store,
         .now_ms = server.command_ms,
+        .record_change = server.aof_enabled ? record_change : NULL,
         .save_snapshot = server.snapshot_path ? save_snapshot : NULL,
     };
     Reply reply = execute_command(&context, args, parser->count);
+    /* AOF 기록이 실패한 쓰기는 응답하지 않는다. 클라이언트는 연결 끊김으로 "결과 모름" 을 알게 된다. */
+    if (server.persistence_failed) {
+        return false;
+    }
     /* 다른 명령이 값을 바꾸거나 지우기 전에, 응답을 출력 버퍼로 복사(직렬화)해 둔다. 응답의 bytes 는 저장소 안을 가리키는 view 라서다. */
     if (!queue_reply(&client->output, reply)) {
         return false;
@@ -483,8 +522,8 @@ static void accept_client(Socket listener, Client *clients) {
  * 입력 : listener : 논블로킹 서버 소켓, store : 저장소
  * 출력 : 정상 종료(시그널)면 true, poll 오류나 서버 소켓 오류면 false
  * 동작 :
- *   1. 주기 정리가 켜져 있고 시각이 되면 store_maintain 을 실행하고, 지운 항목이 있으면 로그에 남긴다.
- *   2. 연결마다 process_input 으로 대기 중인 명령을 처리한다. 응답이 남았으면 POLLOUT, 아니면 POLLIN 을 감시한다.
+ *   1. 주기 정리가 켜져 있고 시각이 되면 store_maintain 을 실행하고, 지운 항목이 있으면 로그에 남긴다. everysec 이면 밀린 fsync 를 한다.
+ *   2. 연결마다 process_input 으로 대기 중인 명령을 처리한다. 응답이 남았으면 POLLOUT, 아니면 POLLIN 을 감시한다. AOF 기록이 실패했으면 루프를 멈춘다.
  *   3. 다음 주기 정리 시각까지를 대기 시간으로 net_poll 을 한다.
  *   4. 서버 소켓이 읽기 가능이면 접속을 받는다.
  *   5. 준비된 연결은 응답이 있으면 write_client, 없으면 read_client 를 하고 실패하면 닫는다.
@@ -513,6 +552,15 @@ static bool run_loop(Socket listener, Store *store) {
             }
             next_maintenance = now + server.expire_cycle_ms;
         }
+        bool synced;
+        if (server.aof_enabled && !aof_sync_if_due(&server.aof, now, &synced)) {
+            log_line("AOF  everysec fsync FAILED: %s -> server stops", server.aof.error);
+            fprintf(stderr, "AOF fsync failed (%s); stopping\n", server.aof.error);
+            success = false;
+            break;
+        } else if (server.aof_enabled && synced) {
+            log_line("AOF  everysec fsync done");
+        }
         size_t count = 1;
         fds[0] = (PollFd){.fd = listener, .events = POLLIN};
         for (size_t i = 0; i < MAX_CLIENTS; ++i) {
@@ -529,8 +577,14 @@ static bool run_loop(Socket listener, Store *store) {
             fds[count] = (PollFd){.fd = client->fd, .events = client->output.end ? POLLOUT : POLLIN};
             slots[count++] = i;
         }
+        /* AOF 기록이 실패했으면 다른 연결에 남은 응답도 보내지 않고 바로 멈춘다. */
+        if (server.persistence_failed) {
+            success = false;
+            break;
+        }
+
         now = net_now_ms();
-        /* 입력이 없어도 주기 정리 시각에 맞춰 깨어나도록 poll 대기 시간을 정한다. 주기 정리를 껐으면 1초마다 깬다. */
+        /* 입력이 없어도 주기 정리 시각(또는 everysec fsync)에 맞춰 깨어나도록 poll 대기 시간을 정한다. 주기 정리를 껐으면 1초마다 깬다. */
         uint64_t wake = server.expire_cycle_ms ? next_maintenance : now + 1000;
         int timeout = now >= wake ? 0 : (int)(wake - now);
         int ready = net_poll(fds, count, timeout);
@@ -576,18 +630,20 @@ static bool run_loop(Socket listener, Store *store) {
  * 입력 : argc/argv : 명령줄 인자(아래 Usage 문자열 참고)
  * 출력 : 정상 종료면 EXIT_SUCCESS, 옵션 오류나 시작 · 실행 실패면 EXIT_FAILURE
  * 동작 :
- *   1. 옵션을 해석한다. 잘못되면 사용법을 출력하고 종료한다.
+ *   1. 옵션을 해석한다. 잘못되거나 --snapshot 과 --aof 를 함께 주면 사용법을 출력하고 종료한다.
  *   2. 로그 출력 대상을 열고 store_init 을 한 뒤 만료 알림 함수를 등록한다.
- *   3. --snapshot 이면 스냅샷에서 복원한다. 파일이 깨졌으면 시작하지 않는다. 복원 결과는 표준 오류와 로그에 쓴다.
+ *   3. 스냅샷 또는 AOF 에서 복원한다. 파일이 깨졌으면 시작하지 않는다. 복원 결과는 표준 오류와 로그에 쓴다.
  *   4. net_init, net_listen 으로 서버 소켓을 열고 논블로킹으로 바꾼다(포트 0 이면 실제 포트로 갱신).
  *   5. 종료 시그널 핸들러를 등록하고 수신 주소를 출력한다(시험 코드가 읽는 첫 줄이라 형식을 바꾸지 않는다).
  *   6. run_loop 를 실행한다.
- *   7. 서버 소켓, 네트워크, 저장소, 로그를 정리하고 결과를 돌려준다.
+ *   7. AOF, 서버 소켓, 네트워크, 저장소, 로그를 정리하고 결과를 돌려준다.
  */
 int main(int argc, char **argv) {
     const char *address = "127.0.0.1";
     uint16_t port = 6379;
     const char *log_path = NULL;
+    const char *aof_path = NULL;
+    FsyncPolicy policy = FSYNC_EVERYSEC;
     bool usage_error = false;
     for (int i = 1; i < argc && !usage_error; ++i) {
         bool has_value = i + 1 < argc;
@@ -600,10 +656,17 @@ int main(int argc, char **argv) {
             log_path = argv[++i];
         } else if (strcmp(argv[i], "--snapshot") == 0 && has_value) {
             server.snapshot_path = argv[++i];
+        } else if (strcmp(argv[i], "--aof") == 0 && has_value) {
+            aof_path = argv[++i];
+        } else if (strcmp(argv[i], "--appendfsync") == 0 && has_value && persist_parse_policy(argv[i + 1], &policy)) {
+            ++i;
         } else if (has_value && resp_integer((Bytes){argv[i + 1], strlen(argv[i + 1])}, &number) && number >= 0 &&
-                   (strcmp(argv[i], "--expire-cycle-ms") == 0 || strcmp(argv[i], "--debug-snapshot-crash-after") == 0)) {
+                   (strcmp(argv[i], "--expire-cycle-ms") == 0 || strcmp(argv[i], "--debug-aof-fail-at") == 0 ||
+                    strcmp(argv[i], "--debug-snapshot-crash-after") == 0)) {
             if (strcmp(argv[i], "--expire-cycle-ms") == 0) {
                 server.expire_cycle_ms = (uint64_t)number;
+            } else if (strcmp(argv[i], "--debug-aof-fail-at") == 0) {
+                server.aof.fail_at = (uint64_t)number;
             } else {
                 snapshot_crash_after_entries = (size_t)number;
             }
@@ -612,10 +675,11 @@ int main(int argc, char **argv) {
             usage_error = true;
         }
     }
-    if (usage_error) {
+    if (usage_error || (server.snapshot_path && aof_path)) {
         fprintf(stderr,
                 "Usage: %s [--bind IPv4] [--port PORT] [--log FILE|-] [--expire-cycle-ms MS(0=off)]\n"
-                "          [--snapshot FILE] [--debug-snapshot-crash-after N]\n",
+                "          [--snapshot FILE | --aof FILE [--appendfsync always|everysec|no]]\n"
+                "          [--debug-aof-fail-at N] [--debug-snapshot-crash-after N]\n",
                 argv[0]);
         return EXIT_FAILURE;
     }
@@ -636,16 +700,27 @@ int main(int argc, char **argv) {
     store.on_expire = log_expired;
     server.store = &store;
 
+    LoadReport report = {0};
+    bool loaded = true;
+    const char *mode = NULL;
     if (server.snapshot_path) {
-        LoadReport report = {0};
-        bool loaded = snapshot_load(&store, server.snapshot_path, net_now_ms(), net_unix_ms(), &report);
+        mode = "snapshot";
+        loaded = snapshot_load(&store, server.snapshot_path, net_now_ms(), net_unix_ms(), &report);
+    } else if (aof_path) {
+        mode = "aof";
+        loaded = aof_open(&server.aof, aof_path, policy, &store, net_now_ms(), net_unix_ms(), &report);
+        server.aof_enabled = loaded;
+    }
+    if (mode) {
         char summary[320];
         if (loaded) {
             snprintf(summary, sizeof(summary),
-                     "LOAD snapshot %s: %zu keys applied, %zu skipped as expired during downtime", server.snapshot_path,
-                     report.loaded, report.skipped_expired);
+                     "LOAD %s %s: %zu %s applied, %zu skipped as expired during downtime, %zu bytes of incomplete tail truncated%s%s",
+                     mode, server.snapshot_path ? server.snapshot_path : aof_path, report.loaded,
+                     server.snapshot_path ? "keys" : "records", report.skipped_expired, report.truncated_bytes,
+                     aof_path ? ", appendfsync=" : "", aof_path ? persist_policy_name(policy) : "");
         } else {
-            snprintf(summary, sizeof(summary), "LOAD snapshot FAILED: %s", report.error);
+            snprintf(summary, sizeof(summary), "LOAD %s FAILED: %s", mode, report.error);
         }
         fprintf(stderr, "%s\n", summary);
         log_line("%s", summary);
@@ -671,6 +746,7 @@ int main(int argc, char **argv) {
     if (listener != INVALID_FD) {
         net_close(listener);
     }
+    aof_close(&server.aof);
     net_cleanup();
     store_destroy(&store);
     if (!success) {

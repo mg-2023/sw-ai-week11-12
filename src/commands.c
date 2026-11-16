@@ -5,7 +5,8 @@
  * 책임 :
  *   - 인자 개수와 형식을 검사하고 Redis 와 같은 형태의 오류 응답을 만든다.
  *   - 저장소 호출에 현재 시각(now_ms)을 넘겨 만료 판정을 한 명령 안에서 같은 기준으로 한다.
- *   - 맡지 않는 것 : 소켓 입출력, 바이트 직렬화, 시계 읽기, 해시 테이블 내부 동작, 파일 입출력(스냅샷 저장은 함수를 받아 부른다)
+ *   - 저장소를 실제로 바꾼 경우에만 record_change 로 Change 를 알린다(AOF 기록용). 바꾸지 못한 명령(없는 키 DEL 등)은 알리지 않는다.
+ *   - 맡지 않는 것 : 소켓 입출력, 바이트 직렬화, 시계 읽기, 해시 테이블 내부 동작, 파일 입출력
  * 위치 : server.c 가 요청 하나를 파싱할 때마다 execute_command 를 한 번 부른다. 이벤트 루프가 단일 스레드라 한 명령은 끝까지 실행되며 중간에 다른 명령이 끼지 않는다(명령 단위 원자성).
  */
 
@@ -52,6 +53,22 @@ static Reply bulk_reply(Bytes value) {
 }
 
 /*
+ * 정의 : 저장소를 바꾼 내용을 기록 함수에 알리는 함수.
+ * 설명 : AOF 는 상태를 바꾼 연산만 실행 순서대로 남긴다. 기록 함수가 없으면(영속성 꺼짐, AOF 아닌 모드) 아무것도 하지 않는다.
+ * 입력 : context : 명령 실행 문맥, type/key/value/deadline_ms : 바뀐 내용
+ * 출력 : 없음
+ * 동작 :
+ *   1. record_change 가 없으면 끝낸다.
+ *   2. Change 를 채워 record_change 를 부른다.
+ */
+static void record(const CommandContext *context, ChangeType type, Bytes key, Bytes value, uint64_t deadline_ms) {
+    if (context->record_change) {
+        Change change = {.type = type, .key = key, .value = value, .deadline_ms = deadline_ms};
+        context->record_change(context->hook_context, &change);
+    }
+}
+
+/*
  * 정의 : TTL 인자(상대 시간)를 만료 시각(절대 ms)으로 바꾸는 함수.
  * 설명 : SET EX/PX 와 EXPIRE/PEXPIRE 가 공유한다. 저장소는 절대 시각만 알고 비교하므로 명령 시점에 "지금 + TTL" 을 계산해 넘긴다.
  * 입력 : argument : TTL 문자열, now_ms : 현재 시각, unit : 단위(초면 1000, 밀리초면 1), allow_immediate : 0 이하 TTL 을 허용할지, result : 결과를 받을 곳
@@ -82,13 +99,13 @@ static bool deadline(Bytes argument, uint64_t now_ms, uint64_t unit,
 /*
  * 정의 : SET key value [EX 초 | PX 밀리초] 를 실행하는 함수.
  * 설명 : 캐시 어사이드에서 캐시를 채우는 명령이다. EX/PX 로 TTL 을 같이 걸어 두면 일정 시간 뒤 항목이 만료되어 낡은 캐시가 자동으로 무효화된다. 같은 키에 다시 SET 하면 값과 TTL 이 모두 새로 바뀐다.
- * 입력 : context : 명령 실행 문맥(저장소, 현재 시각), args/count : 명령 인자(args[0] 은 SET)
+ * 입력 : context : 명령 실행 문맥(저장소, 현재 시각, 기록 함수), args/count : 명령 인자(args[0] 은 SET)
  * 출력 : 성공이면 +OK, 인자 오류 · 옵션 오류 · 메모리 부족이면 해당 오류 응답
  * 동작 :
  *   1. 인자가 5개면 args[3] 이 EX 인지 PX 인지 확인하고 TTL 을 만료 시각으로 바꾼다.
  *   2. 인자가 3개가 아니면 인자 개수 오류.
  *   3. store_set 으로 저장한다(만료 시각 0 이면 TTL 없음).
- *   4. 저장에 실패하면 OOM 오류, 성공하면 +OK.
+ *   4. 저장에 실패하면 OOM 오류. 성공하면 SET 변경을 기록하고 +OK.
  */
 static Reply command_set(const CommandContext *context, const Bytes *args, size_t count) {
     Store *store = context->store;
@@ -108,21 +125,23 @@ static Reply command_set(const CommandContext *context, const Bytes *args, size_
     if (!store_set(store, args[1], args[2], expires_at)) {
         return reply_text("-OOM unable to allocate key/value\r\n");
     }
+    record(context, CHANGE_SET, args[1], args[2], expires_at);
     return reply_text("+OK\r\n");
 }
 
 /*
  * 정의 : 명령 하나를 이름으로 골라 실행하고 응답 값을 돌려주는 함수.
  * 설명 : 서버가 요청을 한 개씩 순서대로 처리하는 진입점이다. 단일 스레드 이벤트 루프에서 이 함수가 끝나야 다음 명령이 시작되므로 락 없이도 명령이 원자적이다. 응답의 bytes 는 저장소 값을 가리킬 수 있어서 호출자가 다음 명령 전에 직렬화해야 한다.
- * 입력 : context : 명령 실행 문맥(저장소, 현재 시각, 스냅샷 함수), args/count : 명령 이름과 인자(count 는 1 이상)
+ * 입력 : context : 명령 실행 문맥(저장소, 현재 시각, 기록 · 스냅샷 함수), args/count : 명령 이름과 인자(count 는 1 이상)
  * 출력 : Reply(상태, 오류, nil, 정수, bulk 중 하나)
  * 동작 :
  *   1. args[0] 을 대소문자 구분 없이 명령 이름과 비교한다.
  *   2. 명령별로 인자 개수를 검사하고 형식이 틀리면 오류 응답을 돌려준다.
  *   3. 저장소 함수를 호출하고 결과를 응답으로 바꾼다(GET 은 없으면 nil, DEL 은 지운 개수, EXPIRE 는 1 또는 0, PTTL 은 남은 ms 또는 -1, -2).
- *   4. PING 은 인자가 없으면 +PONG, 하나면 그 인자를 그대로 돌려준다.
- *   5. SAVE 는 스냅샷 함수가 있으면 불러 성공 시 +OK, 실패 시 오류, 없으면 꺼짐 오류.
- *   6. 알 수 없는 이름이면 unknown command 오류.
+ *   4. 실제로 바뀐 경우에만 변경을 기록한다(DEL 은 지운 키마다, EXPIRE 는 성공했을 때 즉시 삭제면 DEL, 아니면 EXPIRE).
+ *   5. PING 은 인자가 없으면 +PONG, 하나면 그 인자를 그대로 돌려준다.
+ *   6. SAVE 는 스냅샷 함수가 있으면 불러 성공 시 +OK, 실패 시 오류, 없으면 꺼짐 오류.
+ *   7. 알 수 없는 이름이면 unknown command 오류.
  */
 Reply execute_command(const CommandContext *context, const Bytes *args, size_t count) {
     Store *store = context->store;
@@ -145,7 +164,10 @@ Reply execute_command(const CommandContext *context, const Bytes *args, size_t c
         int64_t removed = 0;
         for (size_t i = 1; i < count; ++i) {
             /* 여러 키를 한 번에 지우고, 실제로 지워진 개수만 센다. */
-            removed += store_delete(store, args[i], now_ms);
+            if (store_delete(store, args[i], now_ms)) {
+                ++removed;
+                record(context, CHANGE_DEL, args[i], (Bytes){0}, 0);
+            }
         }
         return integer_reply(removed);
     }
@@ -158,7 +180,12 @@ Reply execute_command(const CommandContext *context, const Bytes *args, size_t c
         if (!deadline(args[2], now_ms, unit, true, &expires_at)) {
             return reply_text("-ERR value is not an integer or out of range\r\n");
         }
-        return integer_reply(store_expire_at(store, args[1], now_ms, expires_at));
+        bool changed = store_expire_at(store, args[1], now_ms, expires_at);
+        if (changed) {
+            /* 0 이하 TTL 은 즉시 삭제됐으므로 DEL 로, 아니면 새 만료 시각으로 기록한다. */
+            record(context, expires_at <= now_ms ? CHANGE_DEL : CHANGE_EXPIRE, args[1], (Bytes){0}, expires_at);
+        }
+        return integer_reply(changed);
     }
     if (resp_equals(args[0], "PTTL")) {
         if (count != 2) {
