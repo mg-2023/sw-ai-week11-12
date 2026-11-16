@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mini-redis</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <h1>mini-redis</h1>
+    <p class="sub">SET / GET / DEL / EXISTS 테스트 페이지 · API 문서는 <a href="/docs">/docs</a></p>
+
+    <!-- SET key value [EX ttl] [NX|XX] -->
+    <section>
+      <h2><code>SET</code> 값 저장</h2>
+      <form id="set-form">
+        <div class="row">
+          <input type="text" name="key" placeholder="key" required>
+          <input type="text" name="value" placeholder="value" required>
+        </div>
+        <div class="row">
+          <input type="number" name="ttl" placeholder="TTL(초)" min="1" step="1">
+          <label class="opt"><input type="checkbox" name="nx"> NX (없을 때만)</label>
+          <label class="opt"><input type="checkbox" name="xx"> XX (있을 때만)</label>
+          <button type="submit">SET</button>
+        </div>
+      </form>
+      <div class="result" id="set-result"></div>
+    </section>
+
+    <!-- GET key -->
+    <section>
+      <h2><code>GET</code> 값 조회</h2>
+      <form id="get-form" class="row">
+        <input type="text" name="key" placeholder="key" required>
+        <button type="submit">GET</button>
+      </form>
+      <div class="result" id="get-result"></div>
+    </section>
+
+    <!-- DEL key -->
+    <section>
+      <h2><code>DEL</code> 키 삭제</h2>
+      <form id="del-form" class="row">
+        <input type="text" name="key" placeholder="key" required>
+        <button type="submit">DEL</button>
+      </form>
+      <div class="result" id="del-result"></div>
+    </section>
+
+    <!-- EXISTS key -->
+    <section>
+      <h2><code>EXISTS</code> 존재 확인</h2>
+      <form id="exists-form" class="row">
+        <input type="text" name="key" placeholder="key" required>
+        <button type="submit">EXISTS</button>
+      </form>
+      <div class="result" id="exists-result"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -17,6 +17,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictInt
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 # store.py가 `from hashtable import ...`로 import하므로 app/ 폴더를 import 경로에 넣는다.
 # 이렇게 하면 app/ 안에서 실행하든 루트에서 `app.main:app`으로 실행하든 동작한다.
@@ -164,6 +169,13 @@ def create_app(store: RedisStore | None = None) -> FastAPI:
     def flushall():
         store.flushall()
         return {"ok": True}
+
+    # ---------------- html 라우팅 / js, css 마운트 ----------------
+    @app.get("/", include_in_schema=False)   # /docs 목록에서는 숨김
+    def index():
+        return FileResponse(os.path.join(BASE_DIR, "static", "index.html"))
+
+    app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
     return app
 
