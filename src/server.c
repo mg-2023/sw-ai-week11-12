@@ -6,7 +6,8 @@
  *   - 연결 수락, 연결별 입력 · 출력 버퍼 관리, 요청 파싱 호출, 응답 직렬화, 종료 신호 처리를 맡는다.
  *   - poll 한 번으로 서버 소켓과 모든 클라이언트를 감시한다. 스레드를 쓰지 않으므로 명령은 한 번에 하나씩, 끝까지 실행된다(명령 단위 원자성).
  *   - 연결마다 응답이 다 나가야 다음 명령을 처리해 응답 순서를 지키고 버퍼를 한 개로 유지한다.
- *   - 주기(MAINTENANCE_MS)마다 store_maintain 을 불러 만료 항목을 정리한다(주기 정리).
+ *   - 주기(--expire-cycle-ms, 기본 100ms)마다 store_maintain 을 불러 만료 항목을 정리한다(주기 정리).
+ *   - 시연 로그(--log) : 연결 ID, 명령 실행 순번, 명령과 키, 결과를 "응답을 출력 버퍼에 넣은 시점(EXEC)" 과 "소켓으로 다 보낸 시점(SENT)" 으로 나눠 기록한다.
  *   - 맡지 않는 것 : RESP 바이트 해석(resp.c), 명령 의미(commands.c), 저장 구조(store.c), OS 소켓 차이(net.c)
  * 위치 : 프로그램의 최상위다. 아래 모듈을 모두 사용한다(net -> resp -> commands -> store).
  */
@@ -17,12 +18,13 @@
 
 #include <inttypes.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* MAX_CLIENTS : 동시 접속 상한, IO_CHUNK : 한 번에 읽고 쓰는 단위 겸 버퍼 기본 크기, MAINTENANCE_MS : 주기 정리 간격(ms) */
-enum { MAX_CLIENTS = 256, IO_CHUNK = 16384, MAINTENANCE_MS = 100 };
+/* MAX_CLIENTS : 동시 접속 상한, IO_CHUNK : 한 번에 읽고 쓰는 단위 겸 버퍼 기본 크기, MAINTENANCE_MS : 주기 정리 기본 간격(ms), LOG_PREVIEW : 로그에 보일 인자 · 값 최대 바이트 */
+enum { MAX_CLIENTS = 256, IO_CHUNK = 16384, MAINTENANCE_MS = 100, LOG_PREVIEW = 48 };
 
 /*
  * 바이트 버퍼. 유효한 데이터는 data[begin, end) 구간이고, capacity 는 할당된 크기다.
@@ -38,6 +40,7 @@ typedef struct {
  * 클라이언트 연결 하나의 상태.
  * input : 아직 처리하지 않은 받은 바이트, output : 보내야 할 응답(한 번에 응답 하나만 담음)
  * parser : 입력 파싱 진행 상태, close_after_reply : 오류 응답을 다 보낸 뒤 연결을 닫을지
+ * id : 접속 순서대로 붙는 연결 ID(1부터, 슬롯 번호와 다름), reply_seq : 출력 버퍼에 든 응답을 만든 명령의 실행 순번(0 이면 명령이 아닌 프레임 오류 응답)
  */
 typedef struct {
     Socket fd;
@@ -45,7 +48,27 @@ typedef struct {
     Buffer output;
     RespParser parser;
     bool close_after_reply;
+    uint64_t id;
+    uint64_t reply_seq;
 } Client;
+
+/*
+ * 서버 전체 상태(프로세스에 하나).
+ * log : 시연 로그 출력 대상(NULL 이면 끔), started_ms : 로그 시각의 기준, next_client_id/exec_seq : 연결 ID · 실행 순번 발급기
+ * current_client : 지금 실행 중인 명령의 연결 ID(조회 시 만료 로그용), command_ms : 지금 명령의 단조 시각
+ * expire_cycle_ms : 주기 정리 간격(0 이면 주기 정리 끔)
+ */
+typedef struct {
+    FILE *log;
+    uint64_t started_ms;
+    uint64_t next_client_id;
+    uint64_t exec_seq;
+    uint64_t current_client;
+    uint64_t command_ms;
+    uint64_t expire_cycle_ms;
+} Server;
+
+static Server server = {.expire_cycle_ms = MAINTENANCE_MS};
 
 /* 종료 신호를 받았는지 나타내는 플래그. 이벤트 루프가 매 반복 확인한다. */
 static volatile sig_atomic_t stopped;
@@ -61,6 +84,108 @@ static volatile sig_atomic_t stopped;
 static void stop_server(int signal_number) {
     (void)signal_number;
     stopped = 1;
+}
+
+/* ───────── 시연 로그 ───────── */
+
+/*
+ * 정의 : 시연 로그에 한 줄을 쓰는 함수.
+ * 설명 : 줄 앞에 서버 시작부터 지난 ms 를 붙여 사건의 순서와 간격을 보이게 한다. 줄마다 flush 해서 강제 종료 직전 줄도 파일에 남긴다. 로그가 꺼져 있으면 아무것도 하지 않는다.
+ * 입력 : format/... : printf 형식
+ * 출력 : 없음
+ * 동작 :
+ *   1. log 가 NULL 이면 끝낸다.
+ *   2. "[+경과ms] " 머리, 본문, 줄바꿈을 쓰고 flush 한다.
+ */
+static void log_line(const char *format, ...) {
+    if (!server.log) {
+        return;
+    }
+    fprintf(server.log, "[+%7" PRIu64 "ms] ", net_now_ms() - server.started_ms);
+    va_list args;
+    va_start(args, format);
+    vfprintf(server.log, format, args);
+    va_end(args);
+    fputc('\n', server.log);
+    fflush(server.log);
+}
+
+/*
+ * 정의 : 바이트열을 로그용 따옴표 문자열로 바꾸는 함수.
+ * 설명 : 키 · 값에는 줄바꿈이나 NUL 같은 바이트가 들어갈 수 있다. 출력 가능한 ASCII 는 그대로(따옴표와 역슬래시는 앞에 \ 를 붙임), 나머지는 \xNN 으로 바꾸고, 길면 앞부분만 보이고 남은 길이를 적는다.
+ * 입력 : bytes : 바꿀 바이트열, out/size : 결과 버퍼
+ * 출력 : out(널 종료)
+ * 동작 :
+ *   1. 여는 따옴표를 쓴다.
+ *   2. LOG_PREVIEW 바이트까지 한 바이트씩 바꿔 쓴다.
+ *   3. 닫는 따옴표와, 잘랐으면 "...(+N bytes)" 를 붙인다.
+ */
+static const char *quote(Bytes bytes, char *out, size_t size) {
+    size_t used = 0;
+    out[used++] = '"';
+    size_t shown = bytes.length < LOG_PREVIEW ? bytes.length : LOG_PREVIEW;
+    for (size_t i = 0; i < shown && used + 6 < size; ++i) {
+        unsigned char c = (unsigned char)bytes.data[i];
+        if (c == '"' || c == '\\') {
+            out[used++] = '\\';
+            out[used++] = (char)c;
+        } else if (c >= 0x20 && c < 0x7f) {
+            out[used++] = (char)c;
+        } else {
+            used += (size_t)snprintf(out + used, size - used, "\\x%02x", c);
+        }
+    }
+    out[used++] = '"';
+    out[used] = '\0';
+    if (shown < bytes.length) {
+        snprintf(out + used, size - used, "...(+%zu bytes)", bytes.length - shown);
+    }
+    return out;
+}
+
+/*
+ * 정의 : 응답 값을 redis-cli 와 비슷한 글자로 바꾸는 함수.
+ * 설명 : 로그에서 "어떤 명령이 무엇을 돌려줬는지" 를 바로 읽게 한다. nil, 정수, 오류, 문자열을 구분한다.
+ * 입력 : reply : 응답, out/size : 결과 버퍼
+ * 출력 : out
+ * 동작 :
+ *   1. 정수는 "(integer) N", bulk 는 따옴표 문자열.
+ *   2. TEXT 중 "$-1" 은 "(nil)", "-" 로 시작하면 "(error) ...", "+" 면 그 뒤 글자.
+ */
+static const char *describe_reply(Reply reply, char *out, size_t size) {
+    if (reply.type == REPLY_INTEGER) {
+        snprintf(out, size, "(integer) %" PRId64, reply.number);
+    } else if (reply.type == REPLY_BULK) {
+        quote(reply.bytes, out, size);
+    } else {
+        Bytes text = reply.bytes;
+        text.length = text.length >= 2 ? text.length - 2 : 0; /* 끝 CRLF 제외 */
+        if (text.length == 3 && memcmp(text.data, "$-1", 3) == 0) {
+            snprintf(out, size, "(nil)");
+        } else {
+            snprintf(out, size, "%s%.*s", text.data[0] == '-' ? "(error) " : "", (int)(text.length - 1), text.data + 1);
+        }
+    }
+    return out;
+}
+
+/*
+ * 정의 : 저장소가 만료 항목을 지울 때 불리는 알림 함수(store.on_expire).
+ * 설명 : 조회 시 만료와 주기 정리를 로그에서 구분한다. 조회 시 만료는 어떤 명령(실행 순번 · 연결) 안에서 일어났는지도 남긴다.
+ * 입력 : context : 사용하지 않음, key : 지울 키, cause : 지우는 경로
+ * 출력 : 없음
+ * 동작 :
+ *   1. 조회 시 만료면 "EXPIRE on-access" 와 지금 명령의 순번 · 연결을, 주기 정리면 "EXPIRE by-cycle" 을 쓴다.
+ */
+static void log_expired(void *context, Bytes key, StoreExpireCause cause) {
+    (void)context;
+    char text[LOG_PREVIEW * 4 + 64];
+    if (cause == STORE_EXPIRED_ON_ACCESS) {
+        log_line("EXPIRE on-access key=%s (found expired inside #%" PRIu64 " conn=%" PRIu64 ", removed)",
+                 quote(key, text, sizeof(text)), server.exec_seq, server.current_client);
+    } else {
+        log_line("EXPIRE by-cycle  key=%s (nobody read it, removed by active expiry)", quote(key, text, sizeof(text)));
+    }
 }
 
 /*
@@ -145,6 +270,7 @@ static bool queue_reply(Buffer *output, Reply reply) {
  *   3. 연결 구조체를 fd 가 INVALID_FD 인 빈 상태로 되돌린다.
  */
 static void close_client(Client *client) {
+    log_line("CONN conn=%" PRIu64 " closed", client->id);
     net_close(client->fd);
     free(client->input.data);
     free(client->output.data);
@@ -187,9 +313,25 @@ static bool process_input(Client *client, Store *store) {
     for (size_t i = 0; i < parser->count; ++i) {
         args[i] = (Bytes){data + parser->start[i], parser->length[i]};
     }
+    /* 실행 순번은 실제로 실행한 순서다. 도착 순서가 아니라 이 줄에 닿은 순서로 매긴다. */
+    server.current_client = client->id;
+    server.exec_seq++;
+    server.command_ms = net_now_ms();
+    Reply reply = execute_command(store, args, parser->count, server.command_ms);
     /* 다른 명령이 값을 바꾸거나 지우기 전에, 응답을 출력 버퍼로 복사(직렬화)해 둔다. 응답의 bytes 는 저장소 안을 가리키는 view 라서다. */
-    if (!queue_reply(&client->output, execute_command(store, args, parser->count, net_now_ms()))) {
+    if (!queue_reply(&client->output, reply)) {
         return false;
+    }
+    client->reply_seq = server.exec_seq;
+    if (server.log) {
+        char line[(RESP_MAX_ARGS + 1) * (LOG_PREVIEW * 4 + 32)];
+        char piece[LOG_PREVIEW * 4 + 32];
+        size_t used = (size_t)snprintf(line, sizeof(line), "%.*s", (int)(args[0].length < 16 ? args[0].length : 16), args[0].data);
+        for (size_t i = 1; i < parser->count && used < sizeof(line); ++i) {
+            used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", quote(args[i], piece, sizeof(piece)));
+        }
+        log_line("EXEC #%" PRIu64 " conn=%" PRIu64 " %s -> %s | reply queued in output buffer (%zu bytes)", server.exec_seq,
+                 client->id, line, describe_reply(reply, piece, sizeof(piece)), client->output.end);
     }
     /* 응답을 복사한 뒤에야 이 명령이 쓴 입력 바이트를 소비한다. */
     input->begin += parser->offset;
@@ -259,6 +401,7 @@ static bool write_client(Client *client) {
     if (output->begin != output->end) {
         return true;
     }
+    log_line("SENT #%" PRIu64 " conn=%" PRIu64 " %zu bytes written to socket", client->reply_seq, client->id, output->end);
     output->begin = output->end = 0;
     if (output->capacity > 4 * IO_CHUNK) {
         free(output->data);
@@ -287,6 +430,8 @@ static void accept_client(Socket listener, Client *clients) {
         for (size_t i = 0; i < MAX_CLIENTS; ++i) {
             if (clients[i].fd == INVALID_FD) {
                 clients[i].fd = fd;
+                clients[i].id = ++server.next_client_id;
+                log_line("CONN conn=%" PRIu64 " opened (slot %zu)", clients[i].id, i);
                 return;
             }
         }
@@ -302,7 +447,7 @@ static void accept_client(Socket listener, Client *clients) {
  * 입력 : listener : 논블로킹 서버 소켓, store : 저장소
  * 출력 : 정상 종료(시그널)면 true, poll 오류나 서버 소켓 오류면 false
  * 동작 :
- *   1. 주기 정리 시각이 되면 store_maintain 을 실행한다.
+ *   1. 주기 정리가 켜져 있고 시각이 되면 store_maintain 을 실행하고, 지운 항목이 있으면 로그에 남긴다.
  *   2. 연결마다 process_input 으로 대기 중인 명령을 처리한다. 응답이 남았으면 POLLOUT, 아니면 POLLIN 을 감시한다.
  *   3. 다음 주기 정리 시각까지를 대기 시간으로 net_poll 을 한다.
  *   4. 서버 소켓이 읽기 가능이면 접속을 받는다.
@@ -322,10 +467,15 @@ static bool run_loop(Socket listener, Store *store) {
     uint64_t next_maintenance = net_now_ms();
     while (!stopped) {
         uint64_t now = net_now_ms();
-        if (now >= next_maintenance) {
-            /* 주기 정리(active expiration): 아무도 읽지 않는 만료 키도 이 호출로 지워진다. */
-            store_maintain(store, now);
-            next_maintenance = now + MAINTENANCE_MS;
+        if (server.expire_cycle_ms && now >= next_maintenance) {
+            /* 주기 정리(active expiration): 아무도 읽지 않는 만료 키도 이 호출로 지워진다. 커서에서부터 최대 32개만 검사한다. */
+            size_t before = store->expiring;
+            StoreCycle cycle = store_maintain(store, now);
+            if (cycle.removed) {
+                log_line("CYCLE checked %zu of %zu TTL keys from cursor (limit 32), removed %zu", cycle.checked, before,
+                         cycle.removed);
+            }
+            next_maintenance = now + server.expire_cycle_ms;
         }
         size_t count = 1;
         fds[0] = (PollFd){.fd = listener, .events = POLLIN};
@@ -343,10 +493,10 @@ static bool run_loop(Socket listener, Store *store) {
             fds[count] = (PollFd){.fd = client->fd, .events = client->output.end ? POLLOUT : POLLIN};
             slots[count++] = i;
         }
-
         now = net_now_ms();
-        /* 입력이 없어도 주기 정리 시각에 맞춰 깨어나도록 poll 대기 시간을 남은 시간으로 둔다. */
-        int timeout = now >= next_maintenance ? 0 : (int)(next_maintenance - now);
+        /* 입력이 없어도 주기 정리 시각에 맞춰 깨어나도록 poll 대기 시간을 정한다. 주기 정리를 껐으면 1초마다 깬다. */
+        uint64_t wake = server.expire_cycle_ms ? next_maintenance : now + 1000;
+        int timeout = now >= wake ? 0 : (int)(wake - now);
         int ready = net_poll(fds, count, timeout);
         if (ready < 0) {
             if (stopped || net_retryable()) {
@@ -387,35 +537,58 @@ static bool run_loop(Socket listener, Store *store) {
 /*
  * 정의 : 서버를 설정하고 실행하는 프로그램 진입점.
  * 설명 : 명령줄 옵션을 읽고, 저장소와 네트워크를 준비한 뒤 이벤트 루프를 돌리고, 끝나면 자원을 순서대로 정리한다.
- * 입력 : argc/argv : 명령줄 인자(--bind IPv4, --port 포트)
+ * 입력 : argc/argv : 명령줄 인자(아래 Usage 문자열 참고)
  * 출력 : 정상 종료면 EXIT_SUCCESS, 옵션 오류나 시작 · 실행 실패면 EXIT_FAILURE
  * 동작 :
- *   1. --bind, --port 옵션을 해석한다. 잘못되면 사용법을 출력하고 종료한다.
- *   2. store_init 과 net_init 을 한다.
- *   3. net_listen 으로 서버 소켓을 열고 논블로킹으로 바꾼다(포트 0 이면 실제 포트로 갱신).
- *   4. 종료 시그널 핸들러를 등록하고 수신 주소를 출력한다.
+ *   1. 옵션을 해석한다. 잘못되면 사용법을 출력하고 종료한다.
+ *   2. 로그 출력 대상을 열고 store_init 을 한 뒤 만료 알림 함수를 등록한다.
+ *   3. net_init, net_listen 으로 서버 소켓을 열고 논블로킹으로 바꾼다(포트 0 이면 실제 포트로 갱신).
+ *   4. 종료 시그널 핸들러를 등록하고 수신 주소를 출력한다(시험 코드가 읽는 첫 줄이라 형식을 바꾸지 않는다).
  *   5. run_loop 를 실행한다.
- *   6. 서버 소켓, 네트워크, 저장소를 정리하고 결과를 돌려준다.
+ *   6. 서버 소켓, 네트워크, 저장소, 로그를 정리하고 결과를 돌려준다.
  */
 int main(int argc, char **argv) {
     const char *address = "127.0.0.1";
     uint16_t port = 6379;
-    for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
+    const char *log_path = NULL;
+    bool usage_error = false;
+    for (int i = 1; i < argc && !usage_error; ++i) {
+        bool has_value = i + 1 < argc;
+        int64_t number = 0;
+        if (strcmp(argv[i], "--bind") == 0 && has_value) {
             address = argv[++i];
-        } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc && net_parse_port(argv[i + 1], &port)) {
+        } else if (strcmp(argv[i], "--port") == 0 && has_value && net_parse_port(argv[i + 1], &port)) {
+            ++i;
+        } else if (strcmp(argv[i], "--log") == 0 && has_value) {
+            log_path = argv[++i];
+        } else if (strcmp(argv[i], "--expire-cycle-ms") == 0 && has_value &&
+                   resp_integer((Bytes){argv[i + 1], strlen(argv[i + 1])}, &number) && number >= 0) {
+            server.expire_cycle_ms = (uint64_t)number;
             ++i;
         } else {
-            fprintf(stderr, "Usage: %s [--bind IPv4] [--port PORT]\n", argv[0]);
+            usage_error = true;
+        }
+    }
+    if (usage_error) {
+        fprintf(stderr, "Usage: %s [--bind IPv4] [--port PORT] [--log FILE|-] [--expire-cycle-ms MS(0=off)]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    server.started_ms = net_now_ms();
+    if (log_path) {
+        server.log = strcmp(log_path, "-") == 0 ? stderr : fopen(log_path, "w");
+        if (!server.log) {
+            fprintf(stderr, "Could not open log file %s\n", log_path);
             return EXIT_FAILURE;
         }
     }
-
     Store store;
     if (!store_init(&store)) {
         fputs("Could not initialize storage\n", stderr);
         return EXIT_FAILURE;
     }
+    store.on_expire = log_expired;
+
     if (!net_init()) {
         fputs("Could not initialize networking\n", stderr);
         store_destroy(&store);
@@ -437,6 +610,9 @@ int main(int argc, char **argv) {
     store_destroy(&store);
     if (!success) {
         fputs("Could not start or run Mini Redis TCP server\n", stderr);
+    }
+    if (server.log && server.log != stderr) {
+        fclose(server.log);
     }
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
