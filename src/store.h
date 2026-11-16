@@ -1,12 +1,5 @@
 /*
- * store.h
- *
- * 정의 : 키-값 저장소(Store)의 공개 인터페이스. 해시 테이블 + 만료 시각(TTL)을 한 모듈로 묶는다.
- * 책임 :
- *   - 맡는 것 : 키/값 저장, 조회, 삭제, 만료 시각 지정, 남은 시간 조회, 주기 정리 호출점
- *   - 맡지 않는 것 : 명령 해석(commands.c), RESP 파싱(resp.c), 소켓 · 이벤트 루프(server.c, net.c)
- *   - 시간은 직접 읽지 않는다. 호출자가 now_ms 를 넘겨 준다.
- * 위치 : commands.c 가 명령마다 store_* 를 부르고, server.c 가 주기적으로 store_maintain 을 부른다.
+ * store.h : 키-값 저장소 공개 인터페이스. 모든 시각 인자는 단조 ms, 단일 스레드에서만 호출한다.
  */
 
 #ifndef MINI_REDIS_STORE_H
@@ -70,7 +63,7 @@ typedef struct {
     void *expire_context;
 } Store;
 
-/* 아래 함수들의 정의 · 설명 · 동작은 store.c 의 각 함수 위 주석을 본다. */
+/* 실패하면 false 이고 저장소는 그대로다. 만료된 키는 모든 조회 함수에서 없는 키로 보인다(그 자리에서 지움). */
 bool store_init(Store *store);
 void store_destroy(Store *store);
 /* 저장소가 키/값을 복사해서 소유한다. deadline_ms 가 0 이면 만료 시각 없음(TTL 없음). */

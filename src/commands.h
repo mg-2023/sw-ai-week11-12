@@ -1,12 +1,5 @@
 /*
- * commands.h
- *
- * 정의 : 명령 실행 모듈의 공개 인터페이스와 응답(Reply) 표현.
- * 책임 :
- *   - 맡는 것 : 파싱된 인자를 받아 명령을 실행하고 응답 값을 돌려주는 진입점
- *   - 맡지 않는 것 : RESP 바이트 직렬화(server.c), 저장소 내부 구조(store.c)
- *   - 상태를 바꾼 명령은 Change 로 알려 영속성 계층(AOF)이 기록하게 한다. 파일 입출력은 하지 않는다.
- * 위치 : server.c 가 execute_command 와 reply_text 를 부른다.
+ * commands.h : 명령 실행 진입점과 Reply · Change · CommandContext.
  */
 
 #ifndef MINI_REDIS_COMMANDS_H
@@ -55,7 +48,7 @@ typedef struct {
     void *hook_context;
 } CommandContext;
 
-/* 함수별 정의 · 설명 · 동작은 commands.c 의 각 함수 위 주석을 본다. */
+/* 돌려준 Reply.bytes 는 다음 명령 전에 직렬화해야 한다. reply_text 에는 리터럴만 넘긴다. */
 Reply execute_command(const CommandContext *context, const Bytes *args, size_t count);
 Reply reply_text(const char *wire_text);
 

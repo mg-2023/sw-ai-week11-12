@@ -1,11 +1,5 @@
 /*
- * resp.h
- *
- * 정의 : RESP2 요청(클라이언트가 보내는 명령 배열)을 파싱하기 위한 공개 인터페이스.
- * 책임 :
- *   - 맡는 것 : 요청 프레임 파싱 상태 보관, 정수 문자열 파싱, 명령 이름 비교
- *   - 맡지 않는 것 : 명령 실행(commands.c), 응답 직렬화(server.c 의 queue_reply), 소켓 읽기(net.c)
- * 위치 : server.c 가 resp_parse 로 요청을 읽고, commands.c 가 resp_integer, resp_equals 를 쓴다.
+ * resp.h : RESP2 요청 파서 인터페이스와 크기 상한.
  */
 
 #ifndef MINI_REDIS_RESP_H
@@ -38,7 +32,8 @@ typedef struct {
 /* INCOMPLETE : 데이터가 더 필요, READY : 명령 하나 완성, INVALID : RESP2 형식 위반 */
 typedef enum { RESP_INCOMPLETE, RESP_READY, RESP_INVALID } RespResult;
 
-/* 함수별 정의 · 설명 · 동작은 resp.c 의 각 함수 위 주석을 본다. */
+/* resp_parse : INCOMPLETE 면 같은 parser 와 같은 시작 위치의 더 긴 버퍼로 다시 부른다. READY 면 offset 만큼 소비한다.
+   resp_integer : 실패하면 value 는 그대로. resp_equals : keyword 는 대문자 널 종료 문자열. */
 RespResult resp_parse(RespParser *parser, const char *data, size_t size);
 bool resp_integer(Bytes text, int64_t *value);
 bool resp_equals(Bytes text, const char *keyword);

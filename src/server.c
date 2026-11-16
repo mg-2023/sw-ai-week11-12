@@ -1,16 +1,7 @@
 /*
- * server.c
- *
- * 정의 : Mini Redis TCP 서버의 진입점과 단일 스레드 이벤트 루프.
- * 책임 :
- *   - 연결 수락, 연결별 입력 · 출력 버퍼 관리, 요청 파싱 호출, 응답 직렬화, 종료 신호 처리를 맡는다.
- *   - poll 한 번으로 서버 소켓과 모든 클라이언트를 감시한다. 스레드를 쓰지 않으므로 명령은 한 번에 하나씩, 끝까지 실행된다(명령 단위 원자성).
- *   - 연결마다 응답이 다 나가야 다음 명령을 처리해 응답 순서를 지키고 버퍼를 한 개로 유지한다.
- *   - 주기(--expire-cycle-ms, 기본 100ms)마다 store_maintain 을 불러 만료 항목을 정리한다(주기 정리).
- *   - 시연 로그(--log) : 연결 ID, 명령 실행 순번, 명령과 키, 결과를 "응답을 출력 버퍼에 넣은 시점(EXEC)" 과 "소켓으로 다 보낸 시점(SENT)" 으로 나눠 기록한다.
- *   - 영속성(--snapshot 또는 --aof) : 시작할 때 파일에서 복원하고, 상태를 바꾼 명령을 응답 전에 AOF 에 기록한다. AOF 기록이 실패하면 응답하지 않고 종료한다.
- *   - 맡지 않는 것 : RESP 바이트 해석(resp.c), 명령 의미(commands.c), 저장 구조(store.c), 파일 형식(persist.c), OS 소켓 차이(net.c)
- * 위치 : 프로그램의 최상위다. 아래 모듈을 모두 사용한다(net -> resp -> commands -> store, persist).
+ * server.c : 단일 스레드 poll 이벤트 루프, 연결별 입출력 버퍼, 응답 직렬화, 시연 로그, 영속성 연결.
+ * 명령은 한 번에 하나씩 끝까지 실행되므로(명령 단위 원자성) 저장소에 락이 없다.
+ * 설명 문서 : Obsidian 「Mini Redis 내부 API와 실행 흐름」
  */
 
 #include "commands.h"
@@ -82,14 +73,7 @@ static Server server = {.expire_cycle_ms = MAINTENANCE_MS, .aof = {.fd = -1}};
 /* 종료 신호를 받았는지 나타내는 플래그. 이벤트 루프가 매 반복 확인한다. */
 static volatile sig_atomic_t stopped;
 
-/*
- * 정의 : SIGINT, SIGTERM 을 받았을 때 호출되는 시그널 핸들러.
- * 설명 : 시그널 핸들러 안에서는 할 수 있는 일이 제한된다. 플래그만 세우고 정리는 이벤트 루프가 정상 흐름에서 하게 한다.
- * 입력 : signal_number : 받은 시그널 번호(사용하지 않음)
- * 출력 : 없음
- * 동작 :
- *   1. stopped 를 1 로 만든다.
- */
+/* 시그널 핸들러에서는 플래그만 세운다. 정리는 이벤트 루프가 정상 흐름에서 한다. */
 static void stop_server(int signal_number) {
     (void)signal_number;
     stopped = 1;
@@ -97,15 +81,7 @@ static void stop_server(int signal_number) {
 
 /* ───────── 시연 로그 ───────── */
 
-/*
- * 정의 : 시연 로그에 한 줄을 쓰는 함수.
- * 설명 : 줄 앞에 서버 시작부터 지난 ms 를 붙여 사건의 순서와 간격을 보이게 한다. 줄마다 flush 해서 강제 종료 직전 줄도 파일에 남긴다. 로그가 꺼져 있으면 아무것도 하지 않는다.
- * 입력 : format/... : printf 형식
- * 출력 : 없음
- * 동작 :
- *   1. log 가 NULL 이면 끝낸다.
- *   2. "[+경과ms] " 머리, 본문, 줄바꿈을 쓰고 flush 한다.
- */
+/* 줄마다 flush 한다 : 강제 종료 직전 줄도 로그 파일에 남겨야 복구 실험을 해석할 수 있다. */
 static void log_line(const char *format, ...) {
     if (!server.log) {
         return;
@@ -119,16 +95,7 @@ static void log_line(const char *format, ...) {
     fflush(server.log);
 }
 
-/*
- * 정의 : 바이트열을 로그용 따옴표 문자열로 바꾸는 함수.
- * 설명 : 키 · 값에는 줄바꿈이나 NUL 같은 바이트가 들어갈 수 있다. 출력 가능한 ASCII 는 그대로(따옴표와 역슬래시는 앞에 \ 를 붙임), 나머지는 \xNN 으로 바꾸고, 길면 앞부분만 보이고 남은 길이를 적는다.
- * 입력 : bytes : 바꿀 바이트열, out/size : 결과 버퍼
- * 출력 : out(널 종료)
- * 동작 :
- *   1. 여는 따옴표를 쓴다.
- *   2. LOG_PREVIEW 바이트까지 한 바이트씩 바꿔 쓴다.
- *   3. 닫는 따옴표와, 잘랐으면 "...(+N bytes)" 를 붙인다.
- */
+/* 로그용 따옴표 문자열. 키 · 값에 CRLF · NUL 이 올 수 있어 출력 불가 바이트는 \xNN 으로, 길면 앞부분만 쓴다. */
 static const char *quote(Bytes bytes, char *out, size_t size) {
     size_t used = 0;
     out[used++] = '"';
@@ -152,15 +119,6 @@ static const char *quote(Bytes bytes, char *out, size_t size) {
     return out;
 }
 
-/*
- * 정의 : 응답 값을 redis-cli 와 비슷한 글자로 바꾸는 함수.
- * 설명 : 로그에서 "어떤 명령이 무엇을 돌려줬는지" 를 바로 읽게 한다. nil, 정수, 오류, 문자열을 구분한다.
- * 입력 : reply : 응답, out/size : 결과 버퍼
- * 출력 : out
- * 동작 :
- *   1. 정수는 "(integer) N", bulk 는 따옴표 문자열.
- *   2. TEXT 중 "$-1" 은 "(nil)", "-" 로 시작하면 "(error) ...", "+" 면 그 뒤 글자.
- */
 static const char *describe_reply(Reply reply, char *out, size_t size) {
     if (reply.type == REPLY_INTEGER) {
         snprintf(out, size, "(integer) %" PRId64, reply.number);
@@ -178,14 +136,7 @@ static const char *describe_reply(Reply reply, char *out, size_t size) {
     return out;
 }
 
-/*
- * 정의 : 저장소가 만료 항목을 지울 때 불리는 알림 함수(store.on_expire).
- * 설명 : 조회 시 만료와 주기 정리를 로그에서 구분한다. 조회 시 만료는 어떤 명령(실행 순번 · 연결) 안에서 일어났는지도 남긴다.
- * 입력 : context : 사용하지 않음, key : 지울 키, cause : 지우는 경로
- * 출력 : 없음
- * 동작 :
- *   1. 조회 시 만료면 "EXPIRE on-access" 와 지금 명령의 순번 · 연결을, 주기 정리면 "EXPIRE by-cycle" 을 쓴다.
- */
+/* store.on_expire 알림. 조회 시 만료는 어떤 명령(순번 · 연결) 안에서 일어났는지도 남긴다. */
 static void log_expired(void *context, Bytes key, StoreExpireCause cause) {
     (void)context;
     char text[LOG_PREVIEW * 4 + 64];
@@ -200,14 +151,8 @@ static void log_expired(void *context, Bytes key, StoreExpireCause cause) {
 /* ───────── 영속성 연결 ───────── */
 
 /*
- * 정의 : 명령이 상태를 바꿀 때 불리는 기록 함수(CommandContext.record_change).
- * 설명 : AOF 모드에서 바뀐 내용을 응답 전에 파일에 덧붙인다. 실패하면 persistence_failed 를 켜서 호출자가 응답하지 않고 서버를 멈추게 한다.
- * 입력 : context : 사용하지 않음, change : 바뀐 내용
- * 출력 : 없음
- * 동작 :
- *   1. AOF 가 꺼져 있거나 이미 실패했으면 끝낸다.
- *   2. aof_append 하고 결과(바이트, fsync 여부와 정책)를 로그에 남긴다.
- *   3. 실패하면 로그 · 표준 오류에 이유를 쓰고 persistence_failed 를 켠다.
+ * AOF 기록은 응답을 출력 버퍼에 넣기 전에 끝나야 한다(always 에서 "+OK = 디스크에 있음").
+ * 실패하면 persistence_failed 를 켠다 : 호출자는 응답하지 않고 서버를 멈춘다(메모리와 디스크가 갈라진 채 성공을 알리지 않음).
  */
 static void record_change(void *context, const Change *change) {
     (void)context;
@@ -229,14 +174,7 @@ static void record_change(void *context, const Change *change) {
              written.synced ? "fsync done before reply" : "fsync deferred");
 }
 
-/*
- * 정의 : SAVE 명령이 부르는 스냅샷 저장 함수(CommandContext.save_snapshot).
- * 설명 : 지금 저장소 상태를 스냅샷 파일로 쓴다. 실패해도 마지막 완성본은 그대로이고 서버는 계속 동작한다.
- * 입력 : context : 사용하지 않음
- * 출력 : 성공하면 true
- * 동작 :
- *   1. snapshot_save 를 부르고 결과를 로그에 남긴다.
- */
+/* SAVE. 실패해도 마지막 완성본은 그대로이고 서버는 계속 동작한다. */
 static bool save_snapshot(void *context) {
     (void)context;
     size_t saved = 0;
@@ -252,17 +190,7 @@ static bool save_snapshot(void *context) {
     return ok;
 }
 
-/*
- * 정의 : 버퍼 용량을 required 이상으로 늘리는 함수.
- * 설명 : 요청과 응답 크기가 제각각이라 필요할 때 키운다. 상한(maximum)을 두어 한 연결이 메모리를 무한정 쓰지 못하게 한다.
- * 입력 : buffer : 대상 버퍼, required : 필요한 용량, maximum : 허용하는 최대 용량
- * 출력 : 이미 충분하거나 늘리는 데 성공하면 true, 메모리 할당 실패면 false
- * 동작 :
- *   1. 이미 용량이 충분하면 바로 true.
- *   2. IO_CHUNK 에서 시작해 필요한 크기가 될 때까지 두 배로 키운다.
- *   3. 상한을 넘으면 상한으로 줄인다.
- *   4. realloc 으로 다시 할당해 반영한다.
- */
+/* maximum 으로 한 연결이 쓸 수 있는 메모리를 묶는다. */
 static bool reserve(Buffer *buffer, size_t required, size_t maximum) {
     if (required <= buffer->capacity) {
         return true;
@@ -284,16 +212,8 @@ static bool reserve(Buffer *buffer, size_t required, size_t maximum) {
 }
 
 /*
- * 정의 : Reply 를 RESP2 바이트로 직렬화해 출력 버퍼에 담는 함수.
- * 설명 : 명령 결과를 와이어 형식으로 바꾸는 곳이다. 값을 출력 버퍼에 복사하므로 이후 저장소의 값이 바뀌거나 지워져도 응답이 안전하다. 연결마다 응답을 하나씩만 담으므로 버퍼를 처음부터 덮어쓴다.
- * 입력 : output : 연결의 출력 버퍼(비어 있어야 함), reply : 직렬화할 응답
- * 출력 : 성공하면 true, 버퍼를 늘리지 못하면 false
- * 동작 :
- *   1. TEXT 는 이미 RESP 형식이니 그대로 쓴다.
- *   2. INTEGER 는 ":숫자\r\n" 으로, BULK 는 "$길이\r\n" 머리를 만든다.
- *   3. 머리 + 본문 + 끝 CRLF 의 전체 길이만큼 출력 버퍼를 확보한다.
- *   4. 머리와 본문, 끝 CRLF 를 차례로 복사한다.
- *   5. begin 을 0, end 를 전체 길이로 정한다.
+ * Reply 를 출력 버퍼로 복사(직렬화)한다. reply.bytes 는 저장소 값이나 입력 버퍼를 가리키는 view 라서
+ * 다음 명령이 그 항목을 바꾸거나 지우기 전에 반드시 복사해 둬야 한다. 연결당 응답 하나만 담는다.
  */
 static bool queue_reply(Buffer *output, Reply reply) {
     const char *header = reply.bytes.data;
@@ -323,16 +243,6 @@ static bool queue_reply(Buffer *output, Reply reply) {
     return true;
 }
 
-/*
- * 정의 : 클라이언트 연결을 닫고 자원을 해제하는 함수.
- * 설명 : 연결 오류나 종료 때 소켓과 버퍼 메모리를 모두 돌려주고 슬롯을 빈 칸으로 만들어 새 연결이 재사용하게 한다.
- * 입력 : client : 닫을 연결
- * 출력 : 없음
- * 동작 :
- *   1. 소켓을 닫는다.
- *   2. 입력, 출력 버퍼를 free 한다.
- *   3. 연결 구조체를 fd 가 INVALID_FD 인 빈 상태로 되돌린다.
- */
 static void close_client(Client *client) {
     log_line("CONN conn=%" PRIu64 " closed", client->id);
     net_close(client->fd);
@@ -342,17 +252,8 @@ static void close_client(Client *client) {
 }
 
 /*
- * 정의 : 연결에 쌓인 입력에서 명령 하나를 꺼내 실행하고 응답을 출력 버퍼에 담는 함수.
- * 설명 : 단일 스레드 이벤트 루프에서 명령 단위 원자성이 지켜지는 지점이다. 한 번 호출에 명령을 최대 하나만 실행하고, 그 응답을 복사해 둔 뒤에야 입력을 소비한다. 앞 응답이 다 나가기 전에는 다음 명령을 실행하지 않아 응답 순서와 버퍼 하나 정책을 지킨다.
- * 입력 : client : 대상 연결, store : 저장소
- * 출력 : 계속 유지하면 true, 연결을 닫아야 하면 false(메모리 부족 등)
- * 동작 :
- *   1. 입력이 없거나 보낼 응답이 남았거나 닫을 예정이면 아무것도 하지 않고 true.
- *   2. resp_parse 로 요청 하나를 파싱한다. 데이터가 모자라면 더 받을 때까지 기다린다.
- *   3. 형식 오류이거나 상한까지 찼는데도 완성되지 않으면 오류 응답을 담고 보낸 뒤 닫도록 표시한다.
- *   4. 파싱된 인자를 입력 버퍼를 가리키는 Bytes 배열로 만든다.
- *   5. execute_command 를 실행하고 결과를 출력 버퍼에 복사한다.
- *   6. 처리한 만큼 입력을 소비하고 파서를 초기화한다. 입력이 비면 인덱스를 0 으로 돌리고 큰 버퍼는 해제한다.
+ * 연결의 입력에서 명령을 최대 하나 실행한다. 앞 응답을 다 보내기 전에는 실행하지 않아
+ * 응답 순서를 지키고 연결당 출력 버퍼를 하나로 유지한다. 순서 : 파싱 → 실행(AOF 기록) → 응답 복사 → 입력 소비.
  */
 static bool process_input(Client *client, Store *store) {
     Buffer *input = &client->input;
@@ -421,17 +322,7 @@ static bool process_input(Client *client, Store *store) {
     return true;
 }
 
-/*
- * 정의 : 연결 소켓에서 읽을 수 있는 만큼 입력 버퍼로 읽어 오는 함수.
- * 설명 : 논블로킹 소켓이라 데이터가 쪼개져 올 수 있고, 한 번에 IO_CHUNK 만 읽어 한 연결이 루프를 오래 붙잡지 못하게 한다. 프레임 상한을 넘겨 쌓이는 입력은 거절한다.
- * 입력 : client : 대상 연결
- * 출력 : 연결을 유지하면 true, 상대가 닫았거나 오류이거나 버퍼를 못 늘리면 false
- * 동작 :
- *   1. 앞쪽에 처리된 공간이 있고 뒤쪽 여유가 IO_CHUNK 보다 작으면 남은 데이터를 앞으로 당긴다.
- *   2. 읽을 수 있는 양을 프레임 상한과 IO_CHUNK 중 작은 쪽으로 정하고 버퍼를 확보한다.
- *   3. net_recv 로 읽는다. 0 이하이면 재시도 가능한 오류일 때만 true.
- *   4. 읽은 만큼 end 를 늘린다.
- */
+/* 한 번에 IO_CHUNK 까지만 읽어 한 연결이 루프를 오래 붙잡지 못하게 한다. 프레임 상한을 넘는 입력은 거절한다. */
 static bool read_client(Client *client) {
     Buffer *input = &client->input;
     if (input->begin && input->capacity - input->end < IO_CHUNK) {
@@ -452,18 +343,7 @@ static bool read_client(Client *client) {
     return true;
 }
 
-/*
- * 정의 : 출력 버퍼의 응답을 소켓으로 보내는 함수.
- * 설명 : 논블로킹 소켓은 한 번에 다 못 보낼 수 있다. 보낸 만큼 begin 을 옮겨 두고 다음 POLLOUT 때 이어서 보낸다. 오류 응답 뒤에는 연결을 닫는다.
- * 입력 : client : 대상 연결
- * 출력 : 연결을 유지하면 true, 오류이거나 오류 응답을 다 보낸 뒤면 false
- * 동작 :
- *   1. 남은 양 중 최대 IO_CHUNK 만 보낸다.
- *   2. 0 이하이면 재시도 가능한 오류일 때만 true.
- *   3. 보낸 만큼 begin 을 옮기고 아직 남았으면 true.
- *   4. 다 보냈으면 인덱스를 0 으로 돌리고 큰 버퍼는 해제한다.
- *   5. close_after_reply 가 켜져 있으면 false 를 돌려 연결을 닫게 한다.
- */
+/* 논블로킹 send 는 일부만 보낼 수 있다. 보낸 만큼 begin 을 옮기고 다음 POLLOUT 때 이어 보낸다. */
 static bool write_client(Client *client) {
     Buffer *output = &client->output;
     size_t remaining = output->end - output->begin;
@@ -485,17 +365,7 @@ static bool write_client(Client *client) {
     return !client->close_after_reply;
 }
 
-/*
- * 정의 : 새 접속을 받아 빈 클라이언트 슬롯에 넣는 함수.
- * 설명 : 서버 소켓이 읽기 가능일 때 불린다. 접속 수 상한을 두어 자원 고갈을 막고, 꽉 찼으면 사유를 알리고 끊는다.
- * 입력 : listener : 서버 소켓, clients : 슬롯 배열(MAX_CLIENTS 개)
- * 출력 : 없음
- * 동작 :
- *   1. net_accept 로 접속을 받는다. 실패하면 끝낸다.
- *   2. 논블로킹으로 바꾸고 빈 슬롯을 찾아 fd 를 넣는다.
- *   3. 빈 슬롯이 없으면 최대 접속 수 오류를 보내고 소켓을 닫는다.
- *   4. 논블로킹 전환에 실패해도 소켓을 닫는다.
- */
+/* 연결 ID 는 접속 순서(1부터)이고 슬롯 번호와 다르다. 슬롯이 없으면 이유를 보내고 끊는다. */
 static void accept_client(Socket listener, Client *clients) {
     Socket fd = net_accept(listener);
     if (fd == INVALID_FD) {
@@ -517,17 +387,8 @@ static void accept_client(Socket listener, Client *clients) {
 }
 
 /*
- * 정의 : poll 기반 단일 스레드 이벤트 루프.
- * 설명 : 서버의 중심이다. 접속 수락, 입력 처리, 응답 송신, 주기 정리를 한 스레드가 번갈아 한다. 스레드가 하나라 명령이 서로 끼어들 수 없고 락이 필요 없다.
- * 입력 : listener : 논블로킹 서버 소켓, store : 저장소
- * 출력 : 정상 종료(시그널)면 true, poll 오류나 서버 소켓 오류면 false
- * 동작 :
- *   1. 주기 정리가 켜져 있고 시각이 되면 store_maintain 을 실행하고, 지운 항목이 있으면 로그에 남긴다. everysec 이면 밀린 fsync 를 한다.
- *   2. 연결마다 process_input 으로 대기 중인 명령을 처리한다. 응답이 남았으면 POLLOUT, 아니면 POLLIN 을 감시한다. AOF 기록이 실패했으면 루프를 멈춘다.
- *   3. 다음 주기 정리 시각까지를 대기 시간으로 net_poll 을 한다.
- *   4. 서버 소켓이 읽기 가능이면 접속을 받는다.
- *   5. 준비된 연결은 응답이 있으면 write_client, 없으면 read_client 를 하고 실패하면 닫는다.
- *   6. stopped 가 켜지면 루프를 나와 모든 연결을 닫는다.
+ * 한 스레드가 주기 정리 · AOF everysec fsync · 명령 실행 · poll · 수락 · 송수신을 번갈아 한다.
+ * 명령 실행을 읽은 직후가 아니라 루프 맨 앞에서 연결당 하나씩 해서 한 연결이 루프를 독점하지 못한다.
  */
 static bool run_loop(Socket listener, Store *store) {
     Client clients[MAX_CLIENTS] = {0};
@@ -624,20 +485,7 @@ static bool run_loop(Socket listener, Store *store) {
     return success;
 }
 
-/*
- * 정의 : 서버를 설정하고 실행하는 프로그램 진입점.
- * 설명 : 명령줄 옵션을 읽고, 저장소와 네트워크를 준비한 뒤 이벤트 루프를 돌리고, 끝나면 자원을 순서대로 정리한다.
- * 입력 : argc/argv : 명령줄 인자(아래 Usage 문자열 참고)
- * 출력 : 정상 종료면 EXIT_SUCCESS, 옵션 오류나 시작 · 실행 실패면 EXIT_FAILURE
- * 동작 :
- *   1. 옵션을 해석한다. 잘못되거나 --snapshot 과 --aof 를 함께 주면 사용법을 출력하고 종료한다.
- *   2. 로그 출력 대상을 열고 store_init 을 한 뒤 만료 알림 함수를 등록한다.
- *   3. 스냅샷 또는 AOF 에서 복원한다. 파일이 깨졌으면 시작하지 않는다. 복원 결과는 표준 오류와 로그에 쓴다.
- *   4. net_init, net_listen 으로 서버 소켓을 열고 논블로킹으로 바꾼다(포트 0 이면 실제 포트로 갱신).
- *   5. 종료 시그널 핸들러를 등록하고 수신 주소를 출력한다(시험 코드가 읽는 첫 줄이라 형식을 바꾸지 않는다).
- *   6. run_loop 를 실행한다.
- *   7. AOF, 서버 소켓, 네트워크, 저장소, 로그를 정리하고 결과를 돌려준다.
- */
+/* 옵션 해석 → 로그 · 저장소 준비 → 스냅샷/AOF 복원(깨졌으면 시작 거부) → 수신 → run_loop → 정리. */
 int main(int argc, char **argv) {
     const char *address = "127.0.0.1";
     uint16_t port = 6379;
