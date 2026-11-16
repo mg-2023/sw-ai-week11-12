@@ -58,8 +58,8 @@ Redis를 캐시로 앞에 두기 위한, CSV 파일 기반의 간단한 DBMS
 ## SQL 처리기 (app/sqlparser.py)
 텍스트 파일(.txt)에 적힌 SQL을 읽어 `data/<테이블명>.csv` 테이블에 실행한다.
 
-- 지원 명령어: `INSERT`, `SELECT` (DDL은 미지원, 테이블 CSV 파일은 미리 만들어져 있다고 가정)
-- CSV 첫 줄은 컬럼 이름(헤더)
+- 지원 명령어: `CREATE TABLE`, `INSERT`, `SELECT`
+- CSV 첫 줄은 컬럼 이름(헤더)으로, `CREATE TABLE`에서 지정한 이름이 들어감
 - 처리 순서: Tokenizer(토큰 분리) → Parser(구문 트리 생성) → Executor(CSV 읽기/쓰기)
 
 ```bash
@@ -69,12 +69,59 @@ python app/sqlparser.py my.txt --data-dir 다른/디렉토리
 
 지원 문법
 ```sql
+CREATE TABLE users (id, name, age, email);                -- data/users.csv 생성
+CREATE TABLE IF NOT EXISTS users (id, name, age, email);  -- 이미 있으면 건너뜀
 INSERT INTO users VALUES (1, '김철수', 25, 'a@b.com');
 INSERT INTO users (id, name) VALUES (2, '이영희'), (3, 'O''Brien');  -- 빠진 컬럼은 빈 값
 SELECT * FROM users;
 SELECT name, age FROM users WHERE age >= 25 AND NOT (name = '김철수' OR age > 35);
 ```
 - 문장은 `;`로 구분, 주석 `--`, `/* */` 지원, 키워드 대소문자 구분 없음
+- CSV는 모든 값을 문자열로 저장하므로 `CREATE TABLE`에 컬럼 타입(`INT` 등)은 적지 않음
 - WHERE: `= != <> < <= > >=`, `AND`, `OR`, `NOT`, 괄호
 - 양쪽 값이 모두 숫자면 숫자로, 아니면 문자열로 비교
 - 한 문장에서 오류가 나도 다음 문장은 계속 실행하고, 오류가 있었으면 종료 코드 1
+
+## B+ 트리 인덱스 (app/bptree.py)
+`id` 컬럼(대소문자 무시)이 있는 테이블은 메모리에 **id → 행** B+ 트리 인덱스를 가진다.
+
+- 내부 노드는 길 안내용 구분 키만, 리프는 실제 (id, 행)을 가지며 리프끼리 `next`로 연결
+- 삽입: 리프까지 내려가 정렬 위치에 넣고, 넘치면 리프 분할(오른쪽 첫 키를 부모로 **복사**) → 부모가 넘치면 내부 노드 분할(가운데 키를 부모로 **이동**) → 루트까지 넘치면 새 루트(높이 +1)
+- 인덱스는 디스크에 저장하지 않는다. 테이블에 처음 접근할 때 CSV를 읽어 만들고, INSERT 때마다 CSV와 함께 갱신 (CSV가 밖에서 바뀌면 다시 만듦)
+
+### id 자동 부여
+```sql
+INSERT INTO users (name, age) VALUES ('홍길동', 30);   -- id 를 빼면 최대 id + 1 부여
+INSERT INTO users VALUES ('', '홍길동', 30, '');       -- 빈 값('')도 자동 부여
+INSERT INTO users VALUES (100, '홍길동', 30, '');      -- 직접 지정 가능 (다음 자동 id 는 101)
+```
+- 이미 있는 id, 정수가 아닌 id는 오류 (파일에 아무것도 쓰지 않음)
+- 실행 결과에 부여된 id가 표시됨: `2개 행이 'users' 에 추가되었습니다. (id: 6, 7)`
+
+### 인덱스를 쓰는 SELECT
+- `id = 3`, `id > 3`, `3 <= id` 처럼 id와 숫자를 비교하는 조건, 그리고 그런 조건을 `AND`로 묶은 경우 (`id >= 10 AND id < 20 AND age > 30`)
+- 트리에서 id 범위의 행만 꺼낸 뒤 나머지 조건을 검사하므로, 결과는 전체 스캔과 같고 **id 오름차순**으로 나옴
+- `OR`, `NOT`, `!=`, 문자열 비교(`id = 'abc'`), id가 없는 조건은 지금처럼 CSV 전체 스캔
+- 인덱스를 썼으면 `1개 행 조회 (id 인덱스 사용)`으로 표시됨
+
+### 인덱스 끄기
+`CSVDatabase(data_dir, use_index=False)` 또는 `python app/sqlparser.py <파일> --no-index`로 실행하면 B+ 트리를 쓰지 않는다 (인덱스 도입 전 동작).
+- SELECT는 id 조건이 있어도 항상 CSV 전체 스캔
+- INSERT는 id 자동 부여와 중복 검사를 하지 않고 적은 값 그대로 저장
+
+### 성능 비교 (app/benchmark_index.py)
+id 1 ~ N 행을 `bench_users.csv`에 만들어 두고, `SELECT * FROM bench_users WHERE id = N`을 인덱스 사용/미사용으로 실행해 시간을 비교한다.
+```bash
+python app/benchmark_index.py                          # 50만 행, id = 500000 조회, 각 5회
+python app/benchmark_index.py -n 100000 --id 1 -r 10   # 행 수, 조회할 id, 반복 횟수 지정
+python app/benchmark_index.py --data-dir bench_data    # 만든 CSV 를 남김 (기본은 임시 디렉토리)
+```
+50만 행 측정 예시 (실행 환경마다 다름)
+
+| 방식 | 평균 |
+|---|---|
+| 인덱스 없음 (CSV 전체 스캔) | 약 300 ms |
+| B+ 트리 인덱스 | 약 0.1 ms |
+
+- 트리 생성은 처음 한 번만 걸리는 비용 (CSV 읽기 + 50만 번 삽입, 약 0.9 s, order 32에서 높이 5)
+- 인덱스 조회 시간의 대부분은 헤더 읽기 등 SELECT 처리이고, 트리 탐색 자체(`tree.get`)는 1 µs 미만

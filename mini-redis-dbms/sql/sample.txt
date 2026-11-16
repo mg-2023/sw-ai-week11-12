@@ -1,12 +1,18 @@
--- users 테이블(data/users.csv)에 데이터 추가
-INSERT INTO users VALUES (3, '박민수', 28, 'minsu@example.com');
+CREATE TABLE IF NOT EXISTS users (id, name, age, email);  -- data/users.csv 생성 (이미 있으면 건너뜀)
 
-/* 컬럼을 지정하면 나머지 컬럼은 빈 값으로 들어간다.
+-- id 를 빼고 넣으면 자동으로 부여된다 (지금까지의 최대 id + 1)
+INSERT INTO users (name, age, email) VALUES ('박민수', 28, 'minsu@example.com');
+
+/* 지정하지 않은 컬럼은 빈 값으로 들어간다.
    VALUES 뒤에 여러 행을 한 번에 넣을 수도 있다. */
-INSERT INTO users (id, name, age) VALUES (4, '최지우', 22), (5, 'O''Brien', 40);
+INSERT INTO users (name, age) VALUES ('최지우', 22), ('O''Brien', 40);
 
 -- 전체 조회
 SELECT * FROM users;
 
--- 조건 조회 (숫자끼리는 숫자로 비교)
+-- id 조건은 B+ 트리 인덱스로 찾는다
+SELECT * FROM users WHERE id = 3;
+SELECT id, name FROM users WHERE id >= 2 AND id <= 4;
+
+-- id 가 아닌 조건은 전체 스캔 (숫자끼리는 숫자로 비교)
 SELECT name, age FROM users WHERE age >= 25 AND NOT (name = '김철수' OR age > 35);
