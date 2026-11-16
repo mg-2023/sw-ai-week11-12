@@ -1,11 +1,11 @@
 /*
  * commands.c
  *
- * 정의 : 명령 이름(SET, GET, DEL, EXPIRE, PEXPIRE, PTTL, PING)을 해석해 저장소 연산으로 바꾸는 구현.
+ * 정의 : 명령 이름(SET, GET, DEL, EXPIRE, PEXPIRE, PTTL, PING, SAVE)을 해석해 저장소 연산으로 바꾸는 구현.
  * 책임 :
  *   - 인자 개수와 형식을 검사하고 Redis 와 같은 형태의 오류 응답을 만든다.
  *   - 저장소 호출에 현재 시각(now_ms)을 넘겨 만료 판정을 한 명령 안에서 같은 기준으로 한다.
- *   - 맡지 않는 것 : 소켓 입출력, 바이트 직렬화, 시계 읽기, 해시 테이블 내부 동작
+ *   - 맡지 않는 것 : 소켓 입출력, 바이트 직렬화, 시계 읽기, 해시 테이블 내부 동작, 파일 입출력(스냅샷 저장은 함수를 받아 부른다)
  * 위치 : server.c 가 요청 하나를 파싱할 때마다 execute_command 를 한 번 부른다. 이벤트 루프가 단일 스레드라 한 명령은 끝까지 실행되며 중간에 다른 명령이 끼지 않는다(명령 단위 원자성).
  */
 
@@ -82,7 +82,7 @@ static bool deadline(Bytes argument, uint64_t now_ms, uint64_t unit,
 /*
  * 정의 : SET key value [EX 초 | PX 밀리초] 를 실행하는 함수.
  * 설명 : 캐시 어사이드에서 캐시를 채우는 명령이다. EX/PX 로 TTL 을 같이 걸어 두면 일정 시간 뒤 항목이 만료되어 낡은 캐시가 자동으로 무효화된다. 같은 키에 다시 SET 하면 값과 TTL 이 모두 새로 바뀐다.
- * 입력 : store : 저장소, args/count : 명령 인자(args[0] 은 SET), now_ms : 현재 시각
+ * 입력 : context : 명령 실행 문맥(저장소, 현재 시각), args/count : 명령 인자(args[0] 은 SET)
  * 출력 : 성공이면 +OK, 인자 오류 · 옵션 오류 · 메모리 부족이면 해당 오류 응답
  * 동작 :
  *   1. 인자가 5개면 args[3] 이 EX 인지 PX 인지 확인하고 TTL 을 만료 시각으로 바꾼다.
@@ -90,7 +90,9 @@ static bool deadline(Bytes argument, uint64_t now_ms, uint64_t unit,
  *   3. store_set 으로 저장한다(만료 시각 0 이면 TTL 없음).
  *   4. 저장에 실패하면 OOM 오류, 성공하면 +OK.
  */
-static Reply command_set(Store *store, const Bytes *args, size_t count, uint64_t now_ms) {
+static Reply command_set(const CommandContext *context, const Bytes *args, size_t count) {
+    Store *store = context->store;
+    uint64_t now_ms = context->now_ms;
     uint64_t expires_at = 0;
     if (count == 5) {
         bool seconds = resp_equals(args[3], "EX");
@@ -112,18 +114,21 @@ static Reply command_set(Store *store, const Bytes *args, size_t count, uint64_t
 /*
  * 정의 : 명령 하나를 이름으로 골라 실행하고 응답 값을 돌려주는 함수.
  * 설명 : 서버가 요청을 한 개씩 순서대로 처리하는 진입점이다. 단일 스레드 이벤트 루프에서 이 함수가 끝나야 다음 명령이 시작되므로 락 없이도 명령이 원자적이다. 응답의 bytes 는 저장소 값을 가리킬 수 있어서 호출자가 다음 명령 전에 직렬화해야 한다.
- * 입력 : store : 저장소, args/count : 명령 이름과 인자(count 는 1 이상), now_ms : 현재 시각
+ * 입력 : context : 명령 실행 문맥(저장소, 현재 시각, 스냅샷 함수), args/count : 명령 이름과 인자(count 는 1 이상)
  * 출력 : Reply(상태, 오류, nil, 정수, bulk 중 하나)
  * 동작 :
  *   1. args[0] 을 대소문자 구분 없이 명령 이름과 비교한다.
  *   2. 명령별로 인자 개수를 검사하고 형식이 틀리면 오류 응답을 돌려준다.
  *   3. 저장소 함수를 호출하고 결과를 응답으로 바꾼다(GET 은 없으면 nil, DEL 은 지운 개수, EXPIRE 는 1 또는 0, PTTL 은 남은 ms 또는 -1, -2).
  *   4. PING 은 인자가 없으면 +PONG, 하나면 그 인자를 그대로 돌려준다.
- *   5. 알 수 없는 이름이면 unknown command 오류.
+ *   5. SAVE 는 스냅샷 함수가 있으면 불러 성공 시 +OK, 실패 시 오류, 없으면 꺼짐 오류.
+ *   6. 알 수 없는 이름이면 unknown command 오류.
  */
-Reply execute_command(Store *store, const Bytes *args, size_t count, uint64_t now_ms) {
+Reply execute_command(const CommandContext *context, const Bytes *args, size_t count) {
+    Store *store = context->store;
+    uint64_t now_ms = context->now_ms;
     if (resp_equals(args[0], "SET")) {
-        return command_set(store, args, count, now_ms);
+        return command_set(context, args, count);
     }
     if (resp_equals(args[0], "GET")) {
         if (count != 2) {
@@ -169,6 +174,17 @@ Reply execute_command(Store *store, const Bytes *args, size_t count, uint64_t no
             return bulk_reply(args[1]);
         }
         return reply_text("-ERR wrong number of arguments for 'ping' command\r\n");
+    }
+    if (resp_equals(args[0], "SAVE")) {
+        if (count != 1) {
+            return reply_text("-ERR wrong number of arguments for 'save' command\r\n");
+        }
+        if (!context->save_snapshot) {
+            return reply_text("-ERR snapshot is disabled (start with --snapshot PATH)\r\n");
+        }
+        /* 실패해도 마지막으로 완성된 스냅샷 파일은 그대로다(persist.c 의 임시 파일 쓰기 뒤 교체). */
+        return context->save_snapshot(context->hook_context) ? reply_text("+OK\r\n")
+                                                             : reply_text("-ERR snapshot save failed\r\n");
     }
     return reply_text("-ERR unknown command\r\n");
 }

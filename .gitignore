@@ -8,3 +8,5 @@ __pycache__/
 /test-store.exe
 /test-resp
 /test-resp.exe
+/test-persist
+/test-persist.exe

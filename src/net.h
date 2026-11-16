@@ -47,6 +47,7 @@ Socket net_accept(Socket listener);
 Socket net_connect(const char *address, uint16_t port);
 bool net_parse_port(const char *text, uint16_t *port);
 uint64_t net_now_ms(void);
+uint64_t net_unix_ms(void);
 void net_sleep_ms(unsigned ms);
 
 #endif

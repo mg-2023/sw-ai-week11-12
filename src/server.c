@@ -8,12 +8,14 @@
  *   - 연결마다 응답이 다 나가야 다음 명령을 처리해 응답 순서를 지키고 버퍼를 한 개로 유지한다.
  *   - 주기(--expire-cycle-ms, 기본 100ms)마다 store_maintain 을 불러 만료 항목을 정리한다(주기 정리).
  *   - 시연 로그(--log) : 연결 ID, 명령 실행 순번, 명령과 키, 결과를 "응답을 출력 버퍼에 넣은 시점(EXEC)" 과 "소켓으로 다 보낸 시점(SENT)" 으로 나눠 기록한다.
- *   - 맡지 않는 것 : RESP 바이트 해석(resp.c), 명령 의미(commands.c), 저장 구조(store.c), OS 소켓 차이(net.c)
- * 위치 : 프로그램의 최상위다. 아래 모듈을 모두 사용한다(net -> resp -> commands -> store).
+ *   - 영속성(--snapshot) : 시작할 때 스냅샷 파일에서 복원하고, SAVE 명령이 오면 스냅샷을 저장한다.
+ *   - 맡지 않는 것 : RESP 바이트 해석(resp.c), 명령 의미(commands.c), 저장 구조(store.c), 파일 형식(persist.c), OS 소켓 차이(net.c)
+ * 위치 : 프로그램의 최상위다. 아래 모듈을 모두 사용한다(net -> resp -> commands -> store, persist).
  */
 
 #include "commands.h"
 #include "net.h"
+#include "persist.h"
 #include "resp.h"
 
 #include <inttypes.h>
@@ -55,8 +57,8 @@ typedef struct {
 /*
  * 서버 전체 상태(프로세스에 하나).
  * log : 시연 로그 출력 대상(NULL 이면 끔), started_ms : 로그 시각의 기준, next_client_id/exec_seq : 연결 ID · 실행 순번 발급기
- * current_client : 지금 실행 중인 명령의 연결 ID(조회 시 만료 로그용), command_ms : 지금 명령의 단조 시각
- * expire_cycle_ms : 주기 정리 간격(0 이면 주기 정리 끔)
+ * current_client : 지금 실행 중인 명령의 연결 ID(조회 시 만료 로그용), command_ms/command_unix_ms : 지금 명령의 단조 · 벽시계 시각
+ * expire_cycle_ms : 주기 정리 간격(0 이면 주기 정리 끔), snapshot_path : 스냅샷 경로(NULL 이면 끔), store : 저장소
  */
 typedef struct {
     FILE *log;
@@ -65,7 +67,10 @@ typedef struct {
     uint64_t exec_seq;
     uint64_t current_client;
     uint64_t command_ms;
+    uint64_t command_unix_ms;
     uint64_t expire_cycle_ms;
+    const char *snapshot_path;
+    Store *store;
 } Server;
 
 static Server server = {.expire_cycle_ms = MAINTENANCE_MS};
@@ -186,6 +191,31 @@ static void log_expired(void *context, Bytes key, StoreExpireCause cause) {
     } else {
         log_line("EXPIRE by-cycle  key=%s (nobody read it, removed by active expiry)", quote(key, text, sizeof(text)));
     }
+}
+
+/* ───────── 영속성 연결 ───────── */
+
+/*
+ * 정의 : SAVE 명령이 부르는 스냅샷 저장 함수(CommandContext.save_snapshot).
+ * 설명 : 지금 저장소 상태를 스냅샷 파일로 쓴다. 실패해도 마지막 완성본은 그대로이고 서버는 계속 동작한다.
+ * 입력 : context : 사용하지 않음
+ * 출력 : 성공하면 true
+ * 동작 :
+ *   1. snapshot_save 를 부르고 결과를 로그에 남긴다.
+ */
+static bool save_snapshot(void *context) {
+    (void)context;
+    size_t saved = 0;
+    char error[192] = "";
+    bool ok = snapshot_save(server.store, server.snapshot_path, server.command_ms, server.command_unix_ms, &saved,
+                            error, sizeof(error));
+    if (ok) {
+        log_line("SNAP #%" PRIu64 " saved %zu keys to %s (written to .tmp, fsync, then renamed)", server.exec_seq, saved,
+                 server.snapshot_path);
+    } else {
+        log_line("SNAP #%" PRIu64 " save FAILED: %s (previous snapshot kept)", server.exec_seq, error);
+    }
+    return ok;
 }
 
 /*
@@ -317,7 +347,13 @@ static bool process_input(Client *client, Store *store) {
     server.current_client = client->id;
     server.exec_seq++;
     server.command_ms = net_now_ms();
-    Reply reply = execute_command(store, args, parser->count, server.command_ms);
+    server.command_unix_ms = net_unix_ms();
+    CommandContext context = {
+        .store = store,
+        .now_ms = server.command_ms,
+        .save_snapshot = server.snapshot_path ? save_snapshot : NULL,
+    };
+    Reply reply = execute_command(&context, args, parser->count);
     /* 다른 명령이 값을 바꾸거나 지우기 전에, 응답을 출력 버퍼로 복사(직렬화)해 둔다. 응답의 bytes 는 저장소 안을 가리키는 view 라서다. */
     if (!queue_reply(&client->output, reply)) {
         return false;
@@ -542,10 +578,11 @@ static bool run_loop(Socket listener, Store *store) {
  * 동작 :
  *   1. 옵션을 해석한다. 잘못되면 사용법을 출력하고 종료한다.
  *   2. 로그 출력 대상을 열고 store_init 을 한 뒤 만료 알림 함수를 등록한다.
- *   3. net_init, net_listen 으로 서버 소켓을 열고 논블로킹으로 바꾼다(포트 0 이면 실제 포트로 갱신).
- *   4. 종료 시그널 핸들러를 등록하고 수신 주소를 출력한다(시험 코드가 읽는 첫 줄이라 형식을 바꾸지 않는다).
- *   5. run_loop 를 실행한다.
- *   6. 서버 소켓, 네트워크, 저장소, 로그를 정리하고 결과를 돌려준다.
+ *   3. --snapshot 이면 스냅샷에서 복원한다. 파일이 깨졌으면 시작하지 않는다. 복원 결과는 표준 오류와 로그에 쓴다.
+ *   4. net_init, net_listen 으로 서버 소켓을 열고 논블로킹으로 바꾼다(포트 0 이면 실제 포트로 갱신).
+ *   5. 종료 시그널 핸들러를 등록하고 수신 주소를 출력한다(시험 코드가 읽는 첫 줄이라 형식을 바꾸지 않는다).
+ *   6. run_loop 를 실행한다.
+ *   7. 서버 소켓, 네트워크, 저장소, 로그를 정리하고 결과를 돌려준다.
  */
 int main(int argc, char **argv) {
     const char *address = "127.0.0.1";
@@ -561,16 +598,25 @@ int main(int argc, char **argv) {
             ++i;
         } else if (strcmp(argv[i], "--log") == 0 && has_value) {
             log_path = argv[++i];
-        } else if (strcmp(argv[i], "--expire-cycle-ms") == 0 && has_value &&
-                   resp_integer((Bytes){argv[i + 1], strlen(argv[i + 1])}, &number) && number >= 0) {
-            server.expire_cycle_ms = (uint64_t)number;
+        } else if (strcmp(argv[i], "--snapshot") == 0 && has_value) {
+            server.snapshot_path = argv[++i];
+        } else if (has_value && resp_integer((Bytes){argv[i + 1], strlen(argv[i + 1])}, &number) && number >= 0 &&
+                   (strcmp(argv[i], "--expire-cycle-ms") == 0 || strcmp(argv[i], "--debug-snapshot-crash-after") == 0)) {
+            if (strcmp(argv[i], "--expire-cycle-ms") == 0) {
+                server.expire_cycle_ms = (uint64_t)number;
+            } else {
+                snapshot_crash_after_entries = (size_t)number;
+            }
             ++i;
         } else {
             usage_error = true;
         }
     }
     if (usage_error) {
-        fprintf(stderr, "Usage: %s [--bind IPv4] [--port PORT] [--log FILE|-] [--expire-cycle-ms MS(0=off)]\n", argv[0]);
+        fprintf(stderr,
+                "Usage: %s [--bind IPv4] [--port PORT] [--log FILE|-] [--expire-cycle-ms MS(0=off)]\n"
+                "          [--snapshot FILE] [--debug-snapshot-crash-after N]\n",
+                argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -588,7 +634,26 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
     store.on_expire = log_expired;
+    server.store = &store;
 
+    if (server.snapshot_path) {
+        LoadReport report = {0};
+        bool loaded = snapshot_load(&store, server.snapshot_path, net_now_ms(), net_unix_ms(), &report);
+        char summary[320];
+        if (loaded) {
+            snprintf(summary, sizeof(summary),
+                     "LOAD snapshot %s: %zu keys applied, %zu skipped as expired during downtime", server.snapshot_path,
+                     report.loaded, report.skipped_expired);
+        } else {
+            snprintf(summary, sizeof(summary), "LOAD snapshot FAILED: %s", report.error);
+        }
+        fprintf(stderr, "%s\n", summary);
+        log_line("%s", summary);
+        if (!loaded) {
+            store_destroy(&store);
+            return EXIT_FAILURE;
+        }
+    }
     if (!net_init()) {
         fputs("Could not initialize networking\n", stderr);
         store_destroy(&store);

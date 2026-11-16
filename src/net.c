@@ -337,6 +337,28 @@ uint64_t net_now_ms(void) {
 }
 
 /*
+ * 정의 : 벽시계 기준 현재 시각을 Unix ms(1970-01-01 UTC 부터 지난 밀리초)로 돌려주는 함수.
+ * 설명 : 단조 시계는 재시작하면 기준점이 바뀐다. 스냅샷 · AOF 파일에 쓰는 만료 시각은 재시작 뒤에도 해석할 수 있어야 하므로 이 시계로 바꿔 쓴다. TTL 판정 자체는 계속 net_now_ms 로 한다.
+ * 입력 : 없음
+ * 출력 : Unix ms
+ * 동작 :
+ *   1. Windows : GetSystemTimeAsFileTime(1601년부터 100ns 단위)을 Unix ms 로 바꾼다.
+ *   2. POSIX : CLOCK_REALTIME 의 초와 나노초를 밀리초로 합친다.
+ */
+uint64_t net_unix_ms(void) {
+#ifdef _WIN32
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    uint64_t ticks = ((uint64_t)now.dwHighDateTime << 32) | now.dwLowDateTime;
+    return (ticks - UINT64_C(116444736000000000)) / 10000;
+#else
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+#endif
+}
+
+/*
  * 정의 : 지정한 밀리초만큼 쉬는 함수.
  * 설명 : 예제에서 원본 데이터를 가져오는 느린 작업을 흉내 내어 캐시 적중과 미적중의 응답 시간 차이를 만든다.
  * 입력 : ms : 쉴 시간(밀리초)

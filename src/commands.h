@@ -26,8 +26,21 @@ typedef struct {
     int64_t number;
 } Reply;
 
+/*
+ * 명령 하나를 실행하는 데 필요한 것.
+ * store : 저장소, now_ms : 이 명령의 현재 시각(단조 ms)
+ * save_snapshot : SAVE 명령이 부를 함수(NULL 이면 스냅샷 꺼짐, 스냅샷 모드에서 채움). 성공하면 true
+ * hook_context : save_snapshot 에 넘길 값
+ */
+typedef struct {
+    Store *store;
+    uint64_t now_ms;
+    bool (*save_snapshot)(void *context);
+    void *hook_context;
+} CommandContext;
+
 /* 함수별 정의 · 설명 · 동작은 commands.c 의 각 함수 위 주석을 본다. */
-Reply execute_command(Store *store, const Bytes *args, size_t count, uint64_t now_ms);
+Reply execute_command(const CommandContext *context, const Bytes *args, size_t count);
 Reply reply_text(const char *wire_text);
 
 #endif
