@@ -215,6 +215,209 @@ static void test_aof_write_failure(void) {
     remove(AOF);
 }
 
+/* 스냅샷 : 키가 0개여도 저장하고 복원한다 */
+static void test_snapshot_with_zero_keys(void) {
+    remove(SNAP);
+    Store store;
+    LoadReport report;
+    char error[192];
+    size_t saved = 99;
+    assert(store_init(&store));
+    assert(snapshot_save(&store, SNAP, RUN1_MONO, RUN1_UNIX, &saved, error, sizeof(error)));
+    assert(saved == 0);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(snapshot_load(&store, SNAP, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 0 && report.skipped_expired == 0 && store.size == 0);
+    assert(store_pttl(&store, BYTES("x"), RUN2_MONO) == -2);
+    store_destroy(&store);
+    remove(SNAP);
+}
+
+/* NUL · CRLF · 빈 문자열이 들어 있는 키와 값 */
+#define ODD_COUNT 5
+#define INIT(literal) {literal, sizeof(literal) - 1}
+static const Bytes ODD_KEYS[ODD_COUNT] = {INIT("\0"), INIT("\r\n"), INIT(""), INIT("k\0\r\n"), INIT("*3\r\n$3\r\nSET\r\n")};
+static const Bytes ODD_VALUES[ODD_COUNT] = {INIT(""), INIT("\0\r\n"), INIT("empty key"), INIT("\r\n\r\n"), INIT("\0")};
+
+static void expect_odd_entries(Store *store, uint64_t now) {
+    assert(store->size == ODD_COUNT);
+    for (int i = 0; i < ODD_COUNT; ++i) {
+        Bytes value;
+        assert(store_get(store, ODD_KEYS[i], now, &value));
+        assert(value.length == ODD_VALUES[i].length && memcmp(value.data, ODD_VALUES[i].data, value.length) == 0);
+    }
+}
+
+/* 스냅샷 : 키 · 값에 NUL · CRLF · 빈 문자열이 있어도 그대로 복원된다 */
+static void test_snapshot_binary_round_trip(void) {
+    remove(SNAP);
+    Store store;
+    LoadReport report;
+    char error[192];
+    assert(store_init(&store));
+    for (int i = 0; i < ODD_COUNT; ++i) {
+        assert(store_set(&store, ODD_KEYS[i], ODD_VALUES[i], 0));
+    }
+    assert(snapshot_save(&store, SNAP, RUN1_MONO, RUN1_UNIX, NULL, error, sizeof(error)));
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(snapshot_load(&store, SNAP, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == ODD_COUNT);
+    expect_odd_entries(&store, RUN2_MONO);
+    store_destroy(&store);
+    remove(SNAP);
+}
+
+/* AOF : 키 · 값에 NUL · CRLF · 빈 문자열이 있어도 재생하면 그대로다 */
+static void test_aof_binary_round_trip(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_NO, &store, RUN1_MONO, RUN1_UNIX, &report));
+    for (int i = 0; i < ODD_COUNT; ++i) {
+        append(&aof, CHANGE_SET, ODD_KEYS[i], ODD_VALUES[i], 0);
+    }
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_NO, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == ODD_COUNT && report.truncated_bytes == 0);
+    expect_odd_entries(&store, RUN2_MONO);
+    append(&aof, CHANGE_DEL, ODD_KEYS[2], (Bytes){0}, 0);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_NO, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == ODD_COUNT + 1 && store.size == ODD_COUNT - 1);
+    assert(store_pttl(&store, BYTES(""), RUN2_MONO) == -2);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
+/* 스냅샷 : 저장 시점에 이미 만료된 키는 다시 켜도 없다 (꺼져 있던 시간이 0 이어도) */
+static void test_snapshot_drops_key_expired_at_save(void) {
+    remove(SNAP);
+    Store store;
+    LoadReport report;
+    char error[192];
+    size_t saved = 0;
+    assert(store_init(&store));
+    assert(store_set(&store, BYTES("expired"), BYTES("e"), RUN1_MONO));
+    assert(store_set(&store, BYTES("older"), BYTES("o"), RUN1_MONO - 500));
+    assert(store_set(&store, BYTES("alive"), BYTES("a"), RUN1_MONO + 1));
+    assert(snapshot_save(&store, SNAP, RUN1_MONO, RUN1_UNIX, &saved, error, sizeof(error)));
+    assert(saved == 1);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(snapshot_load(&store, SNAP, RUN1_MONO, RUN1_UNIX, &report));
+    assert(report.loaded == 1 && store.size == 1);
+    assert(store_pttl(&store, BYTES("expired"), RUN1_MONO) == -2);
+    assert(store_pttl(&store, BYTES("older"), RUN1_MONO) == -2);
+    expect_value(&store, BYTES("alive"), RUN1_MONO, "a");
+    store_destroy(&store);
+    remove(SNAP);
+}
+
+/* 파일이 없는 경로로 snapshot_load · aof_open 을 부르면 빈 저장소로 성공한다 */
+static void test_missing_files_start_empty(void) {
+    remove(SNAP);
+    remove(AOF);
+    Store store;
+    LoadReport report;
+    Aof aof = {0};
+    assert(store_init(&store));
+    assert(snapshot_load(&store, SNAP, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 0 && report.skipped_expired == 0 && report.error[0] == '\0' && store.size == 0);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_EVERYSEC, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 0 && report.truncated_bytes == 0 && report.error[0] == '\0' && store.size == 0);
+    append(&aof, CHANGE_SET, BYTES("first"), BYTES("1"), 0);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_EVERYSEC, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 1);
+    expect_value(&store, BYTES("first"), RUN2_MONO, "1");
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
+/* 0바이트짜리 AOF 파일도 빈 저장소로 열리고 이어서 덧붙일 수 있다 */
+static void test_empty_aof_file(void) {
+    write_bytes(AOF, "wb", "", 0);
+    assert(file_size(AOF) == 0);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 0 && report.truncated_bytes == 0 && store.size == 0);
+    append(&aof, CHANGE_SET, BYTES("k"), BYTES("v"), 0);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 1);
+    expect_value(&store, BYTES("k"), RUN2_MONO, "v");
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
+/* AOF : 꺼져 있던 동안 지난 PEXPIREAT 은 재생하면 그 키를 지운다 */
+static void test_aof_expire_record_in_the_past(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    append(&aof, CHANGE_SET, BYTES("soon"), BYTES("s"), 0);
+    append(&aof, CHANGE_EXPIRE, BYTES("soon"), (Bytes){0}, RUN1_MONO + 1000);   /* 1초 뒤 만료, 3초 꺼져 있었다 */
+    append(&aof, CHANGE_SET, BYTES("later"), BYTES("l"), 0);
+    append(&aof, CHANGE_EXPIRE, BYTES("later"), (Bytes){0}, RUN1_MONO + 9000);  /* 6초 남는다 */
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 4 && report.skipped_expired == 1);
+    assert(store_pttl(&store, BYTES("soon"), RUN2_MONO) == -2);
+    assert(store_pttl(&store, BYTES("later"), RUN2_MONO) == 6000);
+    assert(store.size == 1);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
+/* aof_close 를 두 번 불러도 안전하다 */
+static void test_aof_close_twice(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    aof_close(&aof);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
 int main(void) {
     test_snapshot_round_trip_with_downtime();
     test_snapshot_interrupted_and_corrupt();
@@ -222,9 +425,17 @@ int main(void) {
     test_aof_incomplete_tail();
     test_aof_corrupt_middle();
     test_aof_write_failure();
+    test_snapshot_with_zero_keys();
+    test_snapshot_binary_round_trip();
+    test_aof_binary_round_trip();
+    test_snapshot_drops_key_expired_at_save();
+    test_missing_files_start_empty();
+    test_empty_aof_file();
+    test_aof_expire_record_in_the_past();
+    test_aof_close_twice();
     remove(SNAP);
     remove(SNAP_TMP);
     remove(AOF);
-    puts("6 persistence unit scenarios passed");
+    puts("14 persistence unit scenarios passed");
     return 0;
 }
