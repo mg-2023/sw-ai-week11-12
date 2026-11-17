@@ -111,18 +111,25 @@ class CachedSQL:
 
         sqlparser.run_script 처럼 한 문장이 실패해도 다음 문장은 계속 실행하고, 실패한 문장은
         {"type": "error", ...} 로 돌려준다. 토큰화 단계 오류는 스크립트 전체를 읽을 수 없으므로 SQLError 를 던진다.
+        결과마다 elapsed_ms(그 문장을 서버에서 처리한 시간, 밀리초)가 붙는다.
         """
-        parser = Parser(source)
+        statements = Parser(source).iter_statements()
         results = []
-        for item in parser.iter_statements():
+        while True:
+            start = time.perf_counter()   # 파싱 시간까지 그 문장의 처리 시간에 넣는다
+            item = next(statements, None)
+            if item is None:
+                break
             if isinstance(item, SQLError):
-                results.append({"type": "error", "statement": None, "error": str(item)})
-                continue
-            try:
-                results.append(self.execute(item, use_cache=use_cache))
-            except SQLError as e:
-                message = str(e) if e.line is not None else f"{item.line}번째 줄: {e}"
-                results.append({"type": "error", "statement": item.text, "error": message})
+                result = {"type": "error", "statement": None, "error": str(item)}
+            else:
+                try:
+                    result = self.execute(item, use_cache=use_cache)
+                except SQLError as e:
+                    message = str(e) if e.line is not None else f"{item.line}번째 줄: {e}"
+                    result = {"type": "error", "statement": item.text, "error": message}
+            result["elapsed_ms"] = round((time.perf_counter() - start) * 1000, 3)
+            results.append(result)
         return results
 
     def execute(self, stmt: Statement, use_cache: bool = True) -> dict:
@@ -166,6 +173,7 @@ class CachedSQL:
                 return self._select_payload(stmt, json.loads(cached), "hit")
 
             data = self._to_cached(self.executor.execute_select(stmt))  # 테이블이 없는 등 오류면 캐시하지 않음
+            data["sql"] = stmt.text  # 캐시 키 목록(/sql/cache)에서 어떤 쿼리의 결과인지 보여주기 위함
             self.store.set(key, json.dumps(data, ensure_ascii=False), ttl=self._next_ttl())
         self._count("miss")
         return self._select_payload(stmt, data, "miss")
@@ -214,6 +222,69 @@ class CachedSQL:
                 self._misses += 1
             else:
                 self._bypassed += 1
+
+    # ------------------------------------------------------------------
+    # 워밍업
+    # ------------------------------------------------------------------
+    def warm_up(self) -> list[dict]:
+        """모든 테이블의 id 인덱스(B+ 트리)를 미리 만든다. 서버를 켤 때 한 번 부른다.
+
+        인덱스는 메모리에만 있어서, 워밍업을 안 하면 서버를 켠 뒤 그 테이블에 처음 들어온
+        id 조회(또는 INSERT)가 CSV 전체 읽기 + 트리 삽입 시간(50만 행이면 약 1초)을 대신 기다린다.
+        한 테이블에서 오류가 나도(id 가 정수가 아님 등) 서버는 켜져야 하므로, 오류는 결과에 담고 다음 테이블로 넘어간다.
+
+        돌려주는 값: 테이블마다 {"table", "rows"(인덱스에 들어간 행 수, id 컬럼이 없으면 None), "elapsed_ms"}
+                     오류면 {"table", "error", "elapsed_ms"}
+        """
+        report = []
+        for table in self.db.tables():
+            start = time.perf_counter()
+            try:
+                with self._db_lock:   # 요청 처리와 겹쳐도 안전하도록 다른 DB 작업과 같은 락을 쓴다
+                    index = self.db.index(table)
+                item = {"table": table, "rows": len(index.tree) if index is not None else None}
+            except (SQLError, OSError) as e:
+                item = {"table": table, "error": str(e)}
+            item["elapsed_ms"] = round((time.perf_counter() - start) * 1000, 1)
+            report.append(item)
+        return report
+
+    def cache_entries(self) -> dict:
+        """지금 RedisStore 에 있는 캐시 키 목록 (웹 페이지의 캐시 키 보기용).
+
+        versions: 테이블 -> 현재 버전
+        entries:  쿼리 결과 키마다 테이블, 버전, 남은 TTL, 현재 버전인지(current), 원문 SQL
+                  current=false 인 키는 INSERT 로 버전이 바뀌어 더 이상 조회되지 않고 TTL 만 기다리는 키
+        """
+        keys = [k for k in self.store.keys() if k.startswith(f"{KEY_PREFIX}:")]
+        versions = {}
+        for key in keys:
+            parts = key.split(":")
+            if len(parts) == 3 and parts[1] == "ver":
+                version = self.store.get(key)
+                if version is not None:
+                    versions[parts[2]] = version
+
+        entries = []
+        for key in keys:
+            parts = key.split(":")   # dbcache : q : <테이블> : v<버전> : <해시>  (테이블 이름에는 ':'가 못 들어감)
+            if len(parts) != 5 or parts[1] != "q":
+                continue
+            raw = self.store.get(key)
+            ttl = self.store.ttl(key)
+            if raw is None or ttl == -2:   # 목록을 읽는 사이에 만료됨
+                continue
+            table, version = parts[2], parts[3][1:]
+            entries.append({
+                "key": key,
+                "table": table,
+                "version": version,
+                "current": versions.get(table) == version,
+                "ttl": ttl,
+                "sql": json.loads(raw).get("sql"),
+            })
+        entries.sort(key=lambda e: (e["table"], not e["current"], -e["ttl"]))
+        return {"versions": versions, "entries": entries}
 
     def stats(self) -> dict:
         with self._stats_lock:

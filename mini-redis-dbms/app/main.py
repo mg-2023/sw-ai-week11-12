@@ -12,8 +12,11 @@ mini-redis HTTP API 서버
 여기서는 요청을 그 호출로 바꾸고 결과를 JSON으로 돌려주는 일만 한다.
 """
 
+import asyncio
+import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -23,6 +26,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# uvicorn이 설정해 둔 로거를 쓰면 "INFO:     ..." 형식으로 서버 시작 로그와 같이 찍힌다
+logger = logging.getLogger("uvicorn.error")
 
 
 # store.py가 `from hashtable import ...`로 import하므로 app/ 폴더를 import 경로에 넣는다.
@@ -86,7 +92,8 @@ OPENAPI_TAGS = [
 #   store를 밖에서 넣을 수 있게 해서, 테스트에서는 가짜 시계를 단 store를 쓸 수 있다.
 #   store는 앱 하나당 딱 하나. 요청마다 새로 만들면 데이터가 매번 사라진다.
 # ----------------------------------------------------------------------
-def create_app(store: RedisStore | None = None, sql: CachedSQL | None = None) -> FastAPI:
+def create_app(store: RedisStore | None = None, sql: CachedSQL | None = None,
+               warm_up: bool = True) -> FastAPI:
     store = store if store is not None else RedisStore()
     # SQL 캐시는 위 store를 그대로 쓴다 → /keys로 캐시 키(dbcache:...)를 직접 들여다볼 수 있다
     sql = sql if sql is not None else CachedSQL(store)
@@ -94,6 +101,20 @@ def create_app(store: RedisStore | None = None, sql: CachedSQL | None = None) ->
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store.start_active_expire()     # 서버 켤 때 만료 키 정리 스레드 시작
+        if warm_up:
+            # 모든 테이블의 id 인덱스를 미리 만든다. 끝날 때까지 서버가 요청을 받지 않으므로
+            # 첫 id 조회가 인덱스 생성 시간(50만 행이면 약 1초)을 기다리지 않는다.
+            # 시간이 걸리는 동기 작업이라 별도 스레드에서 돌려 이벤트 루프를 막지 않는다.
+            started = time.perf_counter()
+            report = await asyncio.to_thread(sql.warm_up)
+            for item in report:
+                if "error" in item:
+                    logger.warning("워밍업 실패: %s (%s)", item["table"], item["error"])
+                elif item["rows"] is None:
+                    logger.info("워밍업: %s - id 컬럼 없음, 인덱스 안 만듦", item["table"])
+                else:
+                    logger.info("워밍업: %s - id 인덱스 %d행, %.1f ms", item["table"], item["rows"], item["elapsed_ms"])
+            logger.info("워밍업 완료: 테이블 %d개, %.1f ms", len(report), (time.perf_counter() - started) * 1000)
         yield
         store.stop_active_expire()      # 서버 끌 때 정리
 
@@ -189,16 +210,26 @@ def create_app(store: RedisStore | None = None, sql: CachedSQL | None = None) ->
     def run_sql(body: SQLBody):
         """SQL 실행 — 문장마다 결과를 돌려주고, SELECT 결과에는 cache: hit / miss / bypass가 붙는다.
         한 문장이 실패해도 다음 문장은 계속 실행하며, 실패한 문장은 type=error로 들어간다."""
+        start = time.perf_counter()
         try:
             results = sql.run(body.sql, use_cache=body.use_cache)
         except SQLError as e:     # 닫히지 않은 문자열 등, 스크립트 전체를 읽을 수 없는 오류
             raise HTTPException(status_code=400, detail=str(e))
-        return {"results": results, "errors": sum(r["type"] == "error" for r in results)}
+        return {
+            "results": results,
+            "errors": sum(r["type"] == "error" for r in results),
+            "elapsed_ms": round((time.perf_counter() - start) * 1000, 3),   # 서버 처리 시간 (네트워크 제외)
+        }
 
     @app.get("/sql/stats", tags=[TAG_SQL])
     def sql_stats():
         """캐시 hit / miss 횟수, hit률, 무효화(INSERT) 횟수"""
         return sql.stats()
+
+    @app.get("/sql/cache", tags=[TAG_SQL])
+    def sql_cache():
+        """캐시 키 목록 — 테이블별 현재 버전, 쿼리 결과 키마다 남은 TTL과 현재 버전 여부"""
+        return sql.cache_entries()
 
     # ---------------- html 라우팅 / js, css 마운트 ----------------
     @app.get("/", include_in_schema=False)   # /docs 목록에서는 숨김

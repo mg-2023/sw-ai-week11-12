@@ -410,6 +410,12 @@ class CSVDatabase:
     def exists(self, table: str) -> bool:
         return (self.data_dir / f"{table}.csv").exists()
 
+    def tables(self) -> list[str]:
+        """data_dir 에 있는 테이블 이름 목록 (CSV 파일 이름에서 .csv 를 뺀 것, 이름순)"""
+        if not self.data_dir.is_dir():
+            return []
+        return sorted(p.stem for p in self.data_dir.glob("*.csv") if p.is_file())
+
     def create(self, table: str, columns: list[str]) -> None:
         """헤더 한 줄만 있는 CSV 파일을 새로 만든다. 이미 있으면 SQLError."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -788,8 +794,12 @@ def format_table(columns: list[str], rows: list[list[str]]) -> str:
     return "\n".join(out)
 
 
-def run_script(source: str, db: CSVDatabase, out=None) -> int:
-    """SQL 스크립트를 실행하고 오류가 난 문장 수를 돌려준다. 오류가 나도 다음 문장은 계속 실행한다."""
+def run_script(source: str, db: CSVDatabase, out=None, quiet: bool = False) -> int:
+    """SQL 스크립트를 실행하고 오류가 난 문장 수를 돌려준다. 오류가 나도 다음 문장은 계속 실행한다.
+
+    quiet=True 면 성공한 문장은 아무것도 출력하지 않고 오류만 출력한다.
+    (대량 INSERT 처럼 문장이 많을 때는 실행보다 화면 출력이 더 오래 걸리기 때문)
+    """
     out = out if out is not None else sys.stdout  # 호출 시점의 stdout (redirect_stdout 도 반영)
     try:
         parser = Parser(source)
@@ -805,15 +815,20 @@ def run_script(source: str, db: CSVDatabase, out=None) -> int:
             print(f"[{n}] 문법 오류 - {item}\n", file=out)
             continue
 
-        print(f"[{n}] {item.text}", file=out)
+        if not quiet:
+            print(f"[{n}] {item.text}", file=out)
         try:
             result = executor.execute(item)
         except SQLError as e:
             errors += 1
             message = str(e) if e.line is not None else f"{item.line}번째 줄: {e}"
+            if quiet:  # 위에서 문장을 출력하지 않았으므로 어떤 문장인지 함께 보여준다
+                print(f"[{n}] {item.text}", file=out)
             print(f"실행 오류 - {message}\n", file=out)
             continue
 
+        if quiet:
+            continue
         if isinstance(result, CreateResult):
             if result.created:
                 print(f"테이블 '{result.table}' 이(가) 생성되었습니다. (컬럼: {', '.join(result.columns)})\n", file=out)
@@ -840,6 +855,10 @@ def main(argv: list[str] | None = None) -> int:
         "--no-index", action="store_true",
         help="B+ 트리 인덱스를 쓰지 않음 (SELECT 는 항상 전체 스캔, INSERT 는 id 자동 부여/중복 검사 없음)",
     )
+    arg_parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="성공한 문장은 출력하지 않고 오류만 출력 (대량 INSERT 처럼 문장이 많을 때)",
+    )
     args = arg_parser.parse_args(argv)
 
     sql_path = Path(args.sql_file)
@@ -848,7 +867,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     source = sql_path.read_text(encoding="utf-8-sig")
 
-    errors = run_script(source, CSVDatabase(args.data_dir, use_index=not args.no_index))
+    errors = run_script(source, CSVDatabase(args.data_dir, use_index=not args.no_index), quiet=args.quiet)
     return 1 if errors else 0
 
 

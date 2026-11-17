@@ -120,3 +120,279 @@ onSubmit("exists-form", "exists-result", async (form) => {
     ? ["(integer) 1  존재함", true]
     : ["(integer) 0  없음", false];
 });
+
+// ======================================================================
+// SQL + 캐시 탭
+//   POST /sql 로 SQL 을 실행하고, 결과마다 캐시 HIT / MISS / BYPASS 와 처리 시간을 보여준다.
+//   GET /sql/stats (통계), GET /sql/cache (캐시 키 목록)로 캐시 상태를 함께 보여준다.
+//   CSV 값은 사용자가 넣은 문자열이므로 화면에 넣을 때는 항상 텍스트 노드로 넣는다 (innerHTML 금지 → XSS 방지).
+// ======================================================================
+
+const MAX_ROWS = 100;   // 결과 표에 그리는 최대 행 수 (그 이상은 "외 N행"으로 표시)
+
+const EXAMPLES = [
+  { label: "전체 스캔", sql: "SELECT name, age FROM users WHERE age > 30;" },
+  { label: "id 인덱스", sql: "SELECT * FROM users WHERE id = 3;" },
+  { label: "id 범위", sql: "SELECT id, name FROM users WHERE id >= 2 AND id <= 4;" },
+  { label: "INSERT", sql: "INSERT INTO users (name, age, email) VALUES ('테스트', 33, 'test@example.com');" },
+  { label: "오류 예시", sql: "SELECT * FROM no_such_table;\nSELEC * FROM users;\nSELECT * FROM users WHERE id = 1;" },
+];
+
+// 요소 만들기 도우미. 자식으로 문자열을 주면 텍스트 노드로 들어간다.
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [name, value] of Object.entries(attrs)) {
+    if (value === undefined || value === null || value === false) continue;
+    if (name === "class") node.className = value;
+    else node.setAttribute(name, value === true ? "" : value);
+  }
+  for (const child of children) {
+    if (child !== undefined && child !== null && child !== false) node.append(child);
+  }
+  return node;
+}
+
+function formatMs(ms) {
+  return ms < 10 ? `${ms.toFixed(2)} ms` : `${ms.toFixed(1)} ms`;
+}
+
+const CACHE_LABEL = { hit: "HIT", miss: "MISS", bypass: "BYPASS" };
+
+// ----------------------------------------------------------------------
+// 탭 전환 (주소의 #redis / #sql 로 기억 → 새로고침해도 유지)
+// ----------------------------------------------------------------------
+const TABS = ["redis", "sql"];
+
+function selectTab(name) {
+  if (!TABS.includes(name)) name = "redis";
+  for (const tab of TABS) {
+    document.getElementById(`tab-${tab}`).hidden = tab !== name;
+  }
+  for (const button of document.querySelectorAll(".tabs .tab")) {
+    button.setAttribute("aria-selected", String(button.dataset.tab === name));
+  }
+  document.getElementById("main").classList.toggle("wide", name === "sql");
+  if (name === "sql") refreshSqlSide();
+}
+
+for (const button of document.querySelectorAll(".tabs .tab")) {
+  button.addEventListener("click", () => { location.hash = button.dataset.tab; });
+}
+window.addEventListener("hashchange", () => selectTab(location.hash.slice(1)));
+
+function sqlTabVisible() {
+  return !document.getElementById("tab-sql").hidden && !document.hidden;
+}
+
+// ----------------------------------------------------------------------
+// SQL 실행
+// ----------------------------------------------------------------------
+const sqlForm = document.getElementById("sql-form");
+
+const examples = document.getElementById("sql-examples");
+for (const example of EXAMPLES) {
+  const button = el("button", { type: "button", class: "small ghost" }, example.label);
+  button.title = example.sql;
+  button.addEventListener("click", () => {
+    sqlForm.sql.value = example.sql;
+    sqlForm.sql.focus();
+  });
+  examples.append(button);
+}
+
+// Ctrl+Enter (맥은 Cmd+Enter) 로 실행
+sqlForm.sql.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    sqlForm.requestSubmit();
+  }
+});
+
+sqlForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const sql = sqlForm.sql.value;
+  if (!sql.trim()) return;
+
+  const submit = sqlForm.querySelector("button[type=submit]");
+  submit.disabled = true;
+  const timing = document.getElementById("sql-timing");
+  const results = document.getElementById("sql-results");
+  const started = performance.now();
+  try {
+    const data = await api("POST", "/sql", { sql, use_cache: sqlForm.use_cache.checked });
+    renderTiming(data, performance.now() - started);
+    renderResults(data.results);
+  } catch (err) {
+    // 400(닫히지 않은 문자열 등 스크립트 전체를 못 읽는 오류), 422(body 형식 오류) 등
+    timing.textContent = "";
+    results.replaceChildren(
+      el("div", { class: "stmt error" },
+        el("div", { class: "stmt-body err" }, (err.status ? `[${err.status}] ` : "") + err.message)),
+    );
+  } finally {
+    submit.disabled = false;
+    refreshSqlSide();
+  }
+});
+
+// 서버 처리 시간(elapsed_ms)과 브라우저에서 잰 시간(네트워크 + JSON 처리 포함)을 함께 보여준다
+function renderTiming(data, clientMs) {
+  const timing = document.getElementById("sql-timing");
+  timing.replaceChildren(
+    "서버 ", el("strong", {}, formatMs(data.elapsed_ms)),
+    " · 브라우저 ", el("strong", {}, formatMs(clientMs)), " (네트워크·JSON 포함)",
+    ` · 문장 ${data.results.length}개`,
+    data.errors ? `, 오류 ${data.errors}개` : "",
+  );
+}
+
+function renderResults(results) {
+  const container = document.getElementById("sql-results");
+  container.replaceChildren(...results.map((result, i) => renderStatement(result, i + 1)));
+}
+
+function renderStatement(result, n) {
+  const head = el("div", { class: "stmt-head" },
+    el("span", { class: "mono" }, `[${n}]`),
+    el("span", { class: "stmt-sql mono" }, result.statement ?? "(문법 오류)"),
+  );
+  let body;
+
+  if (result.type === "select") {
+    head.append(
+      el("span", { class: `badge ${result.cache}` }, CACHE_LABEL[result.cache] ?? result.cache),
+      el("span", { class: result.used_index ? "badge index" : "badge bypass" },
+        result.used_index ? "id 인덱스" : "전체 스캔"),
+    );
+    body = el("div", { class: "stmt-body" }, renderRows(result));
+  } else if (result.type === "insert") {
+    const ids = result.ids.length > 20
+      ? `${result.ids.slice(0, 20).join(", ")}, … (${result.ids.length}개)`
+      : result.ids.join(", ");
+    body = el("div", { class: "stmt-body" },
+      `${result.count}개 행이 '${result.table}' 에 추가됨`, ids ? ` (id: ${ids})` : "");
+  } else if (result.type === "create") {
+    body = el("div", { class: "stmt-body" }, result.created
+      ? `테이블 '${result.table}' 생성됨 (컬럼: ${result.columns.join(", ")})`
+      : `테이블 '${result.table}' 이(가) 이미 있어서 건너뜀`);
+  } else {
+    head.append(el("span", { class: "badge error" }, "오류"));
+    body = el("div", { class: "stmt-body err" }, result.error);
+  }
+
+  head.append(el("span", { class: "ms" }, formatMs(result.elapsed_ms)));
+  return el("div", { class: `stmt ${result.type}` }, head, body);
+}
+
+function renderRows(result) {
+  const fragment = document.createDocumentFragment();
+  fragment.append(el("div", { class: "more" }, `${result.count}개 행`));
+  if (result.count === 0) return fragment;
+
+  const thead = el("thead", {}, el("tr", {}, ...result.columns.map((c) => el("th", {}, c))));
+  const tbody = el("tbody", {}, ...result.rows.slice(0, MAX_ROWS).map(
+    (row) => el("tr", {}, ...row.map((cell) => el("td", {}, cell))),
+  ));
+  fragment.append(el("div", { class: "table-wrap" }, el("table", { class: "data" }, thead, tbody)));
+  if (result.count > MAX_ROWS) {
+    fragment.append(el("div", { class: "more" }, `처음 ${MAX_ROWS}행만 표시 (외 ${result.count - MAX_ROWS}행)`));
+  }
+  return fragment;
+}
+
+// ----------------------------------------------------------------------
+// 캐시 통계 / 캐시 키 목록
+// ----------------------------------------------------------------------
+async function refreshStats() {
+  const s = await api("GET", "/sql/stats");
+  const stat = (label, value) => el("div", { class: "stat" },
+    el("div", { class: "label" }, label), el("div", { class: "value" }, String(value)));
+  document.getElementById("sql-stats").replaceChildren(
+    stat("hit률", `${(s.hit_rate * 100).toFixed(1)}%`),
+    stat("HIT", s.hits),
+    stat("MISS", s.misses),
+    stat("BYPASS", s.bypassed),
+    stat("무효화", s.invalidations),
+    stat("TTL", `${s.ttl}+${s.ttl_jitter}s`),
+  );
+}
+
+// 버전은 time_ns 로 시작해서 길기 때문에 뒷자리만 보여준다 (INSERT 하면 마지막 자리가 바뀜)
+function shortVersion(version) {
+  return version.length > 6 ? `…${version.slice(-6)}` : version;
+}
+
+async function refreshCache() {
+  const { versions, entries } = await api("GET", "/sql/cache");
+
+  const chips = Object.entries(versions).map(([table, version]) => {
+    const del = el("button", { type: "button", class: "small ghost", title: "버전 키만 지우기 (새 세대로 다시 시작)" }, "DEL");
+    del.addEventListener("click", () => deleteKey(`dbcache:ver:${table}`));
+    return el("span", { class: "chip", title: `dbcache:ver:${table} = ${version}` },
+      el("span", {}, table), el("span", { class: "mono" }, `v${shortVersion(version)}`), del);
+  });
+  document.getElementById("cache-versions").replaceChildren(
+    ...(chips.length ? chips : [el("span", { class: "note" }, "버전 키 없음")]),
+  );
+
+  const tbody = document.querySelector("#cache-table tbody");
+  if (entries.length === 0) {
+    tbody.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: "6" }, "캐시된 결과 없음")));
+    return;
+  }
+  tbody.replaceChildren(...entries.map((entry) => {
+    const del = el("button", { type: "button", class: "small ghost" }, "DEL");
+    del.addEventListener("click", () => deleteKey(entry.key));
+    return el("tr", { class: entry.current ? null : "stale", title: entry.key },
+      el("td", {}, el("span", { class: entry.current ? "badge hit" : "badge stale" },
+        entry.current ? "현재" : "이전 버전")),
+      el("td", {}, entry.table),
+      el("td", { class: "mono" }, `v${shortVersion(entry.version)}`),
+      el("td", { class: "mono" }, `${entry.ttl}s`),
+      el("td", { class: "sql mono" }, entry.sql ?? ""),
+      el("td", {}, del),
+    );
+  }));
+}
+
+let refreshing = false;
+async function refreshSqlSide() {
+  if (refreshing) return;   // 앞의 새로고침이 끝나기 전에 또 요청하지 않음
+  refreshing = true;
+  try {
+    await Promise.all([refreshStats(), refreshCache()]);
+    show("cache-result", "", true);
+  } catch (err) {
+    show("cache-result", `새로고침 실패: ${err.message}`, false);
+  } finally {
+    refreshing = false;
+  }
+}
+
+async function deleteKey(key) {
+  try {
+    await api("DELETE", keyPath(key));
+  } catch (err) {
+    show("cache-result", `DEL 실패: ${err.message}`, false);
+  }
+  refreshSqlSide();
+}
+
+document.getElementById("cache-refresh").addEventListener("click", refreshSqlSide);
+
+document.getElementById("cache-flushall").addEventListener("click", async () => {
+  if (!confirm("Redis의 모든 키(캐시가 아닌 일반 키 포함)를 지웁니다. 계속할까요?")) return;
+  try {
+    await api("POST", "/flushall");
+  } catch (err) {
+    show("cache-result", `FLUSHALL 실패: ${err.message}`, false);
+  }
+  refreshSqlSide();
+});
+
+// TTL 이 줄어드는 것을 보이게 1초마다 새로고침 (SQL 탭이 보이고 체크되어 있을 때만)
+setInterval(() => {
+  if (document.getElementById("cache-auto").checked && sqlTabVisible()) refreshSqlSide();
+}, 1000);
+
+selectTab(location.hash.slice(1));

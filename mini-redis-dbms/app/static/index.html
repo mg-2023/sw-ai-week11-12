@@ -3,13 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>mini-redis</title>
+  <title>mini-redis-dbms</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <main>
-    <h1>mini-redis</h1>
-    <p class="sub">SET / GET / DEL / EXISTS 테스트 페이지 · API 문서는 <a href="/docs">/docs</a></p>
+  <main id="main">
+    <h1>mini-redis-dbms</h1>
+    <p class="sub">Redis 명령과 SQL(DBMS + Redis 캐시) 테스트 페이지 · API 문서는 <a href="/docs">/docs</a></p>
+
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab" role="tab" data-tab="redis">Redis</button>
+      <button type="button" class="tab" role="tab" data-tab="sql">SQL + 캐시</button>
+    </nav>
+
+    <!-- ================= Redis 탭 ================= -->
+    <div id="tab-redis" class="panel" role="tabpanel">
 
     <!-- SET key value [EX ttl] [NX|XX] -->
     <section>
@@ -58,6 +66,55 @@
       </form>
       <div class="result" id="exists-result"></div>
     </section>
+    </div>
+
+    <!-- ================= SQL 탭 ================= -->
+    <div id="tab-sql" class="panel" role="tabpanel" hidden>
+      <!-- POST /sql -->
+      <section>
+        <h2>SQL 실행</h2>
+        <div class="examples" id="sql-examples"></div>
+        <form id="sql-form">
+          <textarea name="sql" rows="5" spellcheck="false"
+                    placeholder="SELECT * FROM users WHERE id = 1;&#10;문장 여러 개는 ; 로 구분"></textarea>
+          <div class="row">
+            <label class="opt"><input type="checkbox" name="use_cache" checked> 캐시 사용 (끄면 bypass)</label>
+            <span class="spacer"></span>
+            <span class="hint">Ctrl + Enter</span>
+            <button type="submit">실행</button>
+          </div>
+        </form>
+        <div class="timing" id="sql-timing"></div>
+        <div id="sql-results"></div>
+      </section>
+
+      <!-- GET /sql/stats -->
+      <section>
+        <h2>캐시 통계</h2>
+        <div class="stats" id="sql-stats"></div>
+      </section>
+
+      <!-- GET /sql/cache -->
+      <section>
+        <div class="section-head">
+          <h2>캐시 키</h2>
+          <label class="opt"><input type="checkbox" id="cache-auto" checked> 1초마다 새로고침</label>
+          <button type="button" class="small ghost" id="cache-refresh">새로고침</button>
+          <button type="button" class="small danger" id="cache-flushall">FLUSHALL</button>
+        </div>
+        <p class="note">INSERT 하면 테이블 버전이 1 오르고, 이전 버전의 결과는 더 이상 조회되지 않은 채 TTL 이 끝나면 사라집니다.</p>
+        <div class="versions" id="cache-versions"></div>
+        <div class="table-wrap">
+          <table class="data" id="cache-table">
+            <thead>
+              <tr><th>상태</th><th>테이블</th><th>버전</th><th>TTL</th><th>SQL</th><th></th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="result" id="cache-result"></div>
+      </section>
+    </div>
   </main>
 
   <script src="/static/app.js"></script>

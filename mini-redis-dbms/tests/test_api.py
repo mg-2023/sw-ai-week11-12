@@ -26,7 +26,7 @@ class ApiTestBase(unittest.TestCase):
         self.clock = FakeClock()
         self.store = RedisStore(clock=self.clock)
         # with 문으로 열어야 lifespan(능동 만료 스레드 시작/종료)이 실행됨
-        self.client = TestClient(create_app(self.store))
+        self.client = TestClient(create_app(self.store, warm_up=False))  # Redis API만 테스트 (실제 data/ 를 읽지 않게)
         self.client.__enter__()
 
     def tearDown(self):
@@ -177,7 +177,7 @@ class TestQueueFull(ApiTestBase):
 class TestLifespan(unittest.TestCase):
     def test_active_expire_thread_follows_server_lifecycle(self):
         store = RedisStore()
-        with TestClient(create_app(store)):
+        with TestClient(create_app(store, warm_up=False)):
             self.assertIsNotNone(store._expire_thread)
         self.assertIsNone(store._expire_thread)
 

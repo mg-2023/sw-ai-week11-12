@@ -165,9 +165,46 @@ class BypassAndErrorTest(CacheTestBase):
         self.assertEqual(results[2]["rows"], [["kim"]])
         self.assertEqual(len(self.query_keys()), 1)
 
+    def test_every_result_has_elapsed_ms(self):
+        results = self.sql.run("SELECT * FROM users; SELEC 1; INSERT INTO posts (title) VALUES ('t');")
+        self.assertEqual([r["type"] for r in results], ["select", "error", "insert"])
+        for r in results:
+            self.assertIsInstance(r["elapsed_ms"], float)
+            self.assertGreaterEqual(r["elapsed_ms"], 0)
+
     def test_tokenize_error_raises(self):
         with self.assertRaises(SQLError):
             self.sql.run("SELECT * FROM users WHERE name = 'kim;")
+
+
+class CacheEntriesTest(CacheTestBase):
+    def test_lists_versions_and_entries_with_staleness(self):
+        self.one("SELECT name FROM users WHERE age > 26;")
+        self.clock.now += 10
+        self.one("INSERT INTO users (name, age) VALUES ('choi', 40);")
+        self.one("select name from users where age > 26")  # 새 버전으로 다시 캐시
+
+        info = self.sql.cache_entries()
+        self.assertEqual(set(info["versions"]), {"users", "posts"})
+        entries = info["entries"]
+        self.assertEqual([e["current"] for e in entries], [True, False])  # 현재 버전이 먼저
+        new, old = entries
+        self.assertEqual(new["version"], info["versions"]["users"])
+        self.assertEqual(int(new["version"]), int(old["version"]) + 1)
+        self.assertEqual((new["ttl"], old["ttl"]), (self.TTL, self.TTL - 10))
+        self.assertEqual(old["sql"], "SELECT name FROM users WHERE age > 26")
+        self.assertEqual(new["sql"], "select name from users where age > 26")
+
+    def test_expired_entries_are_not_listed(self):
+        self.one("SELECT * FROM users;")
+        self.clock.now += self.TTL + 1
+        self.assertEqual(self.sql.cache_entries()["entries"], [])
+
+    def test_ignores_non_cache_keys(self):
+        self.store.set("plain", "v")
+        self.store.set("dbcache:something", "v")
+        self.one("SELECT * FROM users;")
+        self.assertEqual(len(self.sql.cache_entries()["entries"]), 1)
 
 
 class SingleFlightTest(CacheTestBase):
@@ -223,8 +260,17 @@ class SqlApiTest(unittest.TestCase):
         self.assertEqual((first["cache"], second["cache"]), ("miss", "hit"))
         self.assertEqual(second["rows"], [["a"], ["b"]])
 
+        self.assertGreaterEqual(self.post("SELECT v FROM t;").json()["elapsed_ms"], 0)
         stats = self.client.get("/sql/stats").json()
-        self.assertEqual((stats["hits"], stats["misses"], stats["hit_rate"]), (1, 1, 0.5))
+        self.assertEqual((stats["hits"], stats["misses"]), (2, 1))
+
+    def test_cache_endpoint(self):
+        self.post("CREATE TABLE t (id, v); SELECT * FROM t;")
+        body = self.client.get("/sql/cache").json()
+        self.assertIn("t", body["versions"])
+        self.assertEqual(len(body["entries"]), 1)
+        self.assertEqual(body["entries"][0]["sql"], "SELECT * FROM t")
+        self.assertTrue(body["entries"][0]["current"])
 
     def test_cache_keys_visible_through_redis_api(self):
         self.post("CREATE TABLE t (id, v); SELECT * FROM t;")
@@ -244,6 +290,79 @@ class SqlApiTest(unittest.TestCase):
         self.post("CREATE TABLE t (id, v);")
         res = self.post("SELECT * FROM t;", use_cache=False).json()["results"][0]
         self.assertEqual(res["cache"], "bypass")
+
+
+class WarmUpTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name)
+        (self.data_dir / "users.csv").write_text("id,name\n1,kim\n2,lee\n3,park\n", encoding="utf-8")
+        (self.data_dir / "logs.csv").write_text("msg\nhello\n", encoding="utf-8")         # id 컬럼 없음
+        (self.data_dir / "broken.csv").write_text("id,name\nabc,x\n", encoding="utf-8")   # id 가 정수가 아님
+        (self.data_dir / "notes.txt").write_text("not a table", encoding="utf-8")        # 테이블 아님
+        self.db = CSVDatabase(self.data_dir)
+        self.sql = CachedSQL(RedisStore(clock=FakeClock()), self.db, ttl_jitter=0)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def count_builds(self):
+        """db._build_index 호출 횟수를 세도록 바꿔 두고, 횟수가 담긴 리스트를 돌려준다"""
+        builds = []
+        original = self.db._build_index
+
+        def counting(table):
+            builds.append(table)
+            return original(table)
+
+        self.db._build_index = counting
+        return builds
+
+    def test_tables_lists_csv_files(self):
+        self.assertEqual(self.db.tables(), ["broken", "logs", "users"])
+        self.assertEqual(CSVDatabase(self.data_dir / "missing").tables(), [])
+
+    def test_report_per_table(self):
+        report = {item["table"]: item for item in self.sql.warm_up()}
+        self.assertEqual(set(report), {"broken", "logs", "users"})
+        self.assertEqual(report["users"]["rows"], 3)
+        self.assertIsNone(report["logs"]["rows"])
+        self.assertIn("정수가 아니어서", report["broken"]["error"])  # 오류가 나도 다른 테이블은 계속
+        for item in report.values():
+            self.assertGreaterEqual(item["elapsed_ms"], 0)
+
+    def test_first_id_query_after_warm_up_does_not_build_index(self):
+        builds = self.count_builds()
+        self.sql.warm_up()
+        self.assertIn("users", builds)
+        builds.clear()
+
+        res = self.sql.run("SELECT * FROM users WHERE id = 2;")[0]
+        self.assertEqual((res["rows"], res["used_index"]), ([["2", "lee"]], True))
+        self.assertEqual(builds, [])  # 워밍업 때 만든 인덱스를 그대로 씀
+
+    def test_without_warm_up_first_id_query_builds_index(self):
+        builds = self.count_builds()
+        self.sql.run("SELECT * FROM users WHERE id = 2;")
+        self.assertEqual(builds, ["users"])
+
+    def test_server_startup_runs_warm_up(self):
+        builds = self.count_builds()
+        with self.assertLogs("uvicorn.error", level="INFO") as logs:
+            with TestClient(create_app(RedisStore(clock=FakeClock()), self.sql)):
+                pass
+        self.assertEqual(sorted(builds), ["broken", "logs", "users"])  # 세 테이블 모두 확인 (logs 는 결과가 None)
+        text = "\n".join(logs.output)
+        self.assertIn("워밍업: users - id 인덱스 3행", text)
+        self.assertIn("워밍업: logs - id 컬럼 없음", text)
+        self.assertIn("워밍업 실패: broken", text)
+        self.assertIn("워밍업 완료: 테이블 3개", text)
+
+    def test_server_startup_without_warm_up(self):
+        builds = self.count_builds()
+        with TestClient(create_app(RedisStore(clock=FakeClock()), self.sql, warm_up=False)):
+            pass
+        self.assertEqual(builds, [])
 
 
 if __name__ == "__main__":

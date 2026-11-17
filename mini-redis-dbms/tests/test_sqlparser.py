@@ -166,6 +166,50 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(errors, 1)
         self.assertIn("1개 행 조회", out.getvalue())
 
+    def test_run_script_quiet_prints_only_errors(self):
+        out = io.StringIO()
+        errors = run_script(
+            "INSERT INTO users VALUES (3, 'a', 1);\nSELECT * FROM missing;\nSELEC 1;\nSELECT name FROM users WHERE id = 3;",
+            self.db,
+            out=out,
+            quiet=True,
+        )
+        self.assertEqual(errors, 2)
+        text = out.getvalue()
+        # 실행 오류는 어떤 문장이었는지 함께, 문법 오류는 원래처럼 번호와 함께 나온다
+        self.assertIn("[2] SELECT * FROM missing\n실행 오류 - ", text)
+        self.assertIn("[3] 문법 오류 - ", text)
+        # 성공한 문장([1] INSERT, [4] SELECT)은 출력되지 않는다
+        self.assertNotIn("[1]", text)
+        self.assertNotIn("[4]", text)
+        self.assertNotIn("추가되었습니다", text)
+        self.assertNotIn("행 조회", text)
+        # 출력만 안 할 뿐 실행은 된다
+        self.assertEqual(self.run_sql("SELECT name FROM users WHERE id = 3").rows, [["a"]])
+
+    def test_run_script_quiet_without_errors_prints_nothing(self):
+        out = io.StringIO()
+        self.assertEqual(run_script("INSERT INTO users VALUES (3, 'a', 1); SELECT * FROM users;", self.db,
+                                    out=out, quiet=True), 0)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_cli_quiet_flag(self):
+        from sqlparser import main
+
+        sql_file = Path(self.tmp.name) / "q.txt"
+        sql_file.write_text("INSERT INTO users VALUES (3, 'a', 1);\nSELECT * FROM users;", encoding="utf-8")
+        for flag in ("-q", "--quiet"):
+            with self.subTest(flag=flag):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = main([str(sql_file), "--data-dir", self.tmp.name, flag])
+                # 두 번째 반복에서는 id 3 이 이미 있어서 INSERT 가 실패한다 → 오류만 출력
+                if flag == "-q":
+                    self.assertEqual((code, out.getvalue()), (0, ""))
+                else:
+                    self.assertEqual(code, 1)
+                    self.assertIn("실행 오류", out.getvalue())
+
 
 class IdIndexTest(unittest.TestCase):
     """id 컬럼이 있는 테이블의 자동 id 부여와 B+ 트리 인덱스 조회"""

@@ -66,7 +66,10 @@ Redis를 캐시로 앞에 두기 위한, CSV 파일 기반의 간단한 DBMS
 # sql/ 디렉토리에 sample.txt를 만들었다고 가정
 python app/sqlparser.py sql/sample.txt
 python app/sqlparser.py my.txt --data-dir 다른/디렉토리
+python app/sqlparser.py large.txt -q                 # 성공한 문장은 출력하지 않고 오류만 출력
 ```
+- `-q`, `--quiet`: 대량 INSERT처럼 문장이 많을 때 사용. 실행 결과는 같고, 출력만 오류로 줄어듦 (오류가 있으면 종료 코드 1)
+- 대량 데이터를 넣을 때는 `INSERT ... VALUES (...), (...), ...`처럼 한 문장에 여러 행을 넣는 게 훨씬 빠름. INSERT 한 문장마다 CSV 파일을 세 번 열기 때문 (50만 행 기준: 한 줄씩 약 2.5분, 1000행씩 약 8초)
 
 지원 문법
 ```sql
@@ -159,6 +162,7 @@ INSERT ─→ Executor(CSV 쓰기) ─→ 테이블 버전 INCR (이 테이블�
 |---|---|
 | `POST /sql` | body: `{"sql": "...", "use_cache": true}`. 문장마다 결과를 돌려주고, SELECT에는 `cache: hit / miss / bypass`가 붙음 |
 | `GET /sql/stats` | hit / miss / bypass 횟수, hit률, 무효화 횟수 |
+| `GET /sql/cache` | 테이블별 현재 버전, 캐시된 결과마다 남은 TTL / 현재 버전 여부(`current`) / 원문 SQL |
 
 ```bash
 curl -X POST http://127.0.0.1:8000/sql -H "Content-Type: application/json" \
@@ -167,10 +171,32 @@ curl -X POST http://127.0.0.1:8000/sql -H "Content-Type: application/json" \
 ```json
 {"results": [{"type": "select", "statement": "SELECT name, age FROM users WHERE age >= 25",
               "columns": ["name", "age"], "rows": [["김철수", "25"], ...], "count": 4,
-              "used_index": false, "cache": "miss"}],
- "errors": 0}
+              "used_index": false, "cache": "miss", "elapsed_ms": 1.83}],
+ "errors": 0, "elapsed_ms": 2.1}
 ```
+- `elapsed_ms`: 서버 처리 시간(밀리초). 문장마다 하나, 요청 전체에 하나
 - 한 문장이 실패해도 다음 문장은 계속 실행하고, 실패한 문장은 `"type": "error"`로 응답 (200)
 - 닫히지 않은 문자열처럼 스크립트 전체를 읽을 수 없는 오류는 400
 - `use_cache: false`면 캐시를 읽지도 쓰지도 않음 (성능 비교용, `cache: "bypass"`)
 - 캐시 키도 일반 Redis 키이므로 `GET /keys`, `GET /keys/{key}/ttl`로 직접 볼 수 있음
+
+### 서버 시작 워밍업
+B+ 트리 인덱스는 메모리에만 있어서, 그냥 두면 서버를 켠 뒤 **첫 id 조회가 인덱스 생성 시간을 대신 기다림** (50만 행 기준 약 1.1초)
+
+그래서 서버가 켜질 때 `data/`의 모든 테이블 인덱스를 미리 만들고, 끝난 뒤에 요청을 받음
+```
+INFO:     워밍업: users - id 인덱스 500000행, 1100.3 ms
+INFO:     워밍업 완료: 테이블 2개, 1114.3 ms
+INFO:     Application startup complete.
+```
+- id 컬럼이 없는 테이블은 건너뛰고, id가 정수가 아닌 등 인덱스를 못 만드는 테이블은 경고만 남기고 서버는 계속 켜짐
+- `create_app(warm_up=False)`로 끌 수 있음 (Redis API 테스트처럼 DBMS를 쓰지 않을 때)
+
+### 웹 테스트 페이지
+http://127.0.0.1:8000/#sql 의 **SQL + 캐시** 탭 (`Redis` 탭은 기존 SET / GET / DEL / EXISTS)
+
+- **SQL 실행**: 예시 쿼리 버튼, `Ctrl + Enter` 실행, 캐시 사용 체크(끄면 bypass)
+- **문장별 결과**: SELECT는 결과 표(최대 100행)와 `HIT` / `MISS` / `BYPASS`, `id 인덱스` / `전체 스캔` 배지, 문장별 처리 시간
+- **시간 비교**: 서버 처리 시간과 브라우저에서 잰 시간(네트워크·JSON 포함)을 함께 표시
+- **캐시 통계**: hit률, HIT / MISS / BYPASS, 무효화 횟수
+- **캐시 키**: 테이블 버전과 캐시된 결과 목록(1초마다 TTL 갱신). INSERT 뒤 옛 결과는 `이전 버전`으로 표시되고 TTL이 끝나면 사라짐. 키별 `DEL`, 버전 키 `DEL`(새 세대로 다시 시작), `FLUSHALL`
