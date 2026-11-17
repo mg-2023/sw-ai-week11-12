@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/C11-single_thread-dc382d?style=for-the-badge&labelColor=161f31">
   <img src="https://img.shields.io/badge/protocol-RESP2_over_TCP-dc382d?style=for-the-badge&labelColor=161f31">
   <img src="https://img.shields.io/badge/libraries-0-dc382d?style=for-the-badge&labelColor=161f31">
-  <img src="https://img.shields.io/badge/tests-47_passing-dc382d?style=for-the-badge&labelColor=161f31">
+  <img src="https://img.shields.io/badge/tests-124_passing-dc382d?style=for-the-badge&labelColor=161f31">
 </p>
 
 <sub>크래프톤 정글 · Mini Redis 구현 과제</sub><br>
@@ -24,68 +24,13 @@
 
 ## 🚀 실행 방법
 
-Mini Redis 서버를 켜 두고, 다른 애플리케이션이 TCP로 연결해 키-값 저장소로 쓰는 순서입니다.
-
-### 1. 빌드
-
 ```powershell
-mingw32-make          # Windows, MinGW-w64의 gcc. mini-redis.exe가 생깁니다
+mingw32-make            # 빌드 (Windows, MinGW-w64). POSIX 는 make
+.\mini-redis.exe        # 127.0.0.1:6379 에서 연결을 받습니다
 ```
 
-POSIX에서는 `make`로 빌드하고 `./mini-redis`로 실행합니다.
-
-### 2. 서버 켜기
-
-```powershell
-.\mini-redis.exe                                # 127.0.0.1:6379에서 연결을 받습니다
-.\mini-redis.exe --port 7000 --aof data.aof     # 포트를 바꾸고, 재시작해도 데이터가 남게 합니다
-```
-
-`Mini Redis listening on 127.0.0.1:6379`가 출력되면 연결을 받을 준비가 된 것입니다.
-
-| 서버 옵션 | 뜻 |
-|---|---|
-| `--bind IPv4`, `--port PORT` | 수신 주소. 기본 `127.0.0.1:6379`, `0`이면 임의 포트 |
-| `--aof FILE`, `--appendfsync always\|everysec\|no` | 쓰기 명령을 파일에 기록하고 시작할 때 재생합니다 |
-| `--snapshot FILE` | `SAVE` 명령으로 전체를 저장하고 시작할 때 복원합니다. `--aof`와 함께 쓸 수 없습니다 |
-| `--expire-cycle-ms MS` | 만료된 키를 정리하는 주기. 기본 100, `0`이면 끔 |
-| `--log FILE` 또는 `--log -` | 받은 명령과 응답을 파일 또는 표준 오류로 기록. 기본은 꺼짐 |
-
-### 3. 애플리케이션에서 연결하기
-
-Redis 클라이언트 라이브러리 없이, TCP 소켓으로 연결해 RESP2 형식의 명령을 보냅니다. 아래는 파이썬 표준 라이브러리만 쓴 예시이고, 주석은 실제로 받은 응답입니다.
-
-```python
-import socket
-
-
-def command(sock, *args):
-    """명령 하나를 RESP2 배열로 만들어 보내고 응답을 그대로 돌려줍니다."""
-    request = f"*{len(args)}\r\n".encode()
-    for arg in args:
-        data = str(arg).encode()
-        request += f"${len(data)}\r\n".encode() + data + b"\r\n"
-    sock.sendall(request)
-    return sock.recv(4096)
-
-
-with socket.create_connection(("127.0.0.1", 6379)) as sock:
-    print(command(sock, "SET", "session:42", "kim", "EX", 30))  # b'+OK\r\n'        캐시 저장, 30초 뒤 만료
-    print(command(sock, "GET", "session:42"))                   # b'$3\r\nkim\r\n'  길이 3인 값 kim
-    print(command(sock, "INCR", "visits"))                      # b':1\r\n'         정수 1
-    print(command(sock, "DEL", "session:42"))                   # b':1\r\n'         지운 키 수
-    print(command(sock, "GET", "session:42"))                   # b'$-1\r\n'        값 없음 (nil)
-```
-
-| 보내는 것과 받는 것 | 형식 |
-|---|---|
-| 명령 | 인자 개수 `*N`, 그 뒤에 인자마다 길이 `$길이`와 내용. 줄 끝은 `\r\n` |
-| 성공 응답 | `+OK` |
-| 정수 응답 | `:1` |
-| 값 응답 | `$길이`와 내용. 값이 없으면 `$-1` |
-| 오류 응답 | `-ERR 메시지` |
-
-Node.js 예시는 오목 백엔드의 [`backend/resp-client.js`](https://github.com/Jongeume/mini-react/blob/main/backend/resp-client.js)입니다. `net` 소켓으로 같은 형식을 보냅니다. 쓸 수 있는 명령 전체는 [외부 API](#-외부-api)에 있습니다.
+다른 애플리케이션은 Redis 클라이언트 라이브러리 없이, TCP 소켓으로 연결해 RESP2 형식의 명령을 보냅니다.
+서버 옵션, 연결 예시, 명령별 응답은 [API 문서](docs/api.md)에 있습니다.
 
 <br>
 
@@ -99,9 +44,9 @@ Node.js 예시는 오목 백엔드의 [`backend/resp-client.js`](https://github.
 | 중점 | 만료된 값을 요청받았을 때의 처리 | 조회 시 만료와 주기 정리 | [결정 2](#2-데이터-만료) |
 | 중점 | 저장된 데이터의 무효화 | `DEL`로 즉시 삭제, TTL은 안전망 | [결정 3](#3-데이터-무효화) |
 | 선택 | 서버가 다운돼도 데이터 유지 | RDB 방식의 스냅샷과 AOF | [결정 4](#4-장애-복구-선택-항목) |
-| 품질 | 저장 · 조회 · 삭제 단위 테스트 | 저장소 단위 테스트 10개 | [검증](#-검증) |
+| 품질 | 저장 · 조회 · 삭제 단위 테스트 | 저장소 · 명령 · 영속성 등 단위 테스트 91개 | [검증](#-검증) |
 | 품질 | API 응답을 Mini Redis에 저장해 활용 | 리포트 API, 오목 테스트 페이지의 요약 캐시 | [시연](#-시연) |
-| 품질 | 엣지 케이스 | 없는 키, 같은 키 다시 저장, 만료된 키 | [검증](#엣지-케이스) |
+| 품질 | 엣지 케이스 | 없는 키, 같은 키 다시 저장, 만료된 키를 포함한 경계 상황 | [검증](#엣지-케이스) |
 | 품질 | 사용 전후 성능 비교 | 처리량, 지연 시간 분포, 적중률 | [검증](#성능-비교) |
 
 <br>
@@ -119,14 +64,6 @@ Node.js 예시는 오목 백엔드의 [`backend/resp-client.js`](https://github.
                                                       persist.c
 ```
 
-| 계층 | 파일 | 역할 |
-|---|---|---|
-| 네트워크 | [`server.c`](src/server.c), [`net.c`](src/net.c) | `poll` 루프, 연결별 입출력 버퍼 |
-| 프로토콜 | [`resp.c`](src/resp.c) | 바이트 버퍼를 인자 배열로 파싱 |
-| 명령 | [`commands.c`](src/commands.c) | 명령 이름으로 분기해 저장소 함수를 호출 |
-| 저장소 | [`store.c`](src/store.c), [`siphash.c`](src/siphash.c) | 해시 테이블, 만료 리스트 |
-| 디스크 | [`persist.c`](src/persist.c) | 스냅샷 저장 · 복원, AOF 기록 · 재생 |
-
 <br>
 
 ## 🔌 외부 API
@@ -139,21 +76,7 @@ Node.js 예시는 오목 백엔드의 [`backend/resp-client.js`](https://github.
 | HTTP와 JSON | 브라우저와 `curl`로 바로 호출합니다 | 요청마다 머리말 비용이 붙고, 바이너리 값은 인코딩이 필요합니다 |
 | 라이브러리 함수 호출 | 네트워크 비용이 없습니다 | 같은 프로세스, 같은 언어에서만 쓸 수 있습니다 |
 
-| 명령 | 응답 |
-|---|---|
-| `SET key value [EX 초 \| PX 밀리초]` | `OK`. 같은 키에 다시 쓰면 값과 TTL을 모두 바꿉니다 |
-| `GET key` | 값. 키가 없거나 만료됐으면 `(nil)` |
-| `DEL key [key ...]` | 실제로 지운 키 수 |
-| `INCR key` | 1 증가한 값. 키가 없으면 `1`, 정수가 아니면 오류. TTL은 유지합니다 |
-| `EXPIRE key 초`, `PEXPIRE key 밀리초` | TTL을 바꾸면 `1`, 키가 없으면 `0`. 0 이하는 즉시 삭제 |
-| `PTTL key` | 남은 밀리초. TTL이 없으면 `-1`, 키가 없으면 `-2` |
-| `PING [message]`, `SAVE` | `PONG` 또는 받은 메시지, 스냅샷 저장 뒤 `OK` |
-
-```text
-요청 수신        RESP 파싱          명령 실행             해시 테이블              응답
-read_client  →  resp_parse   →  execute_command  →  store_set / store_get  →  queue_reply → write_client
-(server.c)      (resp.c)        (commands.c)         (store.c)                (server.c)
-```
+명령은 `SET`(TTL 지정 가능), `GET`, `DEL`, `INCR`, `EXPIRE` · `PEXPIRE`, `PTTL`, `PING`, `SAVE` 입니다. 응답 형식과 오류는 [API 문서](docs/api.md#명령)에 있습니다.
 
 <br>
 
@@ -169,20 +92,17 @@ read_client  →  resp_parse   →  execute_command  →  store_set / store_get 
 buckets[0] → NULL
 buckets[1] → Entry → Entry → NULL        같은 버킷의 항목은 연결 리스트로 잇습니다 (체이닝)
 buckets[2] → Entry → NULL
-
-Entry = { hash, 키 길이, 값 길이, 만료 시각, 체인의 다음 항목, 만료 리스트의 앞뒤 항목, 키와 값 바이트 }
 ```
 
 ### 주요 함수의 동작
 
-| 함수 | 하는 일 | 순서 |
-|---|---|---|
-| `store_set` | 저장 | 항목을 만들어 키와 값을 복사 → 같은 키가 있으면 그 자리의 항목을 교체 → 없으면 버킷 체인 맨 앞에 삽입 → 부하율 75%에 닿으면 두 배 크기 테이블 생성 |
-| `store_get` | 조회 | `find_live`로 항목을 찾음 → 값의 위치와 길이를 반환 (복사하지 않음) |
-| `store_delete` | 삭제 | `find_live`로 항목을 찾음 → 앞 항목의 링크를 다음 항목으로 바꿔 체인에서 제거 → 만료 리스트에서도 제거 |
-| `find_live` | 살아 있는 항목 찾기 | rehash 두 단계 진행 → 버킷 체인에서 키 비교 → 만료 시각이 지났으면 지우고 없음으로 처리 |
-| `find_in_table` | 키 비교 | 해시 → 길이 → 바이트 순서로 비교. 비용이 작은 비교에서 다르면 뒤는 보지 않습니다 |
-| `rehash_step` | 테이블 확장 | 옛 테이블의 항목을 정해진 수만큼만 새 테이블로 이동. 다 옮기면 새 테이블이 현재 테이블이 됩니다 |
+| 동작 | 순서 |
+|---|---|
+| 저장 (`store_set`) | 키의 버킷을 찾아 같은 키가 있으면 그 자리의 항목을 바꿉니다. 없으면 체인 맨 앞에 넣고, 75%가 차면 두 배 크기 테이블을 만듭니다 |
+| 조회 (`store_get`) | 버킷의 체인을 따라가며 키를 비교합니다. 만료 시각이 지났으면 그 자리에서 지우고 없다고 답합니다 |
+| 삭제 (`store_delete`) | 앞 항목의 링크를 다음 항목으로 바꿔 체인에서 빼고, 만료 리스트에서도 뺍니다 |
+
+함수별 입력 · 출력과 내부 함수(`find_live`, `find_in_table`, `rehash_step`)는 [API 문서](docs/api.md#저장소-함수)에 있습니다.
 
 ### 구현하며 고른 것
 
@@ -252,10 +172,10 @@ Entry = { hash, 키 길이, 값 길이, 만료 시각, 체인의 다음 항목, 
         expire_cursor : 다음 주기 정리가 검사를 시작할 항목
 ```
 
-| 경로 | 언제 | 코드 |
-|---|---|---|
-| 조회 시 만료 | 명령이 키에 접근할 때 만료 시각이 지났으면 지우고 `(nil)`을 반환 | `find_live` |
-| 주기 정리 | 100ms마다 커서부터 **최대 32개**를 검사해 지난 항목을 삭제. 다음 호출은 커서에서 이어 갑니다 | `store_maintain` |
+| 경로 | 언제 |
+|---|---|
+| 조회 시 만료 | 명령이 키에 접근할 때 만료 시각이 지났으면 지우고 `(nil)`을 반환 |
+| 주기 정리 | 100ms마다 커서부터 **최대 32개**를 검사해 지난 항목을 삭제. 다음 호출은 커서에서 이어 갑니다 |
 
 ```text
 [+     16ms] EXEC #1 conn=1 SET "cache:ghost" "v" "PX" "100" -> OK
@@ -350,43 +270,41 @@ Entry = { hash, 키 길이, 값 길이, 만료 시각, 체인의 다음 항목, 
 
 전체 로그는 [`docs/backend.log`](docs/backend.log), [`docs/mini-redis.log`](docs/mini-redis.log)에 있습니다.
 
-테스트 페이지는 [Jongeume/mini-react](https://github.com/Jongeume/mini-react) 저장소에서 실행합니다.
-
-```powershell
-.\mini-redis.exe                                   # 이 저장소
-node backend/gomoku-api.js --redis-port 6379       # mini-react 저장소, http://127.0.0.1:8090/
-node docs/demo/join-race.mjs                       # mini-react 저장소, 두 명을 동시에 입장시킵니다
-node docs/demo/shots.mjs                           # mini-react 저장소, 시연 스크린샷을 다시 찍습니다
-```
+테스트 페이지 실행 방법은 [API 문서](docs/api.md#테스트-페이지-실행)에 있습니다.
 
 <br>
 
 ## ✅ 검증
 
-| 테스트 | 명령 | 결과 |
+| 테스트 | 무엇을 확인하나 | 결과 |
 |---|---|---|
-| 저장소 단위 | `mingw32-make test` | 10개 시나리오 통과 |
-| SipHash 단위 | `mingw32-make test` | 공식 테스트 벡터 64개 일치 |
-| RESP 파싱 단위 | `mingw32-make test` | 3개 시나리오 통과 |
-| 영속성 단위 | `mingw32-make test` | 6개 시나리오 통과 |
-| 통합 (실제 서버에 TCP로 명령 전송) | `python tests/test_integration.py -v` | 12건 통과 |
-| 발표 장면 통합 | `python tests/test_scenarios.py -v` | 15건 통과 |
-| 오목 백엔드와 화면 (mini-react) | `npm test` | 693건 통과 |
+| 저장소 단위 | 저장 · 조회 · 삭제, 충돌 체인, 확장 중 조회, 만료 경계 | 28개 통과 |
+| 명령 단위 | 명령별 응답 · 인자 오류 · AOF 에 넘기는 변경 기록 | 26개 통과 |
+| RESP 파싱 단위 | 조각난 요청, 인자 수 · 크기 상한, 잘못된 형식 | 11개 통과 |
+| 영속성 단위 | 스냅샷 · AOF 왕복, 꺼져 있던 동안의 만료, 손상된 파일 | 22개 통과 |
+| SipHash 단위 | 공식 테스트 벡터 64개, 키 · 길이에 따른 출력 변화 | 4개 통과 |
+| 통합 | 실제 서버에 TCP 로 명령을 보내 응답 확인 | 17건 통과 |
+| 발표 장면 통합 | 설계 결정 절의 로그 장면과 강제 종료 뒤 복구 | 16건 통과 |
+| 오목 백엔드와 화면 (mini-react) | 방 · 입장 API, 화면 | 693건 통과 |
+
+실행 명령과 테스트 이름은 [API 문서](docs/api.md#테스트)에 있습니다.
 
 ### 엣지 케이스
 
-| 상황 | 동작 | 테스트 |
-|---|---|---|
-| 없는 키 조회 | `(nil)` | `test_binary_and_collision`, `test_binary_crud_and_multiple_delete` |
-| 같은 키 다시 저장 | 값과 TTL을 모두 새 값으로 교체 | `test_binary_and_collision`, `test_expiration` |
-| 만료된 키 조회 | 그 자리에서 지우고 `(nil)` | `test_expiration`, `test_expired_key_is_removed_on_access` |
-| 이미 지운 키를 다시 삭제 | 지운 수 `0` | `test_binary_and_collision` |
-| 빈 키, 빈 값, NUL이 든 값 | 그대로 저장하고 조회 | `test_binary_and_collision` |
-| 연결 12개가 같은 키를 동시에 `DEL` | `1` 한 건, `0` 열한 건 | `test_concurrent_clients_and_same_key_deletion` |
-| 연결 12개가 같은 키를 동시에 `INCR` | 1부터 12까지 하나씩 | `test_concurrent_incr_gives_each_client_a_distinct_number` |
-| 정수가 아닌 값에 `INCR` | 오류, 값은 그대로 | `test_incr_rejects_non_integer_and_overflow_without_changing_value` |
-| 명령이 조각나서 도착 | 다른 연결을 막지 않고 이어서 파싱 | `test_partial_frames_do_not_block_other_clients_and_pipeline_is_ordered` |
-| AOF 마지막 레코드가 쓰다 만 상태 | 그 부분만 잘라 내고 시작 | `test_aof_incomplete_last_record_is_truncated` |
+| 상황 | 동작 |
+|---|---|
+| 없는 키 조회 · 삭제 | `(nil)`, 지운 수 `0` |
+| 같은 키 다시 저장 | 값과 TTL 을 모두 새 값으로 교체, 항목 수는 그대로 |
+| 만료된 키 조회 | 그 자리에서 지우고 `(nil)`. 만료 시각과 현재 시각이 같으면 만료 |
+| 빈 키, 빈 값, NUL · CRLF 가 든 키와 값 | 그대로 저장하고 서로 다른 키로 구분 |
+| 같은 버킷 체인의 맨 앞 · 중간 · 끝 삭제 | 나머지 항목은 그대로 조회 |
+| 테이블 확장 중의 조회 · 덮어쓰기 · 삭제 · 만료 | 두 테이블에 걸친 항목도 정확히 처리 |
+| 연결 12개가 같은 키를 동시에 `DEL` · `INCR` | `DEL` 은 `1` 한 건, `INCR` 은 1부터 12까지 하나씩 |
+| 정수가 아닌 값, 최댓값에 `INCR` | 오류, 값과 TTL 은 그대로 |
+| 인자 16개 · 17개 요청, 크기 상한 경계 | 16개까지 실행, 넘으면 오류 뒤 연결 종료 |
+| 명령이 조각나서 도착, 도중에 연결 끊김 | 다른 연결을 막지 않고 이어서 파싱 |
+| AOF 마지막 레코드가 쓰다 만 상태 | 그 부분만 잘라 내고 시작 |
+| AOF 에 TTL 연장 기록이 있고 첫 만료 시각은 지난 상태로 재시작 | 연장한 TTL 로 복원 |
 
 ### 성능 비교
 
@@ -399,28 +317,7 @@ node docs/demo/shots.mjs                           # mini-react 저장소, 시�
 
 지연 시간 단위는 ms입니다. 3회 실행에서 캐시 미사용은 15.2에서 15.4 req/s로 일정했고, 캐시 사용은 102.8에서 316.2 req/s로 편차가 컸습니다. 세 번 모두 캐시 사용이 빨랐습니다.
 
-Mini Redis 자체의 명령별 지연입니다(명령마다 10000회, 연결 1개, 값 64바이트).
-
-| 명령 | 처리량 (req/s) | avg | p50 | p95 | p99 | max |
-|---|---:|---:|---:|---:|---:|---:|
-| `SET` | 22552 | 0.041 | 0.036 | 0.066 | 0.124 | 0.747 |
-| `GET` (적중) | 21543 | 0.043 | 0.037 | 0.084 | 0.141 | 0.832 |
-| `INCR` | 19181 | 0.048 | 0.039 | 0.106 | 0.154 | 0.754 |
-| `DEL` | 18100 | 0.051 | 0.041 | 0.093 | 0.138 | 0.917 |
-
-측정 조건, 연결 8개 결과, 편차는 [docs/benchmark.md](docs/benchmark.md)에 있습니다. 같은 PC의 루프백에서 파이썬 클라이언트로 측정한 값이라 서버의 한계 처리량으로 읽으면 안 됩니다.
-
-### 다시 실행하기
-
-```powershell
-mingw32-make test                 # 저장소 · SipHash · RESP · 영속성 단위 테스트
-python tests/test_integration.py -v
-python tests/test_scenarios.py -v
-python examples/demo.py all       # 설계 결정 절의 로그 장면 재현. 로그는 demo-output/ 에 저장됩니다
-python examples/benchmark.py      # 성능 측정
-```
-
-장애 복구 테스트는 서버의 시험용 옵션 `--debug-aof-fail-at N`, `--debug-snapshot-crash-after N`으로 장애를 주입합니다.
+측정 조건, 명령별 지연, 연결 8개 결과, 편차는 [docs/benchmark.md](docs/benchmark.md)에 있습니다. 같은 PC의 루프백에서 파이썬 클라이언트로 측정한 값이라 서버의 한계 처리량으로 읽으면 안 됩니다.
 
 <br>
 
@@ -443,6 +340,7 @@ python examples/benchmark.py      # 성능 측정
 
 | 문서 | 내용 |
 |---|---|
+| [docs/api.md](docs/api.md) | 서버 옵션, 연결 예시, 명령 레퍼런스, 계층별 파일과 함수, 테스트 실행 |
 | [docs/adr/0001-siphash.md](docs/adr/0001-siphash.md) | 해시 함수를 FNV-1a에서 SipHash-2-4로 바꾼 결정 |
 | [docs/persistence.md](docs/persistence.md) | 동기화 정책, 재시작 전후 로그, AOF 파일 내용 |
 | [docs/benchmark.md](docs/benchmark.md) | 성능 측정 조건과 전체 결과 |
