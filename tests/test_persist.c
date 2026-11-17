@@ -636,6 +636,26 @@ static void test_aof_only_past_ttl_set(void) {
     remove(AOF);
 }
 
+/* AOF : 재시작한 단조 시계가 0 이어도 지난 만료 시각의 키는 재생 뒤 지운다 */
+static void test_aof_past_ttl_dropped_at_monotonic_zero(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    append(&aof, CHANGE_SET, BYTES("k"), BYTES("v"), RUN1_MONO + 1000);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, 0, RUN2_UNIX, &report));
+    assert(report.skipped_expired == 1 && store.size == 0);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
 int main(void) {
     test_snapshot_round_trip_with_downtime();
     test_snapshot_interrupted_and_corrupt();
@@ -658,9 +678,10 @@ int main(void) {
     test_aof_extended_ttl_survives_replay();
     test_aof_past_ttl_then_plain_set();
     test_aof_only_past_ttl_set();
+    test_aof_past_ttl_dropped_at_monotonic_zero();
     remove(SNAP);
     remove(SNAP_TMP);
     remove(AOF);
-    puts("21 persistence unit scenarios passed");
+    puts("22 persistence unit scenarios passed");
     return 0;
 }

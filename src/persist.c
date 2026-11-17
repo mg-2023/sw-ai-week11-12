@@ -402,7 +402,8 @@ typedef struct {
 static bool collect_expired(void *context, Bytes key, Bytes value, uint64_t deadline_ms) {
     ExpiredKeys *found = context;
     (void)value;
-    if (!deadline_ms || deadline_ms > found->now_ms) {
+    /* 재생 중 붙인 "이미 지난 시각" 표식은 현재 시각과 상관없이 만료로 본다(now_ms 가 0 이어도). */
+    if (!deadline_ms || (deadline_ms != REPLAYED_PAST_DEADLINE && deadline_ms > found->now_ms)) {
         return true;
     }
     if (!append_raw(&found->data, &found->used, &found->capacity, (const char *)&key.length, sizeof key.length) ||
