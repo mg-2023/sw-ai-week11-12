@@ -224,6 +224,53 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(sorted(results), list(range(1, workers + 1)))
         self.assertEqual(command(self.port, "GET", "incr:room"), b"12")
 
+    def test_lowercase_commands_work(self):
+        self.assertEqual(command(self.port, "set", "edge:lower", "v"), b"+OK")
+        self.assertEqual(command(self.port, "get", "edge:lower"), b"v")
+        self.assertEqual(command(self.port, "incr", "edge:lower:n"), 1)
+        self.assertEqual(command(self.port, "pexpire", "edge:lower", "60000"), 1)
+        self.assertGreater(command(self.port, "pttl", "edge:lower"), 0)
+        self.assertEqual(command(self.port, "del", "edge:lower", "edge:lower:n"), 2)
+        self.assertEqual(command(self.port, "ping"), b"+PONG")
+
+    def test_sixteen_arguments_run_and_seventeen_close_the_connection(self):
+        keys = [f"edge:many:{i}" for i in range(15)]
+        for key in keys:
+            self.assertEqual(command(self.port, "SET", key, "v"), b"+OK")
+        self.assertEqual(command(self.port, "DEL", *keys), 15)
+        with connect(self.port) as client, client.makefile("rb") as stream:
+            client.sendall(frame("DEL", *[f"edge:many:{i}" for i in range(16)]))
+            self.assertEqual(reply(stream), b"-ERR invalid RESP2 frame")
+            self.assertEqual(stream.read(), b"")
+        self.assertEqual(command(self.port, "PING"), b"+PONG")
+
+    def test_client_disconnect_mid_frame_does_not_affect_others(self):
+        request = frame("SET", "edge:torn", "never stored")
+        for cut in (1, 4, 8, len(request) - 3):
+            client = connect(self.port)
+            client.sendall(request[:cut])
+            client.close()
+        with connect(self.port) as other, other.makefile("rb") as stream:
+            other.sendall(frame("SET", "edge:alive", "yes") + frame("GET", "edge:alive"))
+            self.assertEqual([reply(stream), reply(stream)], [b"+OK", b"yes"])
+        self.assertIsNone(command(self.port, "GET", "edge:torn"))
+        self.assertEqual(command(self.port, "DEL", "edge:alive"), 1)
+
+    def test_ping_with_and_without_message(self):
+        self.assertEqual(command(self.port, "PING"), b"+PONG")
+        self.assertEqual(command(self.port, "PING", "hello"), b"hello")
+        self.assertEqual(command(self.port, "PING", ""), b"")
+        self.assertTrue(command(self.port, "PING", "a", "b").startswith(b"-ERR wrong number"))
+
+    def test_empty_key_and_empty_value(self):
+        self.assertEqual(command(self.port, "SET", b"", b""), b"+OK")
+        self.assertEqual(command(self.port, "GET", b""), b"")
+        self.assertEqual(command(self.port, "SET", b"", b"filled"), b"+OK")
+        self.assertEqual(command(self.port, "GET", b""), b"filled")
+        self.assertEqual(command(self.port, "DEL", b""), 1)
+        self.assertIsNone(command(self.port, "GET", b""))
+        self.assertEqual(command(self.port, "DEL", b""), 0)
+
     def test_external_http_api_fills_reads_and_refreshes_the_cache(self):
         with run_server(REPORT, "--redis-port", str(self.port)) as http_port:
             expected = {"orders": 12, "total_cents": 4200}
