@@ -174,6 +174,43 @@ static void test_integer_rejects_loose_forms(void) {
     assert(resp_integer(BYTES("-1"), &value) && value == -1);
 }
 
+/* 프레임 전체 크기가 RESP_MAX_FRAME 이하면 READY, 1바이트 넘으면 INVALID (인자 하나는 상한 이하여도 합이 넘는 경우) */
+static void test_frame_size_limit(void) {
+    static char frame[RESP_MAX_FRAME + 64];
+    size_t used = (size_t)sprintf(frame, "*3\r\n");
+    for (int i = 0; i < 2; ++i) {
+        used += (size_t)sprintf(frame + used, "$%d\r\n", RESP_MAX_BULK);
+        memset(frame + used, 'x', RESP_MAX_BULK);
+        used += RESP_MAX_BULK;
+        memcpy(frame + used, "\r\n", 2);
+        used += 2;
+    }
+    /* 셋째 인자의 길이 L 을 골라 프레임 전체가 정확히 RESP_MAX_FRAME 이 되게 한다 */
+    for (int delta = -1; delta <= 1; ++delta) {
+        char header[16];
+        int header_length = sprintf(header, "$%d\r\n", 0);
+        size_t length = 0;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            length = (size_t)RESP_MAX_FRAME - used - (size_t)header_length - 2;
+            header_length = sprintf(header, "$%zu\r\n", length);
+        }
+        length = length + (size_t)delta;
+        header_length = sprintf(header, "$%zu\r\n", length);
+        size_t total = used + (size_t)header_length + length + 2;
+        assert(total == (size_t)RESP_MAX_FRAME + (size_t)delta);
+        memcpy(frame + used, header, (size_t)header_length);
+        memset(frame + used + header_length, 'y', length);
+        memcpy(frame + used + header_length + length, "\r\n", 2);
+        RespParser parser = {0};
+        RespResult result = resp_parse(&parser, frame, total);
+        if (delta <= 0) {
+            assert(result == RESP_READY && parser.offset == total && parser.length[2] == length);
+        } else {
+            assert(result == RESP_INVALID);
+        }
+    }
+}
+
 int main(void) {
     test_fragmentation_and_pipeline();
     test_invalid_frames();
@@ -185,6 +222,7 @@ int main(void) {
     test_byte_by_byte_matches_whole();
     test_equals_rejects_length_mismatch();
     test_integer_rejects_loose_forms();
-    puts("10 RESP unit scenarios passed");
+    test_frame_size_limit();
+    puts("11 RESP unit scenarios passed");
     return 0;
 }
