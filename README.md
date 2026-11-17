@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/banner.svg" alt="Mini Redis: 해시 테이블 기반 키-값 서버를 C로 직접 구현하고 무엇을 고려해 어떻게 골랐는지를 기록했습니다. 두 클라이언트가 동시에 입장할 때 GET 뒤 SET은 둘 다 2번을 받고, INCR은 2번과 3번을 받습니다" width="100%">
+<img src="docs/images/banner.svg" alt="Mini Redis: 해시 테이블 기반 키-값 서버를 C로 직접 구현하고 무엇을 고려해 어떻게 골랐는지를 기록했습니다. 키는 SipHash-2-4 해시를 버킷 수로 나눈 나머지 번호의 버킷에 들어가고, 같은 버킷의 키는 연결 리스트로 이어집니다" width="100%">
 
 <br>
 
@@ -16,9 +16,83 @@
 <sub>크래프톤 정글 · Mini Redis 구현 과제</sub><br>
 <sub>서버는 C11 표준 라이브러리와 운영체제 소켓만 사용합니다. SipHash 참조 구현 한 파일을 가져왔습니다.</sub>
 
-[요구사항](#-과제-요구사항과-충족한-곳) · [구조](#-구조) · [외부 API](#-외부-api) · [해시 테이블](#%EF%B8%8F-해시-테이블) · [설계 결정](#%EF%B8%8F-설계-결정) · [시연](#-시연) · [검증](#-검증) · [한계](#-한계) · [실행](#-실행-방법) · [문서](#-문서)
+[실행](#-실행-방법) · [요구사항](#-과제-요구사항과-충족한-곳) · [구조](#-구조) · [외부 API](#-외부-api) · [해시 테이블](#%EF%B8%8F-해시-테이블) · [설계 결정](#%EF%B8%8F-설계-결정) · [시연](#-시연) · [검증](#-검증) · [한계](#-한계) · [문서](#-문서)
 
 </div>
+
+<br>
+
+## 🚀 실행 방법
+
+Mini Redis 서버를 켜 두고, 다른 애플리케이션이 TCP로 연결해 키-값 저장소로 쓰는 순서입니다.
+
+### 1. 빌드
+
+```powershell
+mingw32-make          # Windows, MinGW-w64의 gcc. mini-redis.exe가 생깁니다
+```
+
+POSIX에서는 `make`로 빌드하고 `./mini-redis`로 실행합니다.
+
+### 2. 서버 켜기
+
+```powershell
+.\mini-redis.exe                                # 127.0.0.1:6379에서 연결을 받습니다
+.\mini-redis.exe --port 7000 --aof data.aof     # 포트를 바꾸고, 재시작해도 데이터가 남게 합니다
+```
+
+`Mini Redis listening on 127.0.0.1:6379`가 출력되면 연결을 받을 준비가 된 것입니다.
+
+| 서버 옵션 | 뜻 |
+|---|---|
+| `--bind IPv4`, `--port PORT` | 수신 주소. 기본 `127.0.0.1:6379`, `0`이면 임의 포트 |
+| `--aof FILE`, `--appendfsync always\|everysec\|no` | 쓰기 명령을 파일에 기록하고 시작할 때 재생합니다 |
+| `--snapshot FILE` | `SAVE` 명령으로 전체를 저장하고 시작할 때 복원합니다. `--aof`와 함께 쓸 수 없습니다 |
+| `--expire-cycle-ms MS` | 만료된 키를 정리하는 주기. 기본 100, `0`이면 끔 |
+| `--log FILE` 또는 `--log -` | 받은 명령과 응답을 파일 또는 표준 오류로 기록. 기본은 꺼짐 |
+
+### 3. 애플리케이션에서 연결하기
+
+RESP2를 쓰는 Redis 클라이언트 라이브러리로 연결합니다. 아래는 파이썬 `redis-py` 8.1.0으로 실행해 확인한 예시입니다.
+
+```python
+import redis
+
+r = redis.Redis(host="127.0.0.1", port=6379, protocol=2, decode_responses=True)
+
+r.set("session:42", "kim", ex=30)            # 캐시 저장. 30초 뒤 만료됩니다
+print(r.get("session:42"))                   # kim
+print(r.pttl("session:42"))                  # 남은 밀리초. 예: 30000
+print(r.execute_command("INCR", "visits"))   # 1. 동시에 보내도 번호가 겹치지 않습니다
+print(r.delete("session:42"))                # 1. 원본이 바뀌면 캐시를 지웁니다
+print(r.get("session:42"))                   # None
+```
+
+Node.js는 `redis`(node-redis) 6.3.1에서 아래 옵션으로 확인했습니다.
+
+```js
+import { createClient } from 'redis';
+
+const client = createClient({
+  url: 'redis://127.0.0.1:6379',
+  RESP: 2,
+  disableClientInfo: true,
+  maintNotifications: 'disabled',
+});
+await client.connect();
+await client.set('session:42', 'kim', { EX: 30 });
+console.log(await client.get('session:42'));   // kim
+console.log(await client.incr('visits'));      // 1
+```
+
+| 연결할 때 알아 둘 것 | 이유 |
+|---|---|
+| 클라이언트를 RESP2로 설정합니다 | `HELLO`, `CLIENT`처럼 구현하지 않은 명령에는 `ERR unknown command`로 답합니다 |
+| `redis-py`의 `incr()` 대신 `execute_command("INCR", key)`를 씁니다 | `incr()`은 `INCRBY`를 보내는데 `INCRBY`는 구현하지 않았습니다 |
+| `ioredis` 6.0.0은 기본 설정으로 연결하지 못했습니다 | 연결할 때 `HELLO 3`을 보냅니다 |
+| 같은 PC의 앱에서 씁니다 | 인증과 TLS가 없어 기본 수신 주소가 `127.0.0.1`입니다 |
+
+쓸 수 있는 명령 전체는 [외부 API](#-외부-api)에 있습니다.
 
 <br>
 
@@ -27,7 +101,7 @@
 | 구분 | 요구사항 | 충족한 방법 | 위치 |
 |:---:|---|---|---|
 | 필수 | 해시 테이블 기반 키-값 저장소 | 버킷 배열과 연결 리스트(체이닝)를 직접 구현 | [해시 테이블](#%EF%B8%8F-해시-테이블) |
-| 필수 | 외부에서 사용할 수 있는 API | TCP 위의 RESP2 명령. `redis-cli`와 기존 클라이언트를 그대로 사용 | [외부 API](#-외부-api) |
+| 필수 | 외부에서 사용할 수 있는 API | TCP 위의 RESP2 명령. 기존 Redis 클라이언트 라이브러리로 연결 | [외부 API](#-외부-api) |
 | 중점 | 동시성 문제가 생기지 않는 구조 | 단일 스레드 이벤트 루프, 복합 작업은 `INCR` | [결정 1](#1-동시성) |
 | 중점 | 만료된 값을 요청받았을 때의 처리 | 조회 시 만료와 주기 정리 | [결정 2](#2-데이터-만료) |
 | 중점 | 저장된 데이터의 무효화 | `DEL`로 즉시 삭제, TTL은 안전망 | [결정 3](#3-데이터-무효화) |
@@ -68,7 +142,7 @@
 
 | 선택지 | 얻는 것 | 내주는 것 |
 |---|---|---|
-| **TCP 위의 RESP2** (선택) | `redis-cli`와 언어별 Redis 클라이언트를 그대로 사용합니다. 길이를 앞에 적는 형식이라 NUL이 든 값도 전달합니다 | 파서와 연결 관리를 직접 구현해야 합니다 |
+| **TCP 위의 RESP2** (선택) | 언어별 Redis 클라이언트 라이브러리를 RESP2 설정으로 사용합니다. 길이를 앞에 적는 형식이라 NUL이 든 값도 전달합니다 | 파서와 연결 관리를 직접 구현해야 합니다 |
 | HTTP와 JSON | 브라우저와 `curl`로 바로 호출합니다 | 요청마다 머리말 비용이 붙고, 바이너리 값은 인코딩이 필요합니다 |
 | 라이브러리 함수 호출 | 네트워크 비용이 없습니다 | 같은 프로세스, 같은 언어에서만 쓸 수 있습니다 |
 
@@ -283,6 +357,15 @@ Entry = { hash, 키 길이, 값 길이, 만료 시각, 체인의 다음 항목, 
 
 전체 로그는 [`docs/backend.log`](docs/backend.log), [`docs/mini-redis.log`](docs/mini-redis.log)에 있습니다.
 
+테스트 페이지는 [Jongeume/mini-react](https://github.com/Jongeume/mini-react) 저장소에서 실행합니다.
+
+```powershell
+.\mini-redis.exe                                   # 이 저장소
+node backend/gomoku-api.js --redis-port 6379       # mini-react 저장소, http://127.0.0.1:8090/
+node docs/demo/join-race.mjs                       # mini-react 저장소, 두 명을 동시에 입장시킵니다
+node docs/demo/shots.mjs                           # mini-react 저장소, 시연 스크린샷을 다시 찍습니다
+```
+
 <br>
 
 ## ✅ 검증
@@ -334,6 +417,18 @@ Mini Redis 자체의 명령별 지연입니다(명령마다 10000회, 연결 1�
 
 측정 조건, 연결 8개 결과, 편차는 [docs/benchmark.md](docs/benchmark.md)에 있습니다. 같은 PC의 루프백에서 파이썬 클라이언트로 측정한 값이라 서버의 한계 처리량으로 읽으면 안 됩니다.
 
+### 다시 실행하기
+
+```powershell
+mingw32-make test                 # 저장소 · SipHash · RESP · 영속성 단위 테스트
+python tests/test_integration.py -v
+python tests/test_scenarios.py -v
+python examples/demo.py all       # 설계 결정 절의 로그 장면 재현. 로그는 demo-output/ 에 저장됩니다
+python examples/benchmark.py      # 성능 측정
+```
+
+장애 복구 테스트는 서버의 시험용 옵션 `--debug-aof-fail-at N`, `--debug-snapshot-crash-after N`으로 장애를 주입합니다.
+
 <br>
 
 ## 🚧 한계
@@ -348,39 +443,6 @@ Mini Redis 자체의 명령별 지연입니다(명령마다 10000회, 연결 1�
 | 인증, TLS, 메모리 상한 없음 | 로컬 루프백에서 쓰는 것을 전제로 했습니다 |
 
 전체 목록은 [docs/verification.md](docs/verification.md)에 있습니다.
-
-<br>
-
-## 🚀 실행 방법
-
-Windows PowerShell에서 MinGW-w64의 `gcc`, `mingw32-make`와 Python 3을 사용합니다. POSIX에서는 `make`와 `./mini-redis`를 사용합니다.
-
-```powershell
-mingw32-make                      # mini-redis.exe, report-api.exe
-mingw32-make test                 # 저장소 · SipHash · RESP · 영속성 단위 테스트
-python tests/test_integration.py -v
-python tests/test_scenarios.py -v
-python examples/demo.py all       # 로그 장면 재현. 로그는 demo-output/ 에 저장됩니다.
-python examples/benchmark.py      # 성능 측정
-```
-
-| 서버 옵션 | 뜻 |
-|---|---|
-| `--bind IPv4`, `--port PORT` | 수신 주소. 기본 `127.0.0.1:6379`, `0`이면 임의 포트 |
-| `--log FILE` 또는 `--log -` | 시연 로그를 파일 또는 표준 오류로 기록. 기본은 꺼짐 |
-| `--expire-cycle-ms MS` | 주기 정리 간격. 기본 100, `0`이면 끔 |
-| `--snapshot FILE` | RDB 방식의 스냅샷 모드. `SAVE`로 저장하고 시작할 때 복원 |
-| `--aof FILE`, `--appendfsync always\|everysec\|no` | AOF 모드. `--snapshot`과 함께 쓸 수 없음 |
-| `--debug-aof-fail-at N`, `--debug-snapshot-crash-after N` | 시험용 장애 주입 |
-
-오목 테스트 페이지는 [Jongeume/mini-react](https://github.com/Jongeume/mini-react) 저장소에서 실행합니다.
-
-```powershell
-.\mini-redis.exe                                   # 이 저장소
-node backend/gomoku-api.js --redis-port 6379       # mini-react 저장소, http://127.0.0.1:8090/
-node docs/demo/join-race.mjs                       # mini-react 저장소, 두 명을 동시에 입장시킵니다
-node docs/demo/shots.mjs                           # mini-react 저장소, 시연 스크린샷을 다시 찍습니다
-```
 
 <br>
 
