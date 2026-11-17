@@ -345,6 +345,23 @@ static void test_incr_records_set_with_deadline(void) {
     env_destroy(&env);
 }
 
+/* TTL 이 있는 키에 INCR 이 정수 오류로 실패해도 값과 TTL 이 그대로다 */
+static void test_failed_incr_keeps_ttl(void) {
+    Env env;
+    env_init(&env, true);
+    assert(is_text(RUN(&env, "SET", "k", "abc", "EX", "30"), "+OK\r\n"));
+    env.record_count = 0;
+    assert(text_starts_with(RUN(&env, "INCR", "k"), "-ERR value is not an integer"));
+    assert(holds(&env, "k", "abc") && env.record_count == 0);
+    assert(is_integer(RUN(&env, "PTTL", "k"), 30000));
+    env.context.now_ms = START_MS + 1000;
+    assert(is_integer(RUN(&env, "PTTL", "k"), 29000));
+    assert(is_text(RUN(&env, "SET", "big", "9223372036854775807", "PX", "500"), "+OK\r\n"));
+    assert(text_starts_with(RUN(&env, "INCR", "big"), "-ERR increment or decrement would overflow"));
+    assert(is_integer(RUN(&env, "PTTL", "big"), 500));
+    env_destroy(&env);
+}
+
 /* EXPIRE · PEXPIRE : 없는 키는 0 이고 기록하지 않는다 */
 static void test_expire_missing_key(void) {
     Env env;
@@ -559,6 +576,7 @@ int main(void) {
     test_incr_rejects_non_integers();
     test_incr_overflow();
     test_incr_records_set_with_deadline();
+    test_failed_incr_keeps_ttl();
     test_expire_missing_key();
     test_expire_non_positive_deletes();
     test_expire_positive_records_deadline();
@@ -570,6 +588,6 @@ int main(void) {
     test_binary_key_is_recorded_exactly();
     test_null_hooks_are_safe();
     test_expired_key_looks_missing();
-    puts("25 command unit scenarios passed");
+    puts("26 command unit scenarios passed");
     return 0;
 }
