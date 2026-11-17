@@ -263,6 +263,24 @@ class ScenarioTests(unittest.TestCase):
         self.assertTrue(Path(path + ".tmp").exists())  # 쓰다 만 임시 파일이 남는다
         self.assertEqual(self.start("--snapshot", path).call("GET", "k"), b"v1")
 
+    def test_aof_restores_incr_counter(self):
+        options = ["--aof", self.path("appendonly.aof"), "--appendfsync", "always"]
+        server = self.start(*options)
+        for expected in (1, 2, 3):
+            self.assertEqual(server.call("INCR", "room:seats"), expected)
+        server.kill()
+        self.assertEqual(self.start(*options).call("GET", "room:seats"), b"3")
+
+    def test_snapshot_restores_incr_counter_at_last_save(self):
+        options = ["--snapshot", self.path("dump.mrdb")]
+        server = self.start(*options)
+        self.assertEqual(server.call("INCR", "room:seats"), 1)
+        self.assertEqual(server.call("INCR", "room:seats"), 2)
+        self.assertEqual(server.call("SAVE"), b"+OK")
+        self.assertEqual(server.call("INCR", "room:seats"), 3)  # SAVE 뒤의 변경은 잃는다
+        server.kill()
+        self.assertEqual(self.start(*options).call("GET", "room:seats"), b"2")
+
     def test_save_without_snapshot_option_is_an_error(self):
         self.assertTrue(self.start().call("SAVE").startswith(b"-ERR snapshot is disabled"))
 

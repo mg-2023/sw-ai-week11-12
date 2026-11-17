@@ -1,6 +1,6 @@
 # 검증과 한계 상세
 
-README 5절의 근거 자료입니다. 테스트가 확인하는 항목 전체, 한계 전체, 예제 성능 측정값을 담았습니다.
+README 검증 절과 한계 절의 근거 자료입니다. 테스트가 확인하는 항목 전체와 한계 전체를 담았습니다. 성능 측정은 [benchmark.md](benchmark.md)에 있습니다.
 
 | 테스트 | 명령 | 결과 |
 | --- | --- | --- |
@@ -8,9 +8,9 @@ README 5절의 근거 자료입니다. 테스트가 확인하는 항목 전체, 
 | SipHash 단위 | `mingw32-make test` | 공식 테스트 벡터 64개 일치 |
 | RESP 파싱 단위 (기존) | `mingw32-make test` | 3개 시나리오 통과 |
 | 영속성 단위 (추가) | `mingw32-make test` | 6개 시나리오 통과 |
-| 통합 (기존) | `python tests/test_integration.py -v` | 7건 통과 |
-| 발표 장면 통합 (추가) | `python tests/test_scenarios.py -v` | 13건 통과 (연속 3회 실행) |
-| 오목 백엔드·화면 (mini-react) | `npm test` | 663건 통과 (기존 644 + 추가 19) |
+| 통합 (기존) | `python tests/test_integration.py -v` | 12건 통과 |
+| 발표 장면 통합 (추가) | `python tests/test_scenarios.py -v` | 15건 통과 |
+| 오목 백엔드·화면 (mini-react) | `npm test` | 693건 통과 |
 
 추가 테스트가 확인하는 항목입니다.
 
@@ -27,10 +27,10 @@ README 5절의 근거 자료입니다. 테스트가 확인하는 항목 전체, 
 - 스냅샷은 마지막 `SAVE` 이후의 변경을 잃습니다. 마지막 `SAVE` 뒤에 지운 키는 재시작 후 다시 나타납니다(`test_snapshot_loses_delete_after_last_save`).
 - 복구 실험은 프로세스 강제 종료만 확인했습니다. 운영체제나 전원 장애에서 `everysec`, `no` 정책의 손실 범위는 측정하지 않았습니다.
 - `SAVE`는 단일 스레드에서 실행되므로 저장하는 동안 다른 명령이 멈춥니다. 자동 저장 주기와 AOF 재작성(rewrite)은 구현하지 않았습니다.
-- `INCR`, `DECR`, `SET NX`, 오목 로비 동시 입장은 이번 범위에서 제외했습니다.
+- `DECR`, `INCRBY`, `SET NX`, 트랜잭션은 이번 범위에서 제외했습니다. 오목 온라인 대전은 입장과 좌석 배정까지만 구현했고 실제 대국 동기화는 없습니다.
 - 인증, TLS, 전체 메모리 상한은 제공하지 않습니다.
 
-### `/v1/report` 예제 성능 (기존 예제)
+### `/v1/report` 예제 성능 (이전 측정, 중앙값만)
 
 | 조건 | 값 |
 | --- | --- |

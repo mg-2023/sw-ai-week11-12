@@ -174,6 +174,56 @@ class IntegrationTests(unittest.TestCase):
             results = list(executor.map(workload, range(workers)))
         self.assertEqual(sorted(results), [0] * (workers - 1) + [1])
 
+    def test_incr_creates_and_increments(self):
+        self.assertEqual(command(self.port, "INCR", "incr:new"), 1)
+        self.assertEqual(command(self.port, "INCR", "incr:new"), 2)
+        self.assertEqual(command(self.port, "GET", "incr:new"), b"2")
+        self.assertEqual(command(self.port, "SET", "incr:n", "10"), b"+OK")
+        self.assertEqual(command(self.port, "INCR", "incr:n"), 11)
+        self.assertEqual(command(self.port, "SET", "incr:n", "-1"), b"+OK")
+        self.assertEqual(command(self.port, "INCR", "incr:n"), 0)
+        self.assertEqual(command(self.port, "GET", "incr:n"), b"0")
+        self.assertTrue(command(self.port, "INCR").startswith(b"-ERR wrong number"))
+        self.assertTrue(command(self.port, "INCR", "a", "b").startswith(b"-ERR wrong number"))
+
+    def test_incr_rejects_non_integer_and_overflow_without_changing_value(self):
+        error = b"-ERR value is not an integer or out of range"
+        for value in (b"abc", b"", b"1.5", b" 1", b"+1", b"007", b"9223372036854775808"):
+            self.assertEqual(command(self.port, "SET", "incr:s", value), b"+OK")
+            self.assertEqual(command(self.port, "INCR", "incr:s"), error, value)
+            self.assertEqual(command(self.port, "GET", "incr:s"), value)
+        self.assertEqual(command(self.port, "SET", "incr:big", "9223372036854775807"), b"+OK")
+        self.assertEqual(command(self.port, "INCR", "incr:big"), b"-ERR increment or decrement would overflow")
+        self.assertEqual(command(self.port, "GET", "incr:big"), b"9223372036854775807")
+        self.assertEqual(command(self.port, "SET", "incr:min", "-9223372036854775808"), b"+OK")
+        self.assertEqual(command(self.port, "INCR", "incr:min"), -9223372036854775807)
+
+    def test_incr_keeps_ttl(self):
+        self.assertEqual(command(self.port, "SET", "incr:t", "5", "EX", "100"), b"+OK")
+        self.assertEqual(command(self.port, "INCR", "incr:t"), 6)
+        self.assertTrue(0 < command(self.port, "PTTL", "incr:t") <= 100000)
+
+    def test_incr_on_expired_key_starts_from_zero_without_ttl(self):
+        self.assertEqual(command(self.port, "SET", "incr:gone", "41", "PX", "30"), b"+OK")
+        time.sleep(0.1)
+        self.assertEqual(command(self.port, "INCR", "incr:gone"), 1)
+        self.assertEqual(command(self.port, "PTTL", "incr:gone"), -1)
+
+    def test_concurrent_incr_gives_each_client_a_distinct_number(self):
+        workers = 12
+        barrier = Barrier(workers)
+
+        def enter(_):
+            with connect(self.port) as client, client.makefile("rb") as stream:
+                barrier.wait(timeout=5)
+                client.sendall(frame("INCR", "incr:room"))
+                return reply(stream)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(executor.map(enter, range(workers)))
+        self.assertEqual(sorted(results), list(range(1, workers + 1)))
+        self.assertEqual(command(self.port, "GET", "incr:room"), b"12")
+
     def test_external_http_api_fills_reads_and_refreshes_the_cache(self):
         with run_server(REPORT, "--redis-port", str(self.port)) as http_port:
             expected = {"orders": 12, "total_cents": 4200}

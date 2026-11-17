@@ -1,7 +1,7 @@
 """Mini Redis 발표용 재현 스크립트.
 
 실행 : python examples/demo.py <장면>   (먼저 mingw32-make 로 mini-redis.exe 를 빌드한다)
-장면 : lost-update | expire | invalidate | recovery-snapshot | recovery-aof | all
+장면 : lost-update | incr | expire | invalidate | recovery-snapshot | recovery-aof | all
 
 각 장면은 새 Mini Redis 프로세스를 --port 0 --log 파일 로 띄우고, 클라이언트가 보낸 명령 · 받은 응답과
 서버 시연 로그(EXEC = 실행 후 응답을 출력 버퍼에 넣음, SENT = 소켓으로 다 보냄)를 그대로 출력한다.
@@ -145,6 +145,18 @@ def lost_update():
         print_log(log, "EXEC", "SENT", "CONN")
 
 
+def incr():
+    print("\n## INCR : 연결 두 개가 같은 키에 INCR 을 보내면 서버가 읽고 더하고 쓰기를 한 명령으로 처리한다")
+    with server("incr.log") as (port, log, _):
+        a, b = Client(port, "A"), Client(port, "B")
+        got_a = a.call("INCR", "room:1:seats")
+        got_b = b.call("INCR", "room:1:seats")
+        print(f"  => 두 클라이언트가 서로 다른 번호 {got_a}, {got_b} 를 받았다 (기대값 1, 2)")
+        a.close()
+        b.close()
+        print_log(log, "EXEC", "SENT", "CONN")
+
+
 def expire():
     print("\n## 만료 1 : 조회 시 만료 (주기 정리를 끈 서버 --expire-cycle-ms 0)")
     with server("expire-on-access.log", "--expire-cycle-ms", "0") as (port, log, _):
@@ -223,6 +235,7 @@ def recovery(mode):
 
 SCENES = {
     "lost-update": lost_update,
+    "incr": incr,
     "expire": expire,
     "invalidate": invalidate,
     "recovery-snapshot": lambda: recovery("snapshot"),

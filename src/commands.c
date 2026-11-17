@@ -6,6 +6,8 @@
 #include "commands.h"
 #include "resp.h"
 
+#include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
 /* 복사하지 않으므로 리터럴만 넘긴다. */
@@ -72,6 +74,43 @@ static Reply command_set(const CommandContext *context, const Bytes *args, size_
 }
 
 /*
+ * INCR : 읽고 더하고 쓰는 세 단계를 명령 하나로 묶는다(GET 뒤 SET 으로 나누면 그 사이에 다른 연결의 명령이 끼어든다).
+ * 없거나 만료된 키는 0 에서 시작한다. 오류면 값을 바꾸지 않는다. TTL 은 기존 만료 시각을 그대로 유지한다.
+ */
+static Reply command_incr(const CommandContext *context, const Bytes *args, size_t count) {
+    if (count != 2) {
+        return reply_text("-ERR wrong number of arguments for 'incr' command\r\n");
+    }
+    Store *store = context->store;
+    uint64_t now_ms = context->now_ms;
+    int64_t current = 0;
+    uint64_t expires_at = 0;
+    Bytes old_value;
+    if (store_get(store, args[1], now_ms, &old_value)) {
+        if (!resp_integer(old_value, &current)) {
+            return reply_text("-ERR value is not an integer or out of range\r\n");
+        }
+        /* 살아 있는 키의 남은 ms 는 1 이상이다. -1 이면 TTL 이 없다. */
+        int64_t remaining = store_pttl(store, args[1], now_ms);
+        expires_at = remaining > 0 ? now_ms + (uint64_t)remaining : 0;
+    }
+    /* 더하기 전에 검사해 부호 있는 오버플로(미정의 동작)를 피한다. */
+    if (current == INT64_MAX) {
+        return reply_text("-ERR increment or decrement would overflow\r\n");
+    }
+    ++current;
+    /* 10진 문자열로 바꾼다. 20자 + 널이면 int64_t 전체가 들어간다. */
+    char digits[24];
+    int length = snprintf(digits, sizeof digits, "%" PRId64, current);
+    Bytes new_value = {digits, (size_t)length};
+    if (!store_set(store, args[1], new_value, expires_at)) {
+        return reply_text("-OOM unable to allocate key/value\r\n");
+    }
+    record(context, CHANGE_SET, args[1], new_value, expires_at);
+    return integer_reply(current);
+}
+
+/*
  * 명령을 추가할 때 고칠 단 한 곳. 이 함수가 끝나야 다음 명령이 시작되므로 명령 하나는 락 없이 원자적이다.
  */
 Reply execute_command(const CommandContext *context, const Bytes *args, size_t count) {
@@ -79,6 +118,9 @@ Reply execute_command(const CommandContext *context, const Bytes *args, size_t c
     uint64_t now_ms = context->now_ms;
     if (resp_equals(args[0], "SET")) {
         return command_set(context, args, count);
+    }
+    if (resp_equals(args[0], "INCR")) {
+        return command_incr(context, args, count);
     }
     if (resp_equals(args[0], "GET")) {
         if (count != 2) {
