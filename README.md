@@ -53,46 +53,39 @@ POSIX에서는 `make`로 빌드하고 `./mini-redis`로 실행합니다.
 
 ### 3. 애플리케이션에서 연결하기
 
-RESP2를 쓰는 Redis 클라이언트 라이브러리로 연결합니다. 아래는 파이썬 `redis-py` 8.1.0으로 실행해 확인한 예시입니다.
+Redis 클라이언트 라이브러리 없이, TCP 소켓으로 연결해 RESP2 형식의 명령을 보냅니다. 아래는 파이썬 표준 라이브러리만 쓴 예시이고, 주석은 실제로 받은 응답입니다.
 
 ```python
-import redis
+import socket
 
-r = redis.Redis(host="127.0.0.1", port=6379, protocol=2, decode_responses=True)
 
-r.set("session:42", "kim", ex=30)            # 캐시 저장. 30초 뒤 만료됩니다
-print(r.get("session:42"))                   # kim
-print(r.pttl("session:42"))                  # 남은 밀리초. 예: 30000
-print(r.execute_command("INCR", "visits"))   # 1. 동시에 보내도 번호가 겹치지 않습니다
-print(r.delete("session:42"))                # 1. 원본이 바뀌면 캐시를 지웁니다
-print(r.get("session:42"))                   # None
+def command(sock, *args):
+    """명령 하나를 RESP2 배열로 만들어 보내고 응답을 그대로 돌려줍니다."""
+    request = f"*{len(args)}\r\n".encode()
+    for arg in args:
+        data = str(arg).encode()
+        request += f"${len(data)}\r\n".encode() + data + b"\r\n"
+    sock.sendall(request)
+    return sock.recv(4096)
+
+
+with socket.create_connection(("127.0.0.1", 6379)) as sock:
+    print(command(sock, "SET", "session:42", "kim", "EX", 30))  # b'+OK\r\n'        캐시 저장, 30초 뒤 만료
+    print(command(sock, "GET", "session:42"))                   # b'$3\r\nkim\r\n'  길이 3인 값 kim
+    print(command(sock, "INCR", "visits"))                      # b':1\r\n'         정수 1
+    print(command(sock, "DEL", "session:42"))                   # b':1\r\n'         지운 키 수
+    print(command(sock, "GET", "session:42"))                   # b'$-1\r\n'        값 없음 (nil)
 ```
 
-Node.js는 `redis`(node-redis) 6.3.1에서 아래 옵션으로 확인했습니다.
-
-```js
-import { createClient } from 'redis';
-
-const client = createClient({
-  url: 'redis://127.0.0.1:6379',
-  RESP: 2,
-  disableClientInfo: true,
-  maintNotifications: 'disabled',
-});
-await client.connect();
-await client.set('session:42', 'kim', { EX: 30 });
-console.log(await client.get('session:42'));   // kim
-console.log(await client.incr('visits'));      // 1
-```
-
-| 연결할 때 알아 둘 것 | 이유 |
+| 보내는 것과 받는 것 | 형식 |
 |---|---|
-| 클라이언트를 RESP2로 설정합니다 | `HELLO`, `CLIENT`처럼 구현하지 않은 명령에는 `ERR unknown command`로 답합니다 |
-| `redis-py`의 `incr()` 대신 `execute_command("INCR", key)`를 씁니다 | `incr()`은 `INCRBY`를 보내는데 `INCRBY`는 구현하지 않았습니다 |
-| `ioredis` 6.0.0은 기본 설정으로 연결하지 못했습니다 | 연결할 때 `HELLO 3`을 보냅니다 |
-| 같은 PC의 앱에서 씁니다 | 인증과 TLS가 없어 기본 수신 주소가 `127.0.0.1`입니다 |
+| 명령 | 인자 개수 `*N`, 그 뒤에 인자마다 길이 `$길이`와 내용. 줄 끝은 `\r\n` |
+| 성공 응답 | `+OK` |
+| 정수 응답 | `:1` |
+| 값 응답 | `$길이`와 내용. 값이 없으면 `$-1` |
+| 오류 응답 | `-ERR 메시지` |
 
-쓸 수 있는 명령 전체는 [외부 API](#-외부-api)에 있습니다.
+Node.js 예시는 오목 백엔드의 [`backend/resp-client.js`](https://github.com/Jongeume/mini-react/blob/main/backend/resp-client.js)입니다. `net` 소켓으로 같은 형식을 보냅니다. 쓸 수 있는 명령 전체는 [외부 API](#-외부-api)에 있습니다.
 
 <br>
 
@@ -101,7 +94,7 @@ console.log(await client.incr('visits'));      // 1
 | 구분 | 요구사항 | 충족한 방법 | 위치 |
 |:---:|---|---|---|
 | 필수 | 해시 테이블 기반 키-값 저장소 | 버킷 배열과 연결 리스트(체이닝)를 직접 구현 | [해시 테이블](#%EF%B8%8F-해시-테이블) |
-| 필수 | 외부에서 사용할 수 있는 API | TCP 위의 RESP2 명령. 기존 Redis 클라이언트 라이브러리로 연결 | [외부 API](#-외부-api) |
+| 필수 | 외부에서 사용할 수 있는 API | TCP 위의 RESP2 명령. TCP 소켓이 있는 언어면 연결 | [외부 API](#-외부-api) |
 | 중점 | 동시성 문제가 생기지 않는 구조 | 단일 스레드 이벤트 루프, 복합 작업은 `INCR` | [결정 1](#1-동시성) |
 | 중점 | 만료된 값을 요청받았을 때의 처리 | 조회 시 만료와 주기 정리 | [결정 2](#2-데이터-만료) |
 | 중점 | 저장된 데이터의 무효화 | `DEL`로 즉시 삭제, TTL은 안전망 | [결정 3](#3-데이터-무효화) |
@@ -142,7 +135,7 @@ console.log(await client.incr('visits'));      // 1
 
 | 선택지 | 얻는 것 | 내주는 것 |
 |---|---|---|
-| **TCP 위의 RESP2** (선택) | 언어별 Redis 클라이언트 라이브러리를 RESP2 설정으로 사용합니다. 길이를 앞에 적는 형식이라 NUL이 든 값도 전달합니다 | 파서와 연결 관리를 직접 구현해야 합니다 |
+| **TCP 위의 RESP2** (선택) | 공개된 형식이라 TCP 소켓이 있는 언어면 어디서든 명령을 보냅니다. 길이를 앞에 적는 형식이라 NUL이 든 값도 전달합니다 | 파서와 연결 관리를 직접 구현해야 합니다 |
 | HTTP와 JSON | 브라우저와 `curl`로 바로 호출합니다 | 요청마다 머리말 비용이 붙고, 바이너리 값은 인코딩이 필요합니다 |
 | 라이브러리 함수 호출 | 네트워크 비용이 없습니다 | 같은 프로세스, 같은 언어에서만 쓸 수 있습니다 |
 
