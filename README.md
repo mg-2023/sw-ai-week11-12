@@ -43,39 +43,22 @@
 
 요청 한 건은 네 계층을 순서대로 지나갑니다. 디스크 계층은 명령 계층이 넘긴 변경 내용을 기록합니다.
 
-```mermaid
-%%{init: {"flowchart": {"curve": "stepBefore", "nodeSpacing": 40, "rankSpacing": 50}}}%%
-flowchart LR
-  APP["외부 앱<br/>redis-cli · 오목 백엔드"]
-  NET["네트워크<br/>server.c · net.c<br/>poll 루프 · 입출력 버퍼"]
-  RESP["프로토콜<br/>resp.c<br/>RESP2 파싱"]
-  CMD["명령<br/>commands.c<br/>명령 분기"]
-  STORE["저장소<br/>store.c · siphash.c<br/>해시 테이블 · 만료 리스트"]
-  DISK["디스크<br/>persist.c<br/>스냅샷 · AOF"]
-
-  APP -->|"TCP / RESP2"| NET
-  NET --> RESP
-  RESP --> CMD
-  CMD --> STORE
-  CMD -->|"변경 내용"| DISK
-
-  classDef app fill:#fff1ef,stroke:#dc382d,color:#161f31
-  classDef core fill:#dc382d,stroke:#a41e11,color:#ffffff
-  classDef mod fill:#ffffff,stroke:#dc382d,color:#161f31
-  class APP app
-  class STORE core
-  class NET,RESP,CMD,DISK mod
+```text
+외부 앱 ── TCP / RESP2 ──▶ 네트워크 ──▶ 프로토콜 ──▶ 명령 ──▶ 저장소
+                           server.c     resp.c      commands.c  store.c
+                           net.c                        │       siphash.c
+                                                        ▼
+                                                      디스크
+                                                      persist.c
 ```
 
-| 계층 | 파일 | 역할 | 알지 못하는 것 |
-|---|---|---|---|
-| 네트워크 | [`server.c`](src/server.c), [`net.c`](src/net.c) | `poll` 루프, 연결별 입출력 버퍼 | 명령의 뜻 |
-| 프로토콜 | [`resp.c`](src/resp.c) | 바이트 버퍼를 인자 배열로 파싱 | 소켓 |
-| 명령 | [`commands.c`](src/commands.c) | 명령 이름으로 분기해 저장소 함수를 호출 | 소켓, 파일 |
-| 저장소 | [`store.c`](src/store.c), [`siphash.c`](src/siphash.c) | 해시 테이블, 만료 리스트 | 소켓, 시계 (호출자가 시각을 넘깁니다) |
-| 디스크 | [`persist.c`](src/persist.c) | 스냅샷 저장 · 복원, AOF 기록 · 재생 | 저장소 내부 구조 |
-
-> 저장소가 소켓과 시계를 알지 못하므로, 서버를 띄우지 않고 시각을 직접 넘겨 단위 테스트를 할 수 있습니다.
+| 계층 | 파일 | 역할 |
+|---|---|---|
+| 네트워크 | [`server.c`](src/server.c), [`net.c`](src/net.c) | `poll` 루프, 연결별 입출력 버퍼 |
+| 프로토콜 | [`resp.c`](src/resp.c) | 바이트 버퍼를 인자 배열로 파싱 |
+| 명령 | [`commands.c`](src/commands.c) | 명령 이름으로 분기해 저장소 함수를 호출 |
+| 저장소 | [`store.c`](src/store.c), [`siphash.c`](src/siphash.c) | 해시 테이블, 만료 리스트 |
+| 디스크 | [`persist.c`](src/persist.c) | 스냅샷 저장 · 복원, AOF 기록 · 재생 |
 
 <br>
 
