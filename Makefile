@@ -14,6 +14,7 @@ REPORT = report-api$(EXE)
 UNIT = test-store$(EXE)
 RESP_TEST = test-resp$(EXE)
 PERSIST_TEST = test-persist$(EXE)
+SIPHASH_TEST = test-siphash$(EXE)
 SERVER_SRC = src/server.c src/net.c src/resp.c src/commands.c src/store.c src/persist.c
 SERVER_HDR = src/net.h src/resp.h src/commands.h src/store.h src/persist.h
 
@@ -35,7 +36,11 @@ $(RESP_TEST): tests/test_resp.c src/resp.c src/resp.h src/store.h
 $(PERSIST_TEST): tests/test_persist.c src/persist.c src/persist.h src/store.c src/store.h src/resp.c src/resp.h src/commands.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_persist.c src/persist.c src/store.c src/resp.c
 
-test: $(UNIT) $(RESP_TEST) $(PERSIST_TEST)
+$(SIPHASH_TEST): tests/test_siphash.c tests/siphash_vectors.h src/siphash.c src/siphash.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ tests/test_siphash.c src/siphash.c
+
+test: $(UNIT) $(RESP_TEST) $(PERSIST_TEST) $(SIPHASH_TEST)
 	./$(UNIT)
 	./$(RESP_TEST)
 	./$(PERSIST_TEST)
+	./$(SIPHASH_TEST)
