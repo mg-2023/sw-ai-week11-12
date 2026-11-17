@@ -404,7 +404,7 @@ static void test_aof_expire_record_in_the_past(void) {
     remove(AOF);
 }
 
-/* aof_close 를 두 번 불러도 안전하다 */
+/* aof_close 는 첫 호출에서 fd 를 -1 로 바꾸고, 두 번째 호출은 아무 파일도 건드리지 않는다 */
 static void test_aof_close_twice(void) {
     remove(AOF);
     Store store;
@@ -412,8 +412,18 @@ static void test_aof_close_twice(void) {
     LoadReport report;
     assert(store_init(&store));
     assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    assert(aof.fd >= 0);
     aof_close(&aof);
+    assert(aof.fd == -1);
+    /* 닫힌 번호는 곧바로 다른 파일이 가져갈 수 있다. 두 번째 close 가 그 번호를 닫았다면 이 파일 쓰기가 실패한다. */
+    FILE *other = fopen("test-persist-other.tmpdata", "wb");
+    assert(other);
     aof_close(&aof);
+    assert(aof.fd == -1);
+    assert(fwrite("still open", 1, 10, other) == 10 && fflush(other) == 0);
+    fclose(other);
+    assert(file_size("test-persist-other.tmpdata") == 10);
+    remove("test-persist-other.tmpdata");
     store_destroy(&store);
     remove(AOF);
 }

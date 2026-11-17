@@ -420,24 +420,55 @@ static void test_rehash_delete_in_both_tables(void) {
     store_destroy(&store);
 }
 
-/* 확장 중 만료 : 두 테이블의 만료 항목이 조회 시 만료와 주기 정리로 지워지고 만료 개수가 맞는다 */
+/* 8개짜리 테이블에서 버킷 7 에 떨어지는 키 "v<번호>" 를 찾는다 (재해시는 버킷 0 부터 옮기므로 가장 늦게 옮겨진다). */
+static void find_last_bucket_key(char *name, size_t size) {
+    for (unsigned i = 0;; ++i) {
+        int length = snprintf(name, size, "v%u", i);
+        assert(length > 0);
+        if (siphash24(name, (size_t)length, KEY_A) % 8 == 7) {
+            return;
+        }
+    }
+}
+
+/* 확장 중 만료 : 아직 옮겨지지 않아 옛 테이블(current)에 남은 항목은 조회 시 만료로, 옮겨진 항목은 주기 정리로 지워진다 */
 static void test_rehash_expiration(void) {
     Store store;
     char buffer[32];
+    char late[16];
     Bytes value;
-    make_rehashing_store(&store);
-    assert(store_set(&store, numbered_key(buffer, 6), BYTES("t6"), 100));
+    ExpireCount count = {0};
+    find_last_bucket_key(late, sizeof late);
+    Bytes late_key = {late, strlen(late)};
+    assert(store_init_with_key(&store, KEY_A));
+    store.on_expire = count_expired;
+    store.expire_context = &count;
+    assert(store_set(&store, late_key, BYTES("late"), 0));
+    for (int i = 0; i < 5; ++i) {
+        Bytes key = numbered_key(buffer, i);
+        assert(store_set(&store, key, key, 0));
+    }
+    assert(store.next.capacity == 0 && store.size == 6);
+    assert(store_set(&store, numbered_key(buffer, 5), BYTES("in-next"), 100));  /* 7번째 : 확장 시작, 이 항목은 next */
+    assert(store.next.capacity == 16);
+    assert(store_expire_at(&store, late_key, 1, 100));
     assert(store_expire_at(&store, numbered_key(buffer, 0), 1, 100));
-    assert(store_expire_at(&store, numbered_key(buffer, 1), 1, 100));
-    assert(store.next.capacity != 0 && store.expiring == 3);
-    assert(store_pttl(&store, numbered_key(buffer, 6), 50) == 50);
-    assert(!store_get(&store, numbered_key(buffer, 6), 100, &value));
-    assert(store.expiring == 2 && store.size == 6);
+    assert(store.expiring == 3);
+
+    /* 조회 직전 재해시가 두 단계 더 가도 버킷 7 에는 닿지 못한다 : late 는 아직 current 에 있다. */
+    assert(store.next.capacity != 0 && store.rehash_bucket + 2 < 7);
+    assert(!store_get(&store, late_key, 100, &value));
+    assert(count.on_access == 1 && strcmp(count.last_key, late) == 0);
+    assert(store.next.capacity != 0 && store.expiring == 2 && store.size == 6);
+
+    /* next 에 있던 항목도 조회 시 만료로 지워지고, 남은 하나는 주기 정리가 지운다 */
+    assert(!store_get(&store, numbered_key(buffer, 5), 100, &value));
+    assert(count.on_access == 2 && store.expiring == 1 && store.size == 5);
     StoreCycle cycle = store_maintain(&store, 100);
-    assert(cycle.removed == 2 && store.expiring == 0 && store.size == 4);
+    assert(cycle.removed == 1 && count.by_cycle == 1 && store.expiring == 0 && store.size == 4);
     finish_rehash(&store);
     assert(store.size == 4);
-    for (int i = 2; i < 6; ++i) {
+    for (int i = 1; i < 5; ++i) {
         expect_value(&store, numbered_key(buffer, i), 100, numbered_key(buffer, i));
     }
     store_destroy(&store);
@@ -620,7 +651,7 @@ static void test_many_keys_delete_half(void) {
     Store store;
     char buffer[32];
     Bytes value;
-    assert(store_init(&store));
+    assert(store_init_with_key(&store, KEY_A));
     for (int i = 0; i < COUNT; ++i) {
         Bytes key = numbered_key(buffer, i);
         assert(store_set(&store, key, key, 0));

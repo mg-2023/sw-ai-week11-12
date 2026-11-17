@@ -13,11 +13,13 @@
 
 enum { MAX_RECORDS = 16, START_MS = 1000 };
 
-/* record_change 로 받은 Change 하나의 복사본 (원본 view 는 호출이 끝나면 무효라 복사해 둔다) */
+/* record_change 로 받은 Change 하나의 복사본 (원본 view 는 호출이 끝나면 무효라 길이와 바이트를 그대로 복사해 둔다) */
 typedef struct {
     ChangeType type;
-    char key[32];
-    char value[32];
+    char key[64];
+    size_t key_length;
+    char value[64];
+    size_t value_length;
     uint64_t deadline_ms;
 } Recorded;
 
@@ -36,8 +38,11 @@ static void fake_record(void *context, const Change *change) {
     assert(env->record_count < MAX_RECORDS);
     Recorded *slot = &env->records[env->record_count++];
     slot->type = change->type;
-    snprintf(slot->key, sizeof slot->key, "%.*s", (int)change->key.length, change->key.data);
-    snprintf(slot->value, sizeof slot->value, "%.*s", (int)change->value.length, change->value.data);
+    assert(change->key.length <= sizeof slot->key && change->value.length <= sizeof slot->value);
+    slot->key_length = change->key.length;
+    slot->value_length = change->value.length;
+    memcpy(slot->key, change->key.data, change->key.length);
+    memcpy(slot->value, change->value.data, change->value.length);
     slot->deadline_ms = change->deadline_ms;
 }
 
@@ -74,6 +79,17 @@ static Reply run_words(Env *env, const char *const *words, size_t count) {
 
 #define RUN(env, ...) \
     run_words((env), (const char *const[]){__VA_ARGS__}, sizeof((const char *const[]){__VA_ARGS__}) / sizeof(const char *))
+
+/* 기록한 키 · 값이 expected 와 길이까지 같은지 (NUL 이 들어 있어도 비교된다) */
+static bool key_is(const Recorded *record, Bytes expected) {
+    return record->key_length == expected.length && memcmp(record->key, expected.data, expected.length) == 0;
+}
+
+static bool value_is(const Recorded *record, Bytes expected) {
+    return record->value_length == expected.length && memcmp(record->value, expected.data, expected.length) == 0;
+}
+
+#define BYTES(literal) ((Bytes){literal, sizeof(literal) - 1})
 
 static bool is_text(Reply reply, const char *wire) {
     return reply.type == REPLY_TEXT && reply.bytes.length == strlen(wire) &&
@@ -158,7 +174,7 @@ static void test_wrong_argument_counts_change_nothing(void) {
     }
     assert(env.record_count == 0 && env.save_calls == 0);
     assert(env.store.size == 1 && holds(&env, "k", "v"));
-    assert(RUN(&env, "PTTL", "k").number == -1);
+    assert(is_integer(RUN(&env, "PTTL", "k"), -1));
     env_destroy(&env);
 }
 
@@ -215,7 +231,8 @@ static void test_set_without_ttl_clears_ttl(void) {
     Env env;
     env_init(&env, true);
     assert(is_text(RUN(&env, "SET", "k", "a", "EX", "10"), "+OK\r\n"));
-    assert(RUN(&env, "PTTL", "k").number > 0);
+    Reply remaining = RUN(&env, "PTTL", "k");
+    assert(remaining.type == REPLY_INTEGER && remaining.number > 0);
     assert(is_text(RUN(&env, "SET", "k", "b"), "+OK\r\n"));
     assert(is_integer(RUN(&env, "PTTL", "k"), -1));
     assert(env.records[1].deadline_ms == 0 && env.store.expiring == 0);
@@ -239,12 +256,12 @@ static void test_get_missing_vs_empty(void) {
 static void test_del_counts_only_existing(void) {
     Env env;
     env_init(&env, true);
-    RUN(&env, "SET", "a", "1");
-    RUN(&env, "SET", "b", "2");
+    assert(is_text(RUN(&env, "SET", "a", "1"), "+OK\r\n"));
+    assert(is_text(RUN(&env, "SET", "b", "2"), "+OK\r\n"));
     env.record_count = 0;
     assert(is_integer(RUN(&env, "DEL", "a", "none", "b", "other"), 2));
     assert(env.store.size == 0);
-    RUN(&env, "SET", "a", "1");
+    assert(is_text(RUN(&env, "SET", "a", "1"), "+OK\r\n"));
     env.record_count = 0;
     assert(is_integer(RUN(&env, "DEL", "a", "a"), 1));
     assert(is_integer(RUN(&env, "DEL", "a"), 0));
@@ -256,13 +273,13 @@ static void test_del_counts_only_existing(void) {
 static void test_del_records_each_deleted_key(void) {
     Env env;
     env_init(&env, true);
-    RUN(&env, "SET", "a", "1");
-    RUN(&env, "SET", "b", "2");
+    assert(is_text(RUN(&env, "SET", "a", "1"), "+OK\r\n"));
+    assert(is_text(RUN(&env, "SET", "b", "2"), "+OK\r\n"));
     env.record_count = 0;
     assert(is_integer(RUN(&env, "DEL", "a", "none", "b"), 2));
     assert(env.record_count == 2);
-    assert(env.records[0].type == CHANGE_DEL && strcmp(env.records[0].key, "a") == 0);
-    assert(env.records[1].type == CHANGE_DEL && strcmp(env.records[1].key, "b") == 0);
+    assert(env.records[0].type == CHANGE_DEL && key_is(&env.records[0], BYTES("a")));
+    assert(env.records[1].type == CHANGE_DEL && key_is(&env.records[1], BYTES("b")));
     env.record_count = 0;
     assert(is_integer(RUN(&env, "DEL", "none"), 0));
     assert(env.record_count == 0);
@@ -273,10 +290,10 @@ static void test_del_records_each_deleted_key(void) {
 static void test_incr_negative_values(void) {
     Env env;
     env_init(&env, true);
-    RUN(&env, "SET", "a", "-1");
+    assert(is_text(RUN(&env, "SET", "a", "-1"), "+OK\r\n"));
     assert(is_integer(RUN(&env, "INCR", "a"), 0));
     assert(holds(&env, "a", "0"));
-    RUN(&env, "SET", "min", "-9223372036854775808");
+    assert(is_text(RUN(&env, "SET", "min", "-9223372036854775808"), "+OK\r\n"));
     assert(is_integer(RUN(&env, "INCR", "min"), -9223372036854775807));
     assert(holds(&env, "min", "-9223372036854775807"));
     env_destroy(&env);
@@ -288,7 +305,7 @@ static void test_incr_rejects_non_integers(void) {
     env_init(&env, true);
     const char *bad[] = {"007", " 1", "1 ", "+1", "", "1.5", "abc", "-", "0x10"};
     for (size_t i = 0; i < sizeof bad / sizeof *bad; ++i) {
-        RUN(&env, "SET", "k", bad[i]);
+        assert(is_text(RUN(&env, "SET", "k", bad[i]), "+OK\r\n"));
         env.record_count = 0;
         assert(is_text(RUN(&env, "INCR", "k"), "-ERR value is not an integer or out of range\r\n"));
         assert(holds(&env, "k", bad[i]));
@@ -301,11 +318,11 @@ static void test_incr_rejects_non_integers(void) {
 static void test_incr_overflow(void) {
     Env env;
     env_init(&env, true);
-    RUN(&env, "SET", "k", "9223372036854775807");
+    assert(is_text(RUN(&env, "SET", "k", "9223372036854775807"), "+OK\r\n"));
     env.record_count = 0;
     assert(is_text(RUN(&env, "INCR", "k"), "-ERR increment or decrement would overflow\r\n"));
     assert(holds(&env, "k", "9223372036854775807") && env.record_count == 0);
-    RUN(&env, "SET", "k", "9223372036854775808");
+    assert(is_text(RUN(&env, "SET", "k", "9223372036854775808"), "+OK\r\n"));
     assert(text_starts_with(RUN(&env, "INCR", "k"), "-ERR value is not an integer"));
     assert(holds(&env, "k", "9223372036854775808"));
     env_destroy(&env);
@@ -315,16 +332,16 @@ static void test_incr_overflow(void) {
 static void test_incr_records_set_with_deadline(void) {
     Env env;
     env_init(&env, true);
-    RUN(&env, "SET", "t", "5", "EX", "100");
+    assert(is_text(RUN(&env, "SET", "t", "5", "EX", "100"), "+OK\r\n"));
     env.record_count = 0;
     assert(is_integer(RUN(&env, "INCR", "t"), 6));
     assert(env.record_count == 1 && env.records[0].type == CHANGE_SET);
-    assert(strcmp(env.records[0].key, "t") == 0 && strcmp(env.records[0].value, "6") == 0);
+    assert(key_is(&env.records[0], BYTES("t")) && value_is(&env.records[0], BYTES("6")));
     assert(env.records[0].deadline_ms == START_MS + 100000);
     assert(is_integer(RUN(&env, "PTTL", "t"), 100000));
     env.record_count = 0;
     assert(is_integer(RUN(&env, "INCR", "fresh"), 1));
-    assert(env.record_count == 1 && env.records[0].deadline_ms == 0 && strcmp(env.records[0].value, "1") == 0);
+    assert(env.record_count == 1 && env.records[0].deadline_ms == 0 && value_is(&env.records[0], BYTES("1")));
     env_destroy(&env);
 }
 
@@ -347,11 +364,11 @@ static void test_expire_non_positive_deletes(void) {
     const char *commands[] = {"EXPIRE", "PEXPIRE"};
     for (size_t c = 0; c < 2; ++c) {
         for (size_t i = 0; i < 3; ++i) {
-            RUN(&env, "SET", "k", "v");
+            assert(is_text(RUN(&env, "SET", "k", "v"), "+OK\r\n"));
             env.record_count = 0;
             assert(is_integer(RUN(&env, commands[c], "k", zero_or_less[i]), 1));
             assert(absent(&env, "k") && env.store.size == 0 && env.store.expiring == 0);
-            assert(env.record_count == 1 && env.records[0].type == CHANGE_DEL && strcmp(env.records[0].key, "k") == 0);
+            assert(env.record_count == 1 && env.records[0].type == CHANGE_DEL && key_is(&env.records[0], BYTES("k")));
         }
     }
     env_destroy(&env);
@@ -361,11 +378,11 @@ static void test_expire_non_positive_deletes(void) {
 static void test_expire_positive_records_deadline(void) {
     Env env;
     env_init(&env, true);
-    RUN(&env, "SET", "k", "v");
+    assert(is_text(RUN(&env, "SET", "k", "v"), "+OK\r\n"));
     env.record_count = 0;
     assert(is_integer(RUN(&env, "EXPIRE", "k", "10"), 1));
     assert(env.record_count == 1 && env.records[0].type == CHANGE_EXPIRE);
-    assert(env.records[0].deadline_ms == START_MS + 10000 && strcmp(env.records[0].key, "k") == 0);
+    assert(env.records[0].deadline_ms == START_MS + 10000 && key_is(&env.records[0], BYTES("k")));
     assert(is_integer(RUN(&env, "PTTL", "k"), 10000));
     assert(is_integer(RUN(&env, "PEXPIRE", "k", "10"), 1));
     assert(env.records[1].type == CHANGE_EXPIRE && env.records[1].deadline_ms == START_MS + 10);
@@ -378,7 +395,7 @@ static void test_expire_positive_records_deadline(void) {
 static void test_expire_invalid_value(void) {
     Env env;
     env_init(&env, true);
-    RUN(&env, "SET", "k", "v");
+    assert(is_text(RUN(&env, "SET", "k", "v"), "+OK\r\n"));
     env.record_count = 0;
     const char *bad[] = {"abc", "1.5", "", "+5", "9223372036854775808", "9223372036854775807"};
     const char *commands[] = {"EXPIRE", "PEXPIRE"};
@@ -387,7 +404,7 @@ static void test_expire_invalid_value(void) {
             assert(is_text(RUN(&env, commands[c], "k", bad[i]), "-ERR value is not an integer or out of range\r\n"));
         }
     }
-    assert(holds(&env, "k", "v") && env.record_count == 0 && RUN(&env, "PTTL", "k").number == -1);
+    assert(holds(&env, "k", "v") && env.record_count == 0 && is_integer(RUN(&env, "PTTL", "k"), -1));
     env_destroy(&env);
 }
 
@@ -396,9 +413,9 @@ static void test_pttl_values(void) {
     Env env;
     env_init(&env, true);
     assert(is_integer(RUN(&env, "PTTL", "none"), -2));
-    RUN(&env, "SET", "plain", "v");
+    assert(is_text(RUN(&env, "SET", "plain", "v"), "+OK\r\n"));
     assert(is_integer(RUN(&env, "PTTL", "plain"), -1));
-    RUN(&env, "SET", "ttl", "v", "PX", "500");
+    assert(is_text(RUN(&env, "SET", "ttl", "v", "PX", "500"), "+OK\r\n"));
     assert(is_integer(RUN(&env, "PTTL", "ttl"), 500));
     env.context.now_ms = START_MS + 123;
     assert(is_integer(RUN(&env, "PTTL", "ttl"), 377));
@@ -432,24 +449,46 @@ static void test_save_variants(void) {
     env_destroy(&env);
 }
 
-/* 읽기 명령과 실패한 명령은 record_change 를 부르지 않는다 */
+/* 읽기 명령과 실패한 명령은 응답을 확인하고 record_change 를 부르지 않는다 */
 static void test_reads_and_failures_do_not_record(void) {
     Env env;
     env_init(&env, true);
-    RUN(&env, "SET", "k", "v");
-    RUN(&env, "SET", "n", "abc");
+    assert(is_text(RUN(&env, "SET", "k", "v"), "+OK\r\n"));
+    assert(is_text(RUN(&env, "SET", "n", "abc"), "+OK\r\n"));
     env.record_count = 0;
-    RUN(&env, "GET", "k");
-    RUN(&env, "GET", "none");
-    RUN(&env, "PTTL", "k");
-    RUN(&env, "PING");
-    RUN(&env, "SAVE");
-    RUN(&env, "INCR", "n");
-    RUN(&env, "SET", "k", "x", "EX", "0");
-    RUN(&env, "EXPIRE", "none", "5");
-    RUN(&env, "DEL", "none");
-    RUN(&env, "BOGUS");
-    assert(env.record_count == 0);
+    assert(is_bulk(RUN(&env, "GET", "k"), "v"));
+    assert(is_text(RUN(&env, "GET", "none"), "$-1\r\n"));
+    assert(is_integer(RUN(&env, "PTTL", "k"), -1));
+    assert(is_text(RUN(&env, "PING"), "+PONG\r\n"));
+    assert(is_text(RUN(&env, "SAVE"), "+OK\r\n"));
+    assert(text_starts_with(RUN(&env, "INCR", "n"), "-ERR value is not an integer"));
+    assert(text_starts_with(RUN(&env, "SET", "k", "x", "EX", "0"), "-ERR invalid expire time"));
+    assert(is_integer(RUN(&env, "EXPIRE", "none", "5"), 0));
+    assert(is_integer(RUN(&env, "DEL", "none"), 0));
+    assert(is_text(RUN(&env, "BOGUS"), "-ERR unknown command\r\n"));
+    assert(env.record_count == 0 && holds(&env, "k", "v"));
+    env_destroy(&env);
+}
+
+/* NUL 이 들어 있는 키 · 값도 SET · DEL 기록에 길이와 바이트 그대로 남는다 */
+static void test_binary_key_is_recorded_exactly(void) {
+    Env env;
+    env_init(&env, true);
+    const Bytes key = BYTES("a\0b");
+    const Bytes other = BYTES("a\0c");
+    const Bytes value = BYTES("v\0\r\nw");
+    Bytes set[] = {BYTES("SET"), key, value};
+    assert(is_text(execute_command(&env.context, set, 3), "+OK\r\n"));
+    Bytes set_other[] = {BYTES("SET"), other, BYTES("x")};
+    assert(is_text(execute_command(&env.context, set_other, 3), "+OK\r\n"));
+    assert(env.record_count == 2 && env.records[0].type == CHANGE_SET);
+    assert(key_is(&env.records[0], key) && !key_is(&env.records[0], BYTES("a")));
+    assert(value_is(&env.records[0], value) && !value_is(&env.records[0], BYTES("v")));
+    env.record_count = 0;
+    Bytes del[] = {BYTES("DEL"), key, BYTES("a")};
+    assert(is_integer(execute_command(&env.context, del, 3), 1));
+    assert(env.record_count == 1 && env.records[0].type == CHANGE_DEL && key_is(&env.records[0], key));
+    assert(env.records[0].value_length == 0);
     env_destroy(&env);
 }
 
@@ -470,14 +509,14 @@ static void test_expired_key_looks_missing(void) {
     env_init(&env, true);
     const uint64_t expired_at = START_MS + 100;
 
-    RUN(&env, "SET", "k", "v", "PX", "100");
+    assert(is_text(RUN(&env, "SET", "k", "v", "PX", "100"), "+OK\r\n"));
     env.context.now_ms = expired_at - 1;
     assert(is_bulk(RUN(&env, "GET", "k"), "v"));
     env.context.now_ms = expired_at;
     assert(is_text(RUN(&env, "GET", "k"), "$-1\r\n"));
 
     env.context.now_ms = START_MS;
-    RUN(&env, "SET", "k", "41", "PX", "100");
+    assert(is_text(RUN(&env, "SET", "k", "41", "PX", "100"), "+OK\r\n"));
     env.context.now_ms = expired_at;
     env.record_count = 0;
     assert(is_integer(RUN(&env, "INCR", "k"), 1));
@@ -485,21 +524,21 @@ static void test_expired_key_looks_missing(void) {
     assert(env.records[0].type == CHANGE_SET && env.records[0].deadline_ms == 0);
 
     env.context.now_ms = START_MS;
-    RUN(&env, "SET", "k", "v", "PX", "100");
+    assert(is_text(RUN(&env, "SET", "k", "v", "PX", "100"), "+OK\r\n"));
     env.context.now_ms = expired_at;
     env.record_count = 0;
     assert(is_integer(RUN(&env, "EXPIRE", "k", "10"), 0));
     assert(env.record_count == 0);
 
     env.context.now_ms = START_MS;
-    RUN(&env, "SET", "k", "v", "PX", "100");
+    assert(is_text(RUN(&env, "SET", "k", "v", "PX", "100"), "+OK\r\n"));
     env.context.now_ms = expired_at;
     env.record_count = 0;
     assert(is_integer(RUN(&env, "DEL", "k"), 0));
     assert(env.record_count == 0);
 
     env.context.now_ms = START_MS;
-    RUN(&env, "SET", "k", "v", "PX", "100");
+    assert(is_text(RUN(&env, "SET", "k", "v", "PX", "100"), "+OK\r\n"));
     env.context.now_ms = expired_at + 5;
     assert(is_integer(RUN(&env, "PTTL", "k"), -2));
     env_destroy(&env);
@@ -528,8 +567,9 @@ int main(void) {
     test_ping();
     test_save_variants();
     test_reads_and_failures_do_not_record();
+    test_binary_key_is_recorded_exactly();
     test_null_hooks_are_safe();
     test_expired_key_looks_missing();
-    puts("24 command unit scenarios passed");
+    puts("25 command unit scenarios passed");
     return 0;
 }
