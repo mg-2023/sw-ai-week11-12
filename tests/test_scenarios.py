@@ -223,6 +223,19 @@ class ScenarioTests(unittest.TestCase):
         self.assertIn(b"PEXPIREAT", record)
         self.assertIn(b"*2\r\n$3\r\nDEL\r\n$1\r\nb\r\n", record)
 
+    def test_everysec_fsync_is_not_delayed_by_a_long_expire_cycle(self):
+        # 주기 정리를 5초로 늘려도, 쓰기 뒤 요청이 더 없을 때 everysec fsync 는 약 1초 안에 일어나야 한다
+        server = self.start("--aof", self.path("appendonly.aof"), "--appendfsync", "everysec",
+                            "--expire-cycle-ms", "5000")
+        self.assertEqual(server.call("SET", "k", "v"), b"+OK")
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            if any("AOF  everysec fsync done" in line for line in server.lines()):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("everysec fsync did not happen within 2.5s after the write")
+
     def test_aof_incomplete_last_record_is_truncated(self):
         options = ["--aof", self.path("appendonly.aof")]
         server = self.start(*options)
