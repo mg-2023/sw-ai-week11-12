@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" font-family="Pretendard, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#dc382d"/>
+      <stop offset="1" stop-color="#8f1a10"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="400" rx="28" fill="url(#bg)"/>
+  <circle cx="1120" cy="40" r="160" fill="#ffffff" opacity="0.05"/>
+  <circle cx="1180" cy="380" r="120" fill="#ffffff" opacity="0.04"/>
+
+  <!-- 왼쪽 : 제목 -->
+  <text x="64" y="142" font-size="64" font-weight="800" fill="#ffffff" letter-spacing="-1">Mini Redis</text>
+  <text x="66" y="192" font-size="22" font-weight="500" fill="#ffe1dd">해시 테이블 기반 키-값 서버를 C로 직접 구현하고,</text>
+  <text x="66" y="224" font-size="22" font-weight="500" fill="#ffe1dd"><tspan font-weight="800" fill="#ffffff">무엇을 고려해 어떻게 골랐는지</tspan>를 기록했습니다</text>
+
+  <rect x="64" y="262" width="150" height="40" rx="20" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.4"/>
+  <text x="139" y="288" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">해시 테이블</text>
+  <rect x="226" y="262" width="150" height="40" rx="20" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.4"/>
+  <text x="301" y="288" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">TCP · RESP2</text>
+  <rect x="388" y="262" width="170" height="40" rx="20" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.4"/>
+  <text x="473" y="288" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">TTL · 스냅샷 · AOF</text>
+
+  <text x="66" y="346" font-size="15" fill="#ffc9c2">크래프톤 정글 · C11 · 외부 라이브러리 0</text>
+
+  <!-- 오른쪽 : 동시에 입장한 두 클라이언트가 받는 번호 -->
+  <rect x="640" y="48" width="500" height="304" rx="20" fill="#3d0b06" fill-opacity="0.45"/>
+  <text x="668" y="86" font-size="16" font-weight="700" fill="#ffe1dd">두 클라이언트가 동시에 입장</text>
+
+  <!-- GET 뒤 SET -->
+  <text x="668" y="126" font-size="16" font-weight="800" fill="#ffffff">GET 뒤 SET</text>
+  <text x="772" y="126" font-size="13" fill="#ffc9c2">명령 두 개 사이에 다른 명령이 끼어듭니다</text>
+  <rect x="668" y="140" width="130" height="36" rx="10" fill="#ffffff" fill-opacity="0.14"/>
+  <text x="733" y="164" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">클라이언트 1</text>
+  <rect x="816" y="140" width="72" height="36" rx="10" fill="none" stroke="#ffd166" stroke-width="2"/>
+  <text x="852" y="164" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">2번</text>
+  <rect x="912" y="140" width="130" height="36" rx="10" fill="#ffffff" fill-opacity="0.14"/>
+  <text x="977" y="164" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">클라이언트 2</text>
+  <rect x="1056" y="140" width="62" height="36" rx="10" fill="none" stroke="#ffd166" stroke-width="2"/>
+  <text x="1087" y="164" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">2번</text>
+
+  <line x1="668" y1="202" x2="1112" y2="202" stroke="#ffffff" stroke-opacity="0.18"/>
+
+  <!-- INCR -->
+  <text x="668" y="234" font-size="16" font-weight="800" fill="#ffffff">INCR</text>
+  <text x="724" y="234" font-size="13" fill="#ffc9c2">읽고 더하고 쓰기가 명령 하나입니다</text>
+  <rect x="668" y="248" width="130" height="36" rx="10" fill="#ffffff" fill-opacity="0.14"/>
+  <text x="733" y="272" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">클라이언트 1</text>
+  <rect x="816" y="248" width="72" height="36" rx="10" fill="#ffffff"/>
+  <text x="852" y="272" font-size="15" font-weight="800" fill="#a41e11" text-anchor="middle">2번</text>
+  <rect x="912" y="248" width="130" height="36" rx="10" fill="#ffffff" fill-opacity="0.14"/>
+  <text x="977" y="272" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">클라이언트 2</text>
+  <rect x="1056" y="248" width="62" height="36" rx="10" fill="#ffffff"/>
+  <text x="1087" y="272" font-size="15" font-weight="800" fill="#a41e11" text-anchor="middle">3번</text>
+
+  <rect x="668" y="316" width="12" height="12" rx="3" fill="none" stroke="#ffd166" stroke-width="2"/>
+  <text x="688" y="327" font-size="13" fill="#ffc9c2">같은 번호 = 백이 두 명</text>
+  <rect x="868" y="316" width="12" height="12" rx="3" fill="#ffffff"/>
+  <text x="888" y="327" font-size="13" fill="#ffc9c2">2번은 백, 3번은 관전자</text>
+</svg>

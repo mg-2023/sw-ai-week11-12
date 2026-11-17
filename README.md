@@ -1,40 +1,103 @@
-# Mini Redis
+<div align="center">
 
-C11로 만든 인메모리 키-값 서버입니다. 외부 앱은 TCP 위의 RESP2 명령으로 값을 저장·조회·삭제하고 TTL을 지정합니다. 해시 테이블, 만료 처리, 이벤트 루프, 영속성(RDB 방식의 스냅샷, AOF)을 직접 구현했습니다.
+<img src="docs/images/banner.svg" alt="Mini Redis: 해시 테이블 기반 키-값 서버를 C로 직접 구현하고 무엇을 고려해 어떻게 골랐는지를 기록했습니다. 두 클라이언트가 동시에 입장할 때 GET 뒤 SET은 둘 다 2번을 받고, INCR은 2번과 3번을 받습니다" width="100%">
 
-이 문서는 4분 발표 순서로 구성했습니다. 요청 한 건이 지나가는 계층을 왼쪽부터 따라갑니다.
+<br>
 
-| 순서 | 시간 | 내용 | 중점 포인트 |
-| --- | ---: | --- | --- |
-| [0. 전체 구조](#0-전체-구조) | 30초 | 계층 5개와 요청 흐름 | |
-| [1. 네트워크 계층](#1-네트워크-계층--요청-한-건의-흐름) | 50초 | `poll` 루프, RESP2 파싱, 명령 실행, 응답 | 동시성 |
-| [2. 저장소 계층](#2-저장소-계층--해시-테이블과-만료-리스트) | 60초 | 해시 테이블, 만료 리스트 | 만료, 무효화 |
-| [3. 디스크 계층](#3-디스크-계층--스냅샷과-aof) | 45초 | 스냅샷과 AOF, 강제 종료 뒤 재시작 결과 | 장애 복구 |
-| [4. 시연](#4-시연--테스트-페이지에서-쓰이는-순간) | 30초 | 오목 테스트 페이지가 각 기능을 쓰는 순간 | 캐시 |
-| [5. 검증과 한계](#5-검증과-한계) | 25초 | 테스트 결과, 보장 범위 | |
+**"해시 테이블로 키-값 서버를 직접 만들고, 고려한 상황마다 무엇을 얻고 무엇을 내주는지 따져서 골랐습니다"**
 
-## 0. 전체 구조
+<p>
+  <img src="https://img.shields.io/badge/C11-single_thread-dc382d?style=for-the-badge&labelColor=161f31">
+  <img src="https://img.shields.io/badge/protocol-RESP2_over_TCP-dc382d?style=for-the-badge&labelColor=161f31">
+  <img src="https://img.shields.io/badge/libraries-0-dc382d?style=for-the-badge&labelColor=161f31">
+  <img src="https://img.shields.io/badge/tests-47_passing-dc382d?style=for-the-badge&labelColor=161f31">
+</p>
 
-```text
-외부 앱 ── TCP / RESP2 ──▶ 네트워크 ──▶ 프로토콜 ──▶ 명령 ──▶ 저장소
-                           server.c     resp.c      commands.c  store.c
-                           net.c                        │       siphash.c
-                                                        ▼
-                                                      디스크
-                                                      persist.c
+<sub>크래프톤 정글 · Mini Redis 구현 과제</sub><br>
+<sub>서버는 C11 표준 라이브러리와 운영체제 소켓만 사용합니다. SipHash 참조 구현 한 파일을 가져왔습니다.</sub>
+
+[요구사항](#-과제-요구사항과-충족한-곳) · [구조](#-구조) · [외부 API](#-외부-api) · [해시 테이블](#%EF%B8%8F-해시-테이블) · [설계 결정](#%EF%B8%8F-설계-결정) · [시연](#-시연) · [검증](#-검증) · [한계](#-한계) · [실행](#-실행-방법) · [문서](#-문서)
+
+</div>
+
+<br>
+
+## 🎯 과제 요구사항과 충족한 곳
+
+| 구분 | 요구사항 | 충족한 방법 | 위치 |
+|:---:|---|---|---|
+| 필수 | 해시 테이블 기반 키-값 저장소 | 버킷 배열과 연결 리스트(체이닝)를 직접 구현 | [해시 테이블](#%EF%B8%8F-해시-테이블) |
+| 필수 | 외부에서 사용할 수 있는 API | TCP 위의 RESP2 명령. `redis-cli`와 기존 클라이언트를 그대로 사용 | [외부 API](#-외부-api) |
+| 중점 | 동시성 문제가 생기지 않는 구조 | 단일 스레드 이벤트 루프, 복합 작업은 `INCR` | [결정 1](#1-동시성) |
+| 중점 | 만료된 값을 요청받았을 때의 처리 | 조회 시 만료와 주기 정리 | [결정 2](#2-데이터-만료) |
+| 중점 | 저장된 데이터의 무효화 | `DEL`로 즉시 삭제, TTL은 안전망 | [결정 3](#3-데이터-무효화) |
+| 선택 | 서버가 다운돼도 데이터 유지 | RDB 방식의 스냅샷과 AOF | [결정 4](#4-장애-복구-선택-항목) |
+| 품질 | 저장 · 조회 · 삭제 단위 테스트 | 저장소 단위 테스트 10개 | [검증](#-검증) |
+| 품질 | API 응답을 Mini Redis에 저장해 활용 | 리포트 API, 오목 테스트 페이지의 요약 캐시 | [시연](#-시연) |
+| 품질 | 엣지 케이스 | 없는 키, 같은 키 다시 저장, 만료된 키 | [검증](#엣지-케이스) |
+| 품질 | 사용 전후 성능 비교 | 처리량, 지연 시간 분포, 적중률 | [검증](#성능-비교) |
+
+<br>
+
+## 🧱 구조
+
+요청 한 건은 네 계층을 순서대로 지나갑니다. 디스크 계층은 명령 계층이 넘긴 변경 내용을 기록합니다.
+
+```mermaid
+%%{init: {"flowchart": {"curve": "stepBefore", "nodeSpacing": 40, "rankSpacing": 50}}}%%
+flowchart LR
+  APP["외부 앱<br/>redis-cli · 오목 백엔드"]
+  NET["네트워크<br/>server.c · net.c<br/>poll 루프 · 입출력 버퍼"]
+  RESP["프로토콜<br/>resp.c<br/>RESP2 파싱"]
+  CMD["명령<br/>commands.c<br/>명령 분기"]
+  STORE["저장소<br/>store.c · siphash.c<br/>해시 테이블 · 만료 리스트"]
+  DISK["디스크<br/>persist.c<br/>스냅샷 · AOF"]
+
+  APP -->|"TCP / RESP2"| NET
+  NET --> RESP
+  RESP --> CMD
+  CMD --> STORE
+  CMD -->|"변경 내용"| DISK
+
+  classDef app fill:#fff1ef,stroke:#dc382d,color:#161f31
+  classDef core fill:#dc382d,stroke:#a41e11,color:#ffffff
+  classDef mod fill:#ffffff,stroke:#dc382d,color:#161f31
+  class APP app
+  class STORE core
+  class NET,RESP,CMD,DISK mod
 ```
 
-| 계층 | 파일 | 역할 | 경계 |
-| --- | --- | --- | --- |
-| 네트워크 | [`server.c`](src/server.c), [`net.c`](src/net.c) | `poll` 루프, 연결별 입출력 버퍼, 소켓 함수 | 명령의 뜻을 해석하지 않습니다. |
-| 프로토콜 | [`resp.c`](src/resp.c) | 바이트 버퍼를 RESP2 인자 배열로 파싱 | 소켓을 알지 못합니다. |
-| 명령 | [`commands.c`](src/commands.c) | 명령 이름으로 분기해 저장소 함수를 호출 | 소켓과 파일을 알지 못합니다. 변경 내용은 콜백으로 넘깁니다. |
-| 저장소 | [`store.c`](src/store.c), [`siphash.c`](src/siphash.c) | 해시 테이블, 만료 리스트 | 시계를 읽지 않습니다. 호출자가 시각을 넘깁니다. |
-| 디스크 | [`persist.c`](src/persist.c) | 스냅샷 저장·복원, AOF 기록·재생 | 저장소의 공개 함수만 사용합니다. |
+| 계층 | 파일 | 역할 | 알지 못하는 것 |
+|---|---|---|---|
+| 네트워크 | [`server.c`](src/server.c), [`net.c`](src/net.c) | `poll` 루프, 연결별 입출력 버퍼 | 명령의 뜻 |
+| 프로토콜 | [`resp.c`](src/resp.c) | 바이트 버퍼를 인자 배열로 파싱 | 소켓 |
+| 명령 | [`commands.c`](src/commands.c) | 명령 이름으로 분기해 저장소 함수를 호출 | 소켓, 파일 |
+| 저장소 | [`store.c`](src/store.c), [`siphash.c`](src/siphash.c) | 해시 테이블, 만료 리스트 | 소켓, 시계 (호출자가 시각을 넘깁니다) |
+| 디스크 | [`persist.c`](src/persist.c) | 스냅샷 저장 · 복원, AOF 기록 · 재생 | 저장소 내부 구조 |
 
-## 1. 네트워크 계층 : 요청 한 건의 흐름
+> 저장소가 소켓과 시계를 알지 못하므로, 서버를 띄우지 않고 시각을 직접 넘겨 단위 테스트를 할 수 있습니다.
 
-스레드 하나가 `poll` 하나로 모든 연결을 감시하고, 명령을 한 번에 하나씩 실행합니다.
+<br>
+
+## 🔌 외부 API
+
+> **질문** 외부 앱이 Mini Redis를 쉽게 쓰려면 어떤 형태의 API가 좋은가?
+
+| 선택지 | 얻는 것 | 내주는 것 |
+|---|---|---|
+| **TCP 위의 RESP2** (선택) | `redis-cli`와 언어별 Redis 클라이언트를 그대로 사용합니다. 길이를 앞에 적는 형식이라 NUL이 든 값도 전달합니다 | 파서와 연결 관리를 직접 구현해야 합니다 |
+| HTTP와 JSON | 브라우저와 `curl`로 바로 호출합니다 | 요청마다 머리말 비용이 붙고, 바이너리 값은 인코딩이 필요합니다 |
+| 라이브러리 함수 호출 | 네트워크 비용이 없습니다 | 같은 프로세스, 같은 언어에서만 쓸 수 있습니다 |
+
+| 명령 | 응답 |
+|---|---|
+| `SET key value [EX 초 \| PX 밀리초]` | `OK`. 같은 키에 다시 쓰면 값과 TTL을 모두 바꿉니다 |
+| `GET key` | 값. 키가 없거나 만료됐으면 `(nil)` |
+| `DEL key [key ...]` | 실제로 지운 키 수 |
+| `INCR key` | 1 증가한 값. 키가 없으면 `1`, 정수가 아니면 오류. TTL은 유지합니다 |
+| `EXPIRE key 초`, `PEXPIRE key 밀리초` | TTL을 바꾸면 `1`, 키가 없으면 `0`. 0 이하는 즉시 삭제 |
+| `PTTL key` | 남은 밀리초. TTL이 없으면 `-1`, 키가 없으면 `-2` |
+| `PING [message]`, `SAVE` | `PONG` 또는 받은 메시지, 스냅샷 저장 뒤 `OK` |
 
 ```text
 요청 수신        RESP 파싱          명령 실행             해시 테이블              응답
@@ -42,21 +105,61 @@ read_client  →  resp_parse   →  execute_command  →  store_set / store_get 
 (server.c)      (resp.c)        (commands.c)         (store.c)                (server.c)
 ```
 
-| 명령 | 응답 |
-| --- | --- |
-| `SET key value [EX 초 \| PX 밀리초]` | `OK`. 같은 키에 다시 쓰면 값과 TTL을 모두 바꿉니다. |
-| `GET key` | 값. 키가 없거나 만료됐으면 `(nil)`입니다. |
-| `DEL key [key ...]` | 실제로 지운 키 수 |
-| `EXPIRE key 초`, `PEXPIRE key 밀리초` | TTL을 바꾸면 `1`, 키가 없으면 `0`. 0 이하는 즉시 삭제합니다. |
-| `PTTL key` | 남은 밀리초. TTL이 없으면 `-1`, 키가 없으면 `-2`입니다. |
-| `PING [message]`, `SAVE` | `PONG` 또는 받은 메시지, 스냅샷 저장 뒤 `OK` |
+<br>
 
-`redis-cli`나 Redis 클라이언트 라이브러리를 그대로 사용할 수 있습니다. 키와 값은 바이트열과 길이로 다루므로 빈 값과 NUL이 포함된 값도 저장합니다.
+## 🗂️ 해시 테이블
 
-### 동시성 : 실행 단위는 명령 하나입니다
+### 설계 원리
 
-- `execute_command`가 끝나야 다음 명령이 시작됩니다. 따라서 락이 없어도 명령 하나는 원자적입니다.
-- 여러 명령에 걸친 작업은 원자적이지 않습니다. 두 연결이 `GET` 뒤 `SET`을 나눠 보내면 갱신 하나가 사라집니다.
+키를 해시 함수에 넣어 64비트 숫자를 얻고, 버킷 개수로 나눈 나머지를 버킷 번호로 씁니다. 키가 몇 개든 버킷 하나만 보면 되므로 평균 O(1)에 찾습니다.
+
+```text
+키 → SipHash-2-4(시작할 때 뽑은 비밀 키 128비트) → 64비트 해시 → hash % capacity → 버킷 번호
+
+buckets[0] → NULL
+buckets[1] → Entry → Entry → NULL        같은 버킷의 항목은 연결 리스트로 잇습니다 (체이닝)
+buckets[2] → Entry → NULL
+
+Entry = { hash, 키 길이, 값 길이, 만료 시각, 체인의 다음 항목, 만료 리스트의 앞뒤 항목, 키와 값 바이트 }
+```
+
+### 주요 함수의 동작
+
+| 함수 | 하는 일 | 순서 |
+|---|---|---|
+| `store_set` | 저장 | 항목을 만들어 키와 값을 복사 → 같은 키가 있으면 그 자리의 항목을 교체 → 없으면 버킷 체인 맨 앞에 삽입 → 부하율 75%에 닿으면 두 배 크기 테이블 생성 |
+| `store_get` | 조회 | `find_live`로 항목을 찾음 → 값의 위치와 길이를 반환 (복사하지 않음) |
+| `store_delete` | 삭제 | `find_live`로 항목을 찾음 → 앞 항목의 링크를 다음 항목으로 바꿔 체인에서 제거 → 만료 리스트에서도 제거 |
+| `find_live` | 살아 있는 항목 찾기 | rehash 두 단계 진행 → 버킷 체인에서 키 비교 → 만료 시각이 지났으면 지우고 없음으로 처리 |
+| `find_in_table` | 키 비교 | 해시 → 길이 → 바이트 순서로 비교. 비용이 작은 비교에서 다르면 뒤는 보지 않습니다 |
+| `rehash_step` | 테이블 확장 | 옛 테이블의 항목을 정해진 수만큼만 새 테이블로 이동. 다 옮기면 새 테이블이 현재 테이블이 됩니다 |
+
+### 구현하며 고른 것
+
+| 고려한 상황 | 고른 방식 | 얻는 것 | 내주는 것 |
+|---|---|---|---|
+| 서로 다른 키가 같은 버킷에 온다 | 체이닝 (개방 주소법 대신) | 삭제가 링크 하나 바꾸기로 끝납니다. 부하율이 높아져도 동작합니다 | 항목마다 포인터 메모리가 들고, 체인을 따라갈 때 메모리가 흩어져 있습니다 |
+| 항목이 늘면 체인이 길어진다 | 부하율 75%에서 두 배로 확장 | 체인 길이를 짧게 유지합니다 | 확장 중에는 테이블 두 개를 유지합니다 |
+| 한 번에 옮기면 그동안 서버가 멈춘다 | 명령마다 조금씩 옮기는 점진 rehash | 명령 하나의 지연이 일정합니다 | 확장 중에는 두 테이블을 모두 찾아야 하고 코드가 복잡해집니다 |
+| 공개된 해시 상수로 키를 한 버킷에 몰 수 있다 | FNV-1a에서 키 있는 SipHash-2-4로 교체 | 비밀 키를 모르면 같은 버킷으로 몰 수 없습니다. 몰리던 키 1000개의 가장 긴 체인이 **1000에서 4**로 줄었습니다 | 짧은 키에서 FNV-1a보다 느립니다 |
+
+해시 함수를 바꾼 과정은 [ADR 0001](docs/adr/0001-siphash.md)에 있습니다.
+
+<br>
+
+## ⚖️ 설계 결정
+
+### 1. 동시성
+
+> **질문** 여러 연결이 같은 데이터를 동시에 바꾸려 할 때 데이터가 어긋나지 않으려면 어떤 구조여야 하는가?
+
+| 선택지 | 얻는 것 | 내주는 것 |
+|---|---|---|
+| **단일 스레드 이벤트 루프** (선택) | 락이 없습니다. 명령 하나가 끝나야 다음 명령이 시작되므로 명령 하나는 원자적입니다 | CPU 코어를 하나만 씁니다. 오래 걸리는 명령 하나가 모든 연결을 멈춥니다 |
+| 스레드 여러 개와 전체 락 | 연결마다 코드 흐름이 단순합니다 | 락을 기다리느라 실제로는 한 번에 하나만 실행됩니다 |
+| 스레드 여러 개와 버킷별 락 | 여러 코어를 씁니다 | rehash와 만료 리스트가 여러 버킷에 걸쳐 있어 락 순서가 복잡하고 교착 위험이 있습니다 |
+
+단일 스레드에서도 남는 문제가 있습니다. 클라이언트가 `GET` 뒤에 `SET`을 따로 보내면 그 사이에 다른 연결의 명령이 실행됩니다.
 
 ```text
 [+     15ms] EXEC #2 conn=1 GET "counter" -> "0"
@@ -65,28 +168,31 @@ read_client  →  resp_parse   →  execute_command  →  store_set / store_get 
 [+     15ms] EXEC #5 conn=2 SET "counter" "1" -> OK      두 연결이 각각 +1 했지만 최종값은 "1"
 ```
 
-`--log` 옵션의 실제 출력입니다(`python examples/demo.py lost-update`). `#번호`는 서버가 명령을 실행한 순번이고 `conn`은 연결 ID입니다. 읽고 더하고 쓰는 과정을 명령 하나로 옮기는 `INCR`이 해결 방법이며, 이번 범위에서는 구현하지 않았습니다.
+> **질문** 읽고 고쳐 쓰는 복합 작업을 어떻게 원자적으로 만들 것인가?
 
-## 2. 저장소 계층 : 해시 테이블과 만료 리스트
-
-항목 하나가 두 연결 리스트에 동시에 들어갑니다. 버킷 체인은 키로 찾는 경로이고, 만료 리스트는 TTL이 있는 항목만 도는 경로입니다.
-
-### 2-1. 해시 테이블
+| 선택지 | 얻는 것 | 내주는 것 |
+|---|---|---|
+| 앱이 `GET` 뒤 `SET` | 서버를 바꾸지 않습니다 | 두 명령 사이에 다른 명령이 끼어들어 갱신이 사라집니다 |
+| **`INCR` 명령 추가** (선택) | 읽고 더하고 쓰기가 명령 하나라서 원자적입니다 | 미리 정한 연산만 할 수 있습니다 |
+| 트랜잭션이나 스크립트 | 임의의 명령 조합을 묶습니다 | 구현 범위가 큽니다. 이번에는 만들지 않았습니다 |
 
 ```text
-키 → SipHash-2-4(시작 시 뽑은 비밀 키 128비트) → 64비트 해시 → hash % capacity → 버킷 번호
-
-buckets[0] → NULL
-buckets[1] → Entry → Entry → NULL        같은 버킷의 항목은 체인으로 연결합니다.
-buckets[2] → Entry → NULL
+[+     31ms] EXEC #1 conn=1 INCR "room:1:seats" -> (integer) 1
+[+     31ms] EXEC #2 conn=2 INCR "room:1:seats" -> (integer) 2      두 연결이 서로 다른 번호를 받습니다
 ```
 
-- 평균 O(1) 조회를 얻기 위해 해시 테이블을 사용합니다.
-- 부하율 75%에서 두 배 크기 테이블을 만들고 `rehash_step`으로 조금씩 옮깁니다. 한 번에 옮기지 않으므로 확장 중에도 명령 하나가 오래 걸리지 않습니다.
-- v1.0.0은 고정 상수 FNV-1a를 사용했습니다. 같은 버킷으로 몰리는 키를 미리 계산할 수 있어 v1.1.0에서 키 있는 SipHash-2-4로 바꿨습니다.
-- 옛 해시에서 한 버킷에 몰리던 키 1000개를 넣었을 때 가장 긴 체인은 1000에서 4로 줄었습니다. 결정 과정은 [ADR 0001](docs/adr/0001-siphash.md)에 있습니다.
+`--log` 옵션의 실제 출력입니다. `#번호`는 서버가 명령을 실행한 순번이고 `conn`은 연결 ID입니다.
 
-### 2-2. 데이터 만료 : 조회 시 회수와 주기 회수
+### 2. 데이터 만료
+
+> **질문** 보관 기간이 지난 값을 요청받으면 어떻게 답하고, 아무도 요청하지 않는 만료 값은 언제 지울 것인가?
+
+| 선택지 | 얻는 것 | 내주는 것 |
+|---|---|---|
+| 조회할 때만 만료 | 구현이 단순하고 응답은 항상 정확합니다 | 조회되지 않는 만료 키가 메모리에 계속 남습니다 |
+| 주기마다 전부 검사 | 만료 키를 빠짐없이 회수합니다 | 키 수에 비례해 그동안 모든 명령이 멈춥니다 |
+| 만료 시각 순으로 정렬한 구조 | 가장 먼저 만료될 키를 바로 압니다 | 구조가 하나 더 필요하고 `SET`마다 정렬 비용이 듭니다 |
+| **조회 시 만료와 32개 한도의 주기 정리** (선택) | 응답은 항상 정확하고, 한 번의 정리 시간에 상한이 있습니다 | 조회되지 않는 키의 회수 시점이 늦어질 수 있습니다 |
 
 ```text
 만료 시각이 있는 항목만 잇는 원형 이중 연결 리스트
@@ -97,11 +203,9 @@ buckets[2] → Entry → NULL
 ```
 
 | 경로 | 언제 | 코드 |
-| --- | --- | --- |
-| 조회 시 만료 | 명령이 키에 접근할 때 만료 시각이 지났으면 지우고 `(nil)`을 반환합니다. | `find_live` |
-| 주기 정리 | 100ms마다 커서부터 **최대 32개**를 검사해 지난 항목을 지웁니다. 다음 호출은 커서에서 이어 갑니다. | `store_maintain` |
-
-검사 수를 32개로 제한하는 이유는 주기 정리도 같은 스레드에서 실행되기 때문입니다. 전부 검사하면 그동안 모든 명령이 멈춥니다.
+|---|---|---|
+| 조회 시 만료 | 명령이 키에 접근할 때 만료 시각이 지났으면 지우고 `(nil)`을 반환 | `find_live` |
+| 주기 정리 | 100ms마다 커서부터 **최대 32개**를 검사해 지난 항목을 삭제. 다음 호출은 커서에서 이어 갑니다 | `store_maintain` |
 
 ```text
 [+     16ms] EXEC #1 conn=1 SET "cache:ghost" "v" "PX" "100" -> OK
@@ -109,7 +213,14 @@ buckets[2] → Entry → NULL
 [+    125ms] CYCLE checked 2 of 2 TTL keys from cursor (limit 32), removed 1
 ```
 
-### 2-3. 데이터 무효화 : TTL이 남은 키의 `DEL`
+### 3. 데이터 무효화
+
+> **질문** 원본이 바뀌어 저장된 값이 낡았을 때 사용자가 어떻게 무효화할 것인가?
+
+| 선택지 | 얻는 것 | 내주는 것 |
+|---|---|---|
+| TTL에만 맡김 | 앱이 할 일이 없습니다 | TTL이 끝날 때까지 낡은 값을 돌려줍니다 |
+| **`DEL`로 즉시 삭제, TTL은 안전망** (선택) | 원본이 바뀐 직후부터 새 값을 돌려줍니다 | 앱이 언제 지워야 하는지 알고 있어야 합니다 |
 
 ```text
 [+     16ms] EXEC #2 conn=1 PTTL "cache:report" -> (integer) 30000
@@ -117,75 +228,147 @@ buckets[2] → Entry → NULL
 [+     16ms] EXEC #4 conn=1 GET "cache:report" -> (nil)
 ```
 
-`DEL`은 TTL이 30초 남은 항목을 버킷 체인과 만료 리스트에서 즉시 제거합니다.
+`DEL`은 TTL이 30초 남은 항목을 버킷 체인과 만료 리스트에서 즉시 제거합니다. `EXPIRE`에 0 이하를 주어도 즉시 삭제합니다.
 
-## 3. 디스크 계층 : 스냅샷과 AOF
+### 4. 장애 복구 (선택 항목)
 
-메모리의 내용은 프로세스가 끝나면 사라집니다. 두 방식 중 하나를 골라 디스크에 남깁니다.
+> **질문** 프로세스가 죽으면 메모리의 내용이 사라진다. 무엇을 디스크에 남길 것인가?
 
-| 방식 | 기록하는 것 | 재시작 시 | 강제 종료 시 잃는 범위 |
-| --- | --- | --- | --- |
-| RDB 방식의 스냅샷 (`--snapshot FILE`) | `SAVE` 시점의 키·값·만료 시각 전체 | 파일을 읽어 채웁니다. | 마지막 `SAVE` 이후의 모든 변경 |
-| AOF (`--aof FILE`) | 상태를 바꾼 연산을 실행 순서대로 | 처음부터 재생합니다. | 동기화 정책에 따라 다릅니다. |
+| 방식 | 기록하는 것 | 얻는 것 | 내주는 것 |
+|---|---|---|---|
+| RDB 방식의 스냅샷 (`--snapshot`) | `SAVE` 시점의 키 · 값 · 만료 시각 전체 | 파일이 작고 복원이 빠릅니다 | 마지막 `SAVE` 이후의 변경을 모두 잃습니다. 저장하는 동안 명령이 멈춥니다 |
+| AOF (`--aof`) | 상태를 바꾼 연산을 실행 순서대로 | 잃는 범위가 작습니다. `appendfsync always`이면 응답한 변경은 디스크에 있습니다 | 쓰기마다 디스크 비용이 듭니다. 파일이 계속 커집니다 |
 
-- 스냅샷은 `파일.tmp`에 끝까지 쓰고 fsync한 뒤에만 원래 이름으로 교체합니다. 쓰는 도중 종료되면 마지막 완성본이 남습니다.
-- AOF는 명령을 실행한 직후, 응답을 출력 버퍼에 넣기 전에 기록합니다.
-- 만료 시각은 두 방식 모두 Unix ms 절대 시각으로 저장합니다. 서버가 꺼져 있던 시간도 TTL에서 빠집니다.
-
-`v1 저장 → 기준 시점(스냅샷은 여기서 SAVE) → v2 갱신 → 강제 종료 → 2초 뒤 재시작` 결과입니다(`python examples/demo.py recovery-snapshot`, `recovery-aof`).
+두 방식을 모두 만들고 같은 조건으로 비교했습니다. `v1 저장 → 기준 시점(스냅샷은 여기서 SAVE) → v2 갱신 → 강제 종료 → 2초 뒤 재시작` 결과입니다.
 
 | 확인 | 스냅샷 | AOF (`appendfsync always`) |
-| --- | --- | --- |
+|---|---|---|
 | `GET user:1` | `"v1"` (`SAVE` 이후의 v2는 잃음) | `"v2"` |
 | `SET` 뒤 `DEL` 한 키 | `(nil)` | `(nil)` |
 | 꺼져 있던 2초 동안 만료된 키 | `(nil)` | `(nil)` |
 | `PX 10000`으로 저장한 키의 `PTTL` | `7972` | `7937` |
 
-동기화 정책별 동작, 재시작 전후 로그, AOF 파일 내용은 [docs/persistence.md](docs/persistence.md)에 있습니다.
+- 스냅샷은 임시 파일에 끝까지 쓰고 fsync한 뒤에만 원래 이름으로 교체합니다. 쓰는 도중 종료되면 마지막 완성본이 남습니다.
+- AOF는 명령을 실행한 직후, 응답을 보내기 전에 기록합니다.
+- 만료 시각은 Unix ms 절대 시각으로 저장합니다. 서버가 꺼져 있던 시간도 TTL에서 빠집니다.
 
-## 4. 시연 : 테스트 페이지에서 쓰이는 순간
+동기화 정책별 동작과 재시작 전후 로그는 [docs/persistence.md](docs/persistence.md)에 있습니다.
 
-테스트 페이지는 오목 앱([Jongeume/mini-react](https://github.com/Jongeume/mini-react))입니다. 대국 결과 저장과 최근 대국 요약 조회에 Mini Redis를 캐시로 사용합니다.
+<br>
+
+## 🎬 시연
+
+테스트 페이지는 미니 리액트 과제에서 만든 오목 앱([Jongeume/mini-react](https://github.com/Jongeume/mini-react))입니다. 오목 백엔드가 Mini Redis에 TCP로 연결해 명령을 보냅니다.
 
 ```text
 오목 화면  →  HTTP/JSON  →  오목 백엔드(Node)  →  TCP/RESP2  →  Mini Redis
-                            원본 대국 기록(JSON 파일)           요약 캐시 gomoku:recent-summary
 ```
 
-![요약 조회가 캐시에 적중하고, 대국이 끝나 결과를 저장하면 백엔드가 DEL로 요약 캐시를 지우며, 다시 조회하면 GET이 nil이 되어 새 요약을 SET EX 30으로 저장하는 화면](docs/gomoku-redis-cache.gif)
+### 1. 모드 선택과 로비
 
-| 테스트 페이지에서 하는 일 | 백엔드가 보낸 명령 → 실제 응답 | 쓰이는 기능 |
-| --- | --- | --- |
-| 1. 최근 대국 요약을 조회합니다. | `GET gomoku:recent-summary` → 요약 JSON | 해시 테이블 조회 (캐시 적중) |
-| 2. 대국이 끝나 결과를 저장합니다. | 원본 저장 성공 뒤 `DEL gomoku:recent-summary` → `(integer) 1` | 무효화 |
-| 3. 요약을 다시 조회합니다. | `GET` → `(nil)`, 새 요약을 `SET … EX 30` → `OK` | TTL 지정 저장 |
+| 모드 선택 | 온라인 대전 로비 |
+|:---:|:---:|
+| <img src="docs/images/demo-mode.png" alt="싱글 플레이와 온라인 대전 버튼이 있는 모드 선택 화면" width="420"> | <img src="docs/images/demo-lobby.png" alt="이름 입력, 방 만들기 버튼, 1번 방이 대기 중으로 보이는 로비 화면" width="420"> |
 
-- 앱(오목 백엔드)이 판단합니다. 무엇을 캐시하고 언제 지울지는 앱이 정합니다.
-- Mini Redis는 받은 명령을 실행합니다. 명령 하나의 원자성과 TTL 만료를 보장합니다.
+> **쓰인 기능** 방 번호 발급 `INCR gomoku:room:next-id`
+
+### 2. 두 클라이언트가 같은 방에 동시에 입장
+
+브라우저 탭 두 개에서 같은 순간에 "입장"을 눌렀습니다.
+
+| | 한 클라이언트 | 다른 클라이언트 |
+|:---:|:---:|:---:|
+| **`INCR`** | <img src="docs/images/demo-seat-incr-2.png" alt="당신은 백입니다. INCR gomoku:room:1:seats 응답 2" width="380"> | <img src="docs/images/demo-seat-incr-1.png" alt="당신은 관전자입니다. INCR gomoku:room:1:seats 응답 3" width="380"> |
+| **`GET` 뒤 `SET`** (비교용) | <img src="docs/images/demo-seat-getset-1.png" alt="당신은 백입니다. GET 응답 1, SET 2" width="380"> | <img src="docs/images/demo-seat-getset-2.png" alt="당신은 백입니다. GET 응답 1, SET 2" width="380"> |
+
+> **쓰인 기능** 좌석 순번 `INCR gomoku:room:{방}:seats` (1은 흑, 2는 백, 3 이상은 관전자)
+
+- `INCR`은 2번과 3번을 주어 한 명은 백, 한 명은 관전자가 됩니다.
+- `GET` 뒤 `SET`은 두 클라이언트가 모두 `"1"`을 읽고 `2`를 써서 백이 두 명이 됩니다. 오목 백엔드의 `--seat-mode getset` 옵션으로 재현한 비교용 동작입니다.
+
+### 3. API 응답 캐시와 무효화
+
+| 요약 조회 (캐시 적중) | 새 결과 저장 뒤 다시 조회 (캐시 미스) |
+|:---:|:---:|
+| <img src="docs/images/demo-cache-hit.png" alt="최근 대국 요약을 조회하면 GET gomoku:recent-summary가 저장된 요약을 돌려주는 화면" width="420"> | <img src="docs/images/demo-cache-refill.png" alt="새 결과 저장 뒤 다시 조회하면 GET이 nil이고 새 요약을 SET EX 30으로 저장하는 화면" width="420"> |
+
+> **쓰인 기능** 조회 `GET`, TTL 지정 저장 `SET … EX 30`, 무효화 `DEL`
+
+- 백엔드는 요약 API의 응답을 Mini Redis에 30초 동안 저장하고 다시 씁니다.
+- 대국 결과를 저장하면 원본 저장이 성공한 뒤 `DEL`로 요약 캐시를 지웁니다. 다음 조회는 `(nil)`을 받고 새 요약을 저장합니다.
+- 무엇을 캐시하고 언제 지울지는 앱이 정합니다. Mini Redis는 받은 명령을 실행합니다.
 
 전체 로그는 [`docs/backend.log`](docs/backend.log), [`docs/mini-redis.log`](docs/mini-redis.log)에 있습니다.
 
-## 5. 검증과 한계
+<br>
+
+## ✅ 검증
 
 | 테스트 | 명령 | 결과 |
-| --- | --- | --- |
+|---|---|---|
 | 저장소 단위 | `mingw32-make test` | 10개 시나리오 통과 |
 | SipHash 단위 | `mingw32-make test` | 공식 테스트 벡터 64개 일치 |
 | RESP 파싱 단위 | `mingw32-make test` | 3개 시나리오 통과 |
 | 영속성 단위 | `mingw32-make test` | 6개 시나리오 통과 |
-| 통합 | `python tests/test_integration.py -v` | 7건 통과 |
-| 발표 장면 통합 | `python tests/test_scenarios.py -v` | 13건 통과 |
-| 오목 백엔드·화면 (mini-react) | `npm test` | 663건 통과 |
+| 통합 (실제 서버에 TCP로 명령 전송) | `python tests/test_integration.py -v` | 12건 통과 |
+| 발표 장면 통합 | `python tests/test_scenarios.py -v` | 15건 통과 |
+| 오목 백엔드와 화면 (mini-react) | `npm test` | 693건 통과 |
 
-- 원자성은 명령 한 건까지입니다. 여러 명령에 걸친 작업은 앱이 책임집니다.
-- 조회하지 않은 만료 키가 메모리에서 회수되는 시점은 TTL 키 수에 따라 늦어질 수 있습니다.
-- 스냅샷은 마지막 `SAVE` 이후의 변경을 잃습니다.
-- 복구 실험은 프로세스 강제 종료만 확인했습니다. 운영체제나 전원 장애는 측정하지 않았습니다.
-- 인증, TLS, 전체 메모리 상한, `INCR`은 제공하지 않습니다.
+### 엣지 케이스
 
-테스트가 확인하는 항목 전체, 한계 전체, 예제 성능 측정값은 [docs/verification.md](docs/verification.md)에 있습니다.
+| 상황 | 동작 | 테스트 |
+|---|---|---|
+| 없는 키 조회 | `(nil)` | `test_binary_and_collision`, `test_binary_crud_and_multiple_delete` |
+| 같은 키 다시 저장 | 값과 TTL을 모두 새 값으로 교체 | `test_binary_and_collision`, `test_expiration` |
+| 만료된 키 조회 | 그 자리에서 지우고 `(nil)` | `test_expiration`, `test_expired_key_is_removed_on_access` |
+| 이미 지운 키를 다시 삭제 | 지운 수 `0` | `test_binary_and_collision` |
+| 빈 키, 빈 값, NUL이 든 값 | 그대로 저장하고 조회 | `test_binary_and_collision` |
+| 연결 12개가 같은 키를 동시에 `DEL` | `1` 한 건, `0` 열한 건 | `test_concurrent_clients_and_same_key_deletion` |
+| 연결 12개가 같은 키를 동시에 `INCR` | 1부터 12까지 하나씩 | `test_concurrent_incr_gives_each_client_a_distinct_number` |
+| 정수가 아닌 값에 `INCR` | 오류, 값은 그대로 | `test_incr_rejects_non_integer_and_overflow_without_changing_value` |
+| 명령이 조각나서 도착 | 다른 연결을 막지 않고 이어서 파싱 | `test_partial_frames_do_not_block_other_clients_and_pipeline_is_ordered` |
+| AOF 마지막 레코드가 쓰다 만 상태 | 그 부분만 잘라 내고 시작 | `test_aof_incomplete_last_record_is_truncated` |
 
-## 부록 : 빌드와 재현 명령
+### 성능 비교
+
+같은 API(`GET /v1/report`)를 Mini Redis 캐시를 쓸 때와 쓰지 않을 때로 나눠 200회씩 요청했습니다. 원본 작업은 50ms 고정 지연으로 흉내 냈습니다.
+
+| 모드 | 처리량 (req/s) | avg | p50 | p95 | p99 | max | 적중률 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 캐시 사용 | 316.2 | 3.143 | 0.940 | 15.811 | 24.412 | 54.730 | 99.5% (hit 199, miss 1) |
+| 캐시 미사용 | 15.4 | 64.775 | 62.485 | 78.298 | 78.914 | 79.380 | 해당 없음 |
+
+지연 시간 단위는 ms입니다. 3회 실행에서 캐시 미사용은 15.2에서 15.4 req/s로 일정했고, 캐시 사용은 102.8에서 316.2 req/s로 편차가 컸습니다. 세 번 모두 캐시 사용이 빨랐습니다.
+
+Mini Redis 자체의 명령별 지연입니다(명령마다 10000회, 연결 1개, 값 64바이트).
+
+| 명령 | 처리량 (req/s) | avg | p50 | p95 | p99 | max |
+|---|---:|---:|---:|---:|---:|---:|
+| `SET` | 22552 | 0.041 | 0.036 | 0.066 | 0.124 | 0.747 |
+| `GET` (적중) | 21543 | 0.043 | 0.037 | 0.084 | 0.141 | 0.832 |
+| `INCR` | 19181 | 0.048 | 0.039 | 0.106 | 0.154 | 0.754 |
+| `DEL` | 18100 | 0.051 | 0.041 | 0.093 | 0.138 | 0.917 |
+
+측정 조건, 연결 8개 결과, 편차는 [docs/benchmark.md](docs/benchmark.md)에 있습니다. 같은 PC의 루프백에서 파이썬 클라이언트로 측정한 값이라 서버의 한계 처리량으로 읽으면 안 됩니다.
+
+<br>
+
+## 🚧 한계
+
+| 한계 | 이유 |
+|---|---|
+| 원자성은 명령 한 건까지 | 여러 명령을 묶는 트랜잭션을 만들지 않았습니다. 복합 작업은 `INCR`만 제공합니다 |
+| 조회되지 않는 만료 키의 회수 지연 | 주기 정리가 한 번에 32개만 검사합니다 |
+| 스냅샷은 마지막 `SAVE` 이후를 잃음 | 자동 저장 주기를 만들지 않았습니다 |
+| AOF 파일이 계속 커짐 | 재작성(rewrite)을 만들지 않았습니다 |
+| 복구는 프로세스 강제 종료만 확인 | 운영체제나 전원 장애는 측정하지 않았습니다 |
+| 인증, TLS, 메모리 상한 없음 | 로컬 루프백에서 쓰는 것을 전제로 했습니다 |
+
+전체 목록은 [docs/verification.md](docs/verification.md)에 있습니다.
+
+<br>
+
+## 🚀 실행 방법
 
 Windows PowerShell에서 MinGW-w64의 `gcc`, `mingw32-make`와 Python 3을 사용합니다. POSIX에서는 `make`와 `./mini-redis`를 사용합니다.
 
@@ -194,25 +377,37 @@ mingw32-make                      # mini-redis.exe, report-api.exe
 mingw32-make test                 # 저장소 · SipHash · RESP · 영속성 단위 테스트
 python tests/test_integration.py -v
 python tests/test_scenarios.py -v
-python examples/demo.py all       # 발표 장면 재현. 로그는 demo-output/ 에 저장됩니다.
+python examples/demo.py all       # 로그 장면 재현. 로그는 demo-output/ 에 저장됩니다.
+python examples/benchmark.py      # 성능 측정
 ```
 
 | 서버 옵션 | 뜻 |
-| --- | --- |
-| `--bind IPv4`, `--port PORT` | 수신 주소. 기본 `127.0.0.1:6379`, `0`이면 임의 포트입니다. |
-| `--log FILE` 또는 `--log -` | 시연 로그를 파일 또는 표준 오류로 기록합니다. 기본은 꺼짐입니다. |
-| `--expire-cycle-ms MS` | 주기 정리 간격. 기본 100, `0`이면 주기 정리를 끕니다. |
-| `--snapshot FILE` | RDB 방식의 스냅샷 모드. `SAVE`로 저장하고 시작할 때 복원합니다. |
-| `--aof FILE`, `--appendfsync always\|everysec\|no` | AOF 모드. `--snapshot`과 함께 쓸 수 없습니다. |
-| `--debug-aof-fail-at N`, `--debug-snapshot-crash-after N` | 시험용 장애 주입. N번째 AOF 기록을 실패시키거나, 스냅샷 항목 N개를 쓴 직후 종료합니다. |
+|---|---|
+| `--bind IPv4`, `--port PORT` | 수신 주소. 기본 `127.0.0.1:6379`, `0`이면 임의 포트 |
+| `--log FILE` 또는 `--log -` | 시연 로그를 파일 또는 표준 오류로 기록. 기본은 꺼짐 |
+| `--expire-cycle-ms MS` | 주기 정리 간격. 기본 100, `0`이면 끔 |
+| `--snapshot FILE` | RDB 방식의 스냅샷 모드. `SAVE`로 저장하고 시작할 때 복원 |
+| `--aof FILE`, `--appendfsync always\|everysec\|no` | AOF 모드. `--snapshot`과 함께 쓸 수 없음 |
+| `--debug-aof-fail-at N`, `--debug-snapshot-crash-after N` | 시험용 장애 주입 |
 
-오목 시연은 [Jongeume/mini-react](https://github.com/Jongeume/mini-react)의 `feat/gomoku-redis-backend` 브랜치에서 실행합니다.
+오목 테스트 페이지는 [Jongeume/mini-react](https://github.com/Jongeume/mini-react) 저장소에서 실행합니다.
 
 ```powershell
 .\mini-redis.exe                                   # 이 저장소
 node backend/gomoku-api.js --redis-port 6379       # mini-react 저장소, http://127.0.0.1:8090/
-npm test                                           # mini-react 저장소, 백엔드 테스트는 ../mini-redis/mini-redis.exe 사용
-node docs/demo/record-redis.mjs; python docs/demo/make_redis_gif.py   # GIF 다시 만들기
+node docs/demo/join-race.mjs                       # mini-react 저장소, 두 명을 동시에 입장시킵니다
+node docs/demo/shots.mjs                           # mini-react 저장소, 시연 스크린샷을 다시 찍습니다
 ```
 
-참고 자료 : [Redis 실행 모델](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/latency/), [RESP 사양](https://redis.io/docs/latest/develop/reference/protocol-spec/), [Redis 만료 처리](https://redis.io/docs/latest/commands/expire/), [Redis 영속성](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/)
+<br>
+
+## 📚 문서
+
+| 문서 | 내용 |
+|---|---|
+| [docs/adr/0001-siphash.md](docs/adr/0001-siphash.md) | 해시 함수를 FNV-1a에서 SipHash-2-4로 바꾼 결정 |
+| [docs/persistence.md](docs/persistence.md) | 동기화 정책, 재시작 전후 로그, AOF 파일 내용 |
+| [docs/benchmark.md](docs/benchmark.md) | 성능 측정 조건과 전체 결과 |
+| [docs/verification.md](docs/verification.md) | 테스트가 확인하는 항목 전체, 한계 전체 |
+
+참고 자료 : [Redis 실행 모델](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/latency/), [RESP 사양](https://redis.io/docs/latest/develop/reference/protocol-spec/), [Redis 만료 처리](https://redis.io/docs/latest/commands/expire/), [Redis 영속성](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/), [SipHash 참조 구현](https://github.com/veorq/SipHash)
