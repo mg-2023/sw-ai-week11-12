@@ -11,3 +11,5 @@ __pycache__/
 /test-persist
 /test-persist.exe
 /demo-output/
+/test-siphash
+/test-siphash.exe

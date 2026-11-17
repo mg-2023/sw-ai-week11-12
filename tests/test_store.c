@@ -1,6 +1,7 @@
 #include "store.h"
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -16,7 +17,7 @@ static void expect_value(Store *store, Bytes key, uint64_t now, Bytes expected) 
 static void test_binary_and_collision(void) {
     Store store;
     assert(store_init(&store));
-    // FNV-1a puts these two keys in the same initial bucket.
+    // v1.0.0 의 FNV-1a 에서는 이 두 키가 같은 첫 버킷이었다. 지금은 키 있는 해시라 보장하지 않지만 충돌 처리 경로는 그대로 시험한다.
     assert(store_set(&store, BYTES("a"), BYTES("left"), 0));
     assert(store_set(&store, BYTES("i"), BYTES("right"), 0));
     assert(store_set(&store, BYTES("a\0"), BYTES("v\0\r\n"), 0));
@@ -198,6 +199,96 @@ static void test_foreach_skips_expired(void) {
     store_destroy(&store);
 }
 
+/* 옛 해시(v1.0.0 의 FNV-1a 64비트). 공격자가 버킷을 미리 계산하던 방식을 재현하는 참고용이다. */
+static uint64_t old_fnv1a(const char *data, size_t length) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < length; ++i) {
+        hash ^= (unsigned char)data[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+/*
+ * 옛 해시의 하위 12비트가 모두 0 인 "k<번호>" 키를 count 개 모은다.
+ * 테이블 capacity 는 8 에서 두 배씩만 커지고(store.c) 1000개면 2048(2^11)에서 멈춘다(75% 적재율이면 1536개까지 담는다). 16비트는 약 6천5백만 번 계산이라 느려 12비트로 줄였다.
+ * 버킷은 hash % capacity 이므로 capacity <= 2^12 인 한 하위 12비트가 0 인 키는 옛 해시에서 전부 버킷 0 이었다.
+ */
+static size_t collect_old_colliding_keys(char (*keys)[16], size_t count) {
+    size_t found = 0;
+    for (uint32_t i = 0; found < count; ++i) {
+        char buffer[16];
+        int length = snprintf(buffer, sizeof(buffer), "k%u", (unsigned)i);
+        assert(length > 0 && (size_t)length < sizeof(buffer));
+        if ((old_fnv1a(buffer, (size_t)length) & 0xFFF) == 0) {
+            memcpy(keys[found++], buffer, sizeof(buffer));
+        }
+    }
+    return found;
+}
+
+static const uint8_t KEY_A[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+static const uint8_t KEY_B[16] = {15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
+
+/* 옛 해시에서 한 버킷(체인 길이 1000)으로 몰리던 키 1000개가 키 있는 해시에서는 흩어지고 모두 조회된다. */
+static void test_old_collision_keys_spread(void) {
+    enum { COUNT = 1000 };
+    static char keys[COUNT][16];
+    Store store;
+    assert(collect_old_colliding_keys(keys, COUNT) == COUNT);
+    assert(store_init_with_key(&store, KEY_A));
+    for (size_t i = 0; i < COUNT; ++i) {
+        Bytes key = {keys[i], strlen(keys[i])};
+        assert(store_set(&store, key, key, 0));
+    }
+    assert(store.size == COUNT);
+    size_t longest = store_longest_chain(&store);
+    printf("longest chain for %d old-colliding keys: %zu (FNV-1a would give %d)\n", COUNT, longest, COUNT);
+    assert(longest <= 8);
+    for (size_t i = 0; i < COUNT; ++i) {
+        Bytes key = {keys[i], strlen(keys[i])};
+        expect_value(&store, key, 1, key);
+    }
+    store_destroy(&store);
+}
+
+/* 빈 저장소(버킷 8개)에 키 하나만 넣어 그 키가 들어간 버킷 번호를 돌려준다. */
+static size_t bucket_of(const uint8_t key[16], Bytes name) {
+    Store store;
+    assert(store_init_with_key(&store, key));
+    assert(store_set(&store, name, name, 0));
+    size_t index = store.current.capacity;
+    for (size_t i = 0; i < store.current.capacity; ++i) {
+        if (store.current.buckets[i]) {
+            index = i;
+        }
+    }
+    assert(index < store.current.capacity);
+    store_destroy(&store);
+    return index;
+}
+
+/* 같은 키는 같은 배치, 다른 키는 다른 배치를 만든다(64개 문자열 중 하나라도 버킷이 다르면 된다). */
+static void test_hash_key_changes_bucket_layout(void) {
+    bool differs = false;
+    for (int i = 0; i < 64; ++i) {
+        char buffer[32];
+        Bytes name = numbered_key(buffer, i);
+        assert(bucket_of(KEY_A, name) == bucket_of(KEY_A, name));
+        differs = differs || bucket_of(KEY_A, name) != bucket_of(KEY_B, name);
+    }
+    assert(differs);
+}
+
+/* 난수 키로 초기화한 저장소도 SET · GET 이 된다. */
+static void test_random_key_store_works(void) {
+    Store store;
+    assert(store_init(&store));
+    assert(store_set(&store, BYTES("name"), BYTES("value"), 0));
+    expect_value(&store, BYTES("name"), 1, BYTES("value"));
+    store_destroy(&store);
+}
+
 int main(void) {
     test_binary_and_collision();
     test_expiration();
@@ -206,6 +297,9 @@ int main(void) {
     test_expire_paths_are_distinguished();
     test_cycle_checks_at_most_32_from_cursor();
     test_foreach_skips_expired();
-    puts("7 store unit scenarios passed");
+    test_old_collision_keys_spread();
+    test_hash_key_changes_bucket_layout();
+    test_random_key_store_works();
+    puts("10 store unit scenarios passed");
     return 0;
 }

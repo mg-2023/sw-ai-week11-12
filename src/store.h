@@ -48,6 +48,7 @@ typedef struct {
  * 저장소 전체 상태.
  * current : 평소 쓰는 테이블, next : 확장(rehash) 중에만 있는 두 배 크기 테이블(없으면 capacity 0)
  * size : 저장된 항목 수, rehash_bucket : current 에서 next 로 옮기는 중인 버킷 위치
+ * hash_seed : 키 해시(SipHash-2-4)에 쓰는 비밀 128비트 키. 저장소마다 다르고 파일에 저장하지 않는다.
  * expire_cursor : 만료 시각이 있는 항목들의 원형 리스트에서 주기 정리가 볼 다음 항목
  * expiring : 만료 시각이 있는 항목 수
  * on_expire/expire_context : 만료 항목을 지울 때 부를 알림 함수와 그 인자(NULL 이면 부르지 않음). store_init 뒤에 호출자가 채운다.
@@ -57,14 +58,20 @@ typedef struct {
     Table next;
     size_t size;
     size_t rehash_bucket;
+    uint8_t hash_seed[16];
     Entry *expire_cursor;
     size_t expiring;
     StoreExpireHook on_expire;
     void *expire_context;
 } Store;
 
-/* 실패하면 false 이고 저장소는 그대로다. 만료된 키는 모든 조회 함수에서 없는 키로 보인다(그 자리에서 지움). */
+/*
+ * 실패하면 false 이고 저장소는 그대로다. 만료된 키는 모든 조회 함수에서 없는 키로 보인다(그 자리에서 지움).
+ * store_init 은 운영체제 난수로 해시 키를 뽑는다(키가 공개되면 같은 버킷으로 몰리는 키를 만들 수 있다. 난수를 못 얻으면 false).
+ * store_init_with_key 는 해시 키를 직접 준다. 테스트가 버킷 배치를 재현하는 용도이고 서버는 쓰지 않는다.
+ */
 bool store_init(Store *store);
+bool store_init_with_key(Store *store, const uint8_t key[16]);
 void store_destroy(Store *store);
 /* 저장소가 키/값을 복사해서 소유한다. deadline_ms 가 0 이면 만료 시각 없음(TTL 없음). */
 bool store_set(Store *store, Bytes key, Bytes value, uint64_t deadline_ms);
@@ -76,5 +83,7 @@ int64_t store_pttl(Store *store, Bytes key, uint64_t now_ms);
 StoreCycle store_maintain(Store *store, uint64_t now_ms);
 /* 만료되지 않은 항목을 모두 방문한다(저장소를 바꾸지 않음). 방문 함수가 false 를 돌려주면 false. 스냅샷 저장이 쓴다. */
 bool store_foreach(const Store *store, uint64_t now_ms, StoreVisitor visit, void *context);
+/* current · next 테이블을 통틀어 가장 긴 충돌 체인의 길이. 해시가 고른지 보는 진단용이다. */
+size_t store_longest_chain(const Store *store);
 
 #endif
