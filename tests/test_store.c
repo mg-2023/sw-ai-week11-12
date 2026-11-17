@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "siphash.h"
+
 #define BYTES(literal) ((Bytes){literal, sizeof(literal) - 1})
 
 static void expect_value(Store *store, Bytes key, uint64_t now, Bytes expected) {
@@ -289,6 +291,357 @@ static void test_random_key_store_works(void) {
     store_destroy(&store);
 }
 
+/* KEY_A 로 해시했을 때 8개짜리 버킷 배열에서 같은 번호에 떨어지는 키 "s<번호>" 를 count 개 모은다. */
+static void find_same_bucket_keys(char (*names)[16], size_t count) {
+    size_t found = 0;
+    uint64_t target = 0;
+    for (unsigned i = 0; found < count; ++i) {
+        char buffer[16];
+        int length = snprintf(buffer, sizeof buffer, "s%u", i);
+        assert(length > 0);
+        uint64_t slot = siphash24(buffer, (size_t)length, KEY_A) % 8;
+        if (found == 0) {
+            target = slot;
+        }
+        if (slot == target) {
+            memcpy(names[found++], buffer, sizeof buffer);
+        }
+    }
+}
+
+/* 같은 버킷 체인에서 꼬리 · 중간 · 머리 노드를 지워도 나머지가 조회된다 (머리 삽입이라 마지막에 넣은 키가 머리) */
+static void test_chain_delete_head_middle_tail(void) {
+    char names[3][16];
+    find_same_bucket_keys(names, 3);
+    for (int victim = 0; victim < 3; ++victim) {
+        Store store;
+        assert(store_init_with_key(&store, KEY_A));
+        for (int i = 0; i < 3; ++i) {
+            Bytes key = {names[i], strlen(names[i])};
+            assert(store_set(&store, key, key, 0));
+        }
+        assert(store_longest_chain(&store) == 3);
+        Bytes gone = {names[victim], strlen(names[victim])};
+        assert(store_delete(&store, gone, 1));
+        assert(store.size == 2 && store_longest_chain(&store) == 2);
+        Bytes value;
+        assert(!store_get(&store, gone, 1, &value));
+        for (int i = 0; i < 3; ++i) {
+            if (i != victim) {
+                Bytes key = {names[i], strlen(names[i])};
+                expect_value(&store, key, 1, key);
+            }
+        }
+        for (int i = 0; i < 3; ++i) {
+            Bytes key = {names[i], strlen(names[i])};
+            assert(store_delete(&store, key, 1) == (i != victim));
+        }
+        assert(store.size == 0 && store_longest_chain(&store) == 0);
+        store_destroy(&store);
+    }
+}
+
+/* 키 7개를 넣어 확장을 막 시작한 상태를 만든다 : key-0..5 는 current, key-6 은 next 에 있다. */
+static void make_rehashing_store(Store *store) {
+    char buffer[32];
+    assert(store_init_with_key(store, KEY_A));
+    for (int i = 0; i < 7; ++i) {
+        Bytes key = numbered_key(buffer, i);
+        assert(store_set(store, key, key, 0));
+    }
+    assert(store->next.capacity == 16);
+}
+
+/* 확장이 끝날 때까지 진행하고 current 가 두 배가 됐는지 본다. */
+static void finish_rehash(Store *store) {
+    while (store->next.capacity) {
+        store_maintain(store, 1);
+    }
+    assert(store->current.capacity == 16);
+}
+
+/* 확장 중 : 두 테이블에 걸친 키 모두 조회되고, 확장이 끝난 뒤에도 그대로다 */
+static void test_rehash_lookup_across_tables(void) {
+    Store store;
+    char buffer[32];
+    make_rehashing_store(&store);
+    expect_value(&store, numbered_key(buffer, 6), 1, numbered_key(buffer, 6));
+    expect_value(&store, numbered_key(buffer, 0), 1, numbered_key(buffer, 0));
+    assert(store.next.capacity != 0);
+    Bytes value;
+    assert(!store_get(&store, BYTES("absent"), 1, &value));
+    for (int i = 0; i < 7; ++i) {
+        expect_value(&store, numbered_key(buffer, i), 1, numbered_key(buffer, i));
+    }
+    finish_rehash(&store);
+    for (int i = 0; i < 7; ++i) {
+        expect_value(&store, numbered_key(buffer, i), 1, numbered_key(buffer, i));
+    }
+    assert(store.size == 7);
+    store_destroy(&store);
+}
+
+/* 확장 중 덮어쓰기 : 어느 테이블에 있든 항목 수가 늘지 않고 새 값이 조회된다 */
+static void test_rehash_overwrite_keeps_size(void) {
+    Store store;
+    char buffer[32];
+    make_rehashing_store(&store);
+    assert(store_set(&store, numbered_key(buffer, 6), BYTES("six"), 0));
+    assert(store_set(&store, numbered_key(buffer, 1), BYTES("one"), 0));
+    assert(store.next.capacity != 0 && store.size == 7);
+    expect_value(&store, numbered_key(buffer, 6), 1, BYTES("six"));
+    expect_value(&store, numbered_key(buffer, 1), 1, BYTES("one"));
+    finish_rehash(&store);
+    assert(store.size == 7);
+    expect_value(&store, numbered_key(buffer, 6), 1, BYTES("six"));
+    expect_value(&store, numbered_key(buffer, 1), 1, BYTES("one"));
+    expect_value(&store, numbered_key(buffer, 3), 1, numbered_key(buffer, 3));
+    store_destroy(&store);
+}
+
+/* 확장 중 삭제 : current 와 next 의 키를 지우면 개수가 줄고 다시 지울 수 없다 */
+static void test_rehash_delete_in_both_tables(void) {
+    Store store;
+    char buffer[32];
+    make_rehashing_store(&store);
+    assert(store_delete(&store, numbered_key(buffer, 6), 1));
+    assert(store_delete(&store, numbered_key(buffer, 0), 1));
+    assert(store.next.capacity != 0 && store.size == 5);
+    assert(!store_delete(&store, numbered_key(buffer, 6), 1));
+    assert(!store_delete(&store, numbered_key(buffer, 0), 1));
+    finish_rehash(&store);
+    assert(store.size == 5);
+    Bytes value;
+    assert(!store_get(&store, numbered_key(buffer, 6), 1, &value));
+    assert(!store_get(&store, numbered_key(buffer, 0), 1, &value));
+    for (int i = 1; i < 6; ++i) {
+        expect_value(&store, numbered_key(buffer, i), 1, numbered_key(buffer, i));
+    }
+    store_destroy(&store);
+}
+
+/* 확장 중 만료 : 두 테이블의 만료 항목이 조회 시 만료와 주기 정리로 지워지고 만료 개수가 맞는다 */
+static void test_rehash_expiration(void) {
+    Store store;
+    char buffer[32];
+    Bytes value;
+    make_rehashing_store(&store);
+    assert(store_set(&store, numbered_key(buffer, 6), BYTES("t6"), 100));
+    assert(store_expire_at(&store, numbered_key(buffer, 0), 1, 100));
+    assert(store_expire_at(&store, numbered_key(buffer, 1), 1, 100));
+    assert(store.next.capacity != 0 && store.expiring == 3);
+    assert(store_pttl(&store, numbered_key(buffer, 6), 50) == 50);
+    assert(!store_get(&store, numbered_key(buffer, 6), 100, &value));
+    assert(store.expiring == 2 && store.size == 6);
+    StoreCycle cycle = store_maintain(&store, 100);
+    assert(cycle.removed == 2 && store.expiring == 0 && store.size == 4);
+    finish_rehash(&store);
+    assert(store.size == 4);
+    for (int i = 2; i < 6; ++i) {
+        expect_value(&store, numbered_key(buffer, i), 100, numbered_key(buffer, i));
+    }
+    store_destroy(&store);
+}
+
+/* 만료 항목 4개 (키 a 가 먼저라 커서가 a 를 가리킨다) : a, b, c 는 100 에 만료되고 keep 은 50000 에 만료된다 */
+static void fill_cursor_store(Store *store) {
+    assert(store_init(store));
+    assert(store_set(store, BYTES("a"), BYTES("1"), 100));
+    assert(store_set(store, BYTES("b"), BYTES("2"), 100));
+    assert(store_set(store, BYTES("c"), BYTES("3"), 100));
+    assert(store_set(store, BYTES("keep"), BYTES("4"), 50000));
+    assert(store->expiring == 4);
+}
+
+/* 커서가 가리키는 항목을 지우고 주기 정리를 해도 나머지가 정상 처리된다 */
+static void test_cursor_entry_deleted(void) {
+    Store store;
+    fill_cursor_store(&store);
+    assert(store_delete(&store, BYTES("a"), 50));
+    assert(store.expiring == 3);
+    StoreCycle cycle = store_maintain(&store, 200);
+    assert(cycle.checked == 3 && cycle.removed == 2);
+    assert(store.expiring == 1 && store.size == 1);
+    expect_value(&store, BYTES("keep"), 200, BYTES("4"));
+    store_destroy(&store);
+}
+
+/* 커서가 가리키는 항목을 TTL 있는 값으로 덮어써도 개수와 순회가 맞는다 */
+static void test_cursor_entry_overwritten_with_ttl(void) {
+    Store store;
+    fill_cursor_store(&store);
+    assert(store_set(&store, BYTES("a"), BYTES("new"), 60000));
+    assert(store.expiring == 4 && store.size == 4);
+    StoreCycle cycle = store_maintain(&store, 200);
+    assert(cycle.checked == 4 && cycle.removed == 2);
+    assert(store.expiring == 2 && store.size == 2);
+    expect_value(&store, BYTES("a"), 200, BYTES("new"));
+    expect_value(&store, BYTES("keep"), 200, BYTES("4"));
+    store_destroy(&store);
+}
+
+/* 커서가 가리키는 항목을 TTL 없는 값으로 덮어쓰면 만료 목록에서 빠진다 */
+static void test_cursor_entry_overwritten_without_ttl(void) {
+    Store store;
+    fill_cursor_store(&store);
+    assert(store_set(&store, BYTES("a"), BYTES("plain"), 0));
+    assert(store.expiring == 3 && store.size == 4);
+    StoreCycle cycle = store_maintain(&store, 200);
+    assert(cycle.checked == 3 && cycle.removed == 2);
+    assert(store.expiring == 1 && store.size == 2);
+    assert(store_pttl(&store, BYTES("a"), 200) == -1);
+    store_destroy(&store);
+}
+
+/* 커서가 가리키는 항목의 만료 시각을 바꾸거나 즉시 만료시켜도 주기 정리가 정상이다 */
+static void test_cursor_entry_expire_at(void) {
+    Store store;
+    fill_cursor_store(&store);
+    assert(store_expire_at(&store, BYTES("a"), 50, 70000));
+    assert(store.expiring == 4);
+    StoreCycle cycle = store_maintain(&store, 200);
+    assert(cycle.checked == 4 && cycle.removed == 2 && store.expiring == 2);
+    assert(store_pttl(&store, BYTES("a"), 200) == 69800);
+    assert(store_expire_at(&store, BYTES("a"), 200, 200));
+    assert(store.expiring == 1 && store.size == 1);
+    cycle = store_maintain(&store, 200);
+    assert(cycle.checked == 1 && cycle.removed == 0);
+    store_destroy(&store);
+}
+
+/* 만료 항목이 하나뿐일 때 그것을 지우면 커서가 비고, 다시 넣으면 주기 정리가 동작한다 */
+static void test_single_expiring_entry_cursor(void) {
+    Store store;
+    assert(store_init(&store));
+    assert(store_set(&store, BYTES("only"), BYTES("v"), 100));
+    assert(store.expire_cursor != NULL && store.expiring == 1);
+    assert(store_delete(&store, BYTES("only"), 50));
+    assert(store.expire_cursor == NULL && store.expiring == 0);
+    StoreCycle empty = store_maintain(&store, 50);
+    assert(empty.checked == 0 && empty.removed == 0);
+    assert(store_set(&store, BYTES("only"), BYTES("w"), 100));
+    assert(store.expire_cursor != NULL && store.expiring == 1);
+    StoreCycle cycle = store_maintain(&store, 100);
+    assert(cycle.checked == 1 && cycle.removed == 1);
+    assert(store.expire_cursor == NULL && store.expiring == 0 && store.size == 0);
+    assert(store_set(&store, BYTES("only"), BYTES("x"), 200));
+    assert(store_set(&store, BYTES("only"), BYTES("y"), 0));
+    assert(store.expire_cursor == NULL && store.expiring == 0 && store.size == 1);
+    store_destroy(&store);
+}
+
+/* 빈 저장소에서 모든 함수가 안전하다 */
+static void test_empty_store_is_safe(void) {
+    Store store;
+    Bytes value;
+    int visited = 0;
+    assert(store_init(&store));
+    StoreCycle cycle = store_maintain(&store, 100);
+    assert(cycle.checked == 0 && cycle.removed == 0);
+    assert(store_pttl(&store, BYTES("x"), 100) == -2);
+    assert(!store_delete(&store, BYTES("x"), 100));
+    assert(!store_expire_at(&store, BYTES("x"), 100, 200));
+    assert(!store_get(&store, BYTES("x"), 100, &value));
+    assert(!store_get(&store, BYTES(""), 100, &value));
+    assert(store_foreach(&store, 100, count_live, &visited) && visited == 0);
+    assert(store.size == 0 && store_longest_chain(&store) == 0);
+    store_destroy(&store);
+}
+
+/* 키 길이 0 · 값 길이 0 · NUL · CR · LF 가 섞인 키는 서로 다른 키로 구분된다 */
+static void test_distinct_binary_keys(void) {
+    Store store;
+    assert(store_init(&store));
+    Bytes keys[] = {BYTES("a"), BYTES("a\0"), BYTES("A"), BYTES("a\r"), BYTES("a\n"), BYTES("a\r\n"), BYTES("\0"), BYTES("")};
+    const size_t count = sizeof keys / sizeof *keys;
+    for (size_t i = 0; i < count; ++i) {
+        char value[2] = {(char)('0' + i), 0};
+        assert(store_set(&store, keys[i], (Bytes){value, 1}, 0));
+    }
+    assert(store.size == count);
+    for (size_t i = 0; i < count; ++i) {
+        char value[2] = {(char)('0' + i), 0};
+        expect_value(&store, keys[i], 1, (Bytes){value, 1});
+    }
+    assert(store_set(&store, BYTES("empty-value"), BYTES(""), 0));
+    expect_value(&store, BYTES("empty-value"), 1, BYTES(""));
+    assert(store_set(&store, BYTES(""), BYTES(""), 0));
+    expect_value(&store, BYTES(""), 1, BYTES(""));
+    assert(store.size == count + 1);
+    store_destroy(&store);
+}
+
+/* 값 1MiB 를 그대로 저장하고 조회한다 */
+static void test_large_value(void) {
+    enum { LENGTH = 1024 * 1024 };
+    Store store;
+    static char big[LENGTH];
+    for (size_t i = 0; i < LENGTH; ++i) {
+        big[i] = (char)(i % 251);
+    }
+    assert(store_init(&store));
+    assert(store_set(&store, BYTES("k"), (Bytes){big, LENGTH}, 0));
+    expect_value(&store, BYTES("k"), 1, (Bytes){big, LENGTH});
+    assert(store_delete(&store, BYTES("k"), 1) && store.size == 0);
+    store_destroy(&store);
+}
+
+/* 만료 시각과 now 가 같으면 만료, 1 작으면 살아 있다 (조회 · PTTL · 주기 정리 모두) */
+static void test_deadline_boundary(void) {
+    Store store;
+    Bytes value;
+    assert(store_init(&store));
+    assert(store_set(&store, BYTES("k"), BYTES("v"), 100));
+    assert(store_get(&store, BYTES("k"), 99, &value));
+    assert(store_pttl(&store, BYTES("k"), 99) == 1);
+    assert(!store_get(&store, BYTES("k"), 100, &value) && store.size == 0);
+
+    assert(store_set(&store, BYTES("k"), BYTES("v"), 100));
+    assert(store_pttl(&store, BYTES("k"), 100) == -2 && store.size == 0);
+
+    assert(store_set(&store, BYTES("k"), BYTES("v"), 100));
+    StoreCycle before = store_maintain(&store, 99);
+    assert(before.checked == 1 && before.removed == 0 && store.size == 1);
+    StoreCycle at = store_maintain(&store, 100);
+    assert(at.checked == 1 && at.removed == 1 && store.size == 0);
+
+    assert(store_set(&store, BYTES("k"), BYTES("v"), 100));
+    assert(!store_delete(&store, BYTES("k"), 100));
+    assert(store_set(&store, BYTES("k"), BYTES("v"), 100));
+    assert(!store_expire_at(&store, BYTES("k"), 100, 500));
+    assert(store_set(&store, BYTES("k"), BYTES("v"), 100));
+    assert(store_expire_at(&store, BYTES("k"), 99, 500));
+    store_destroy(&store);
+}
+
+/* 키 10000개를 넣고 절반을 지운 뒤 나머지가 모두 조회되고 항목 수가 맞다 */
+static void test_many_keys_delete_half(void) {
+    enum { COUNT = 10000 };
+    Store store;
+    char buffer[32];
+    Bytes value;
+    assert(store_init(&store));
+    for (int i = 0; i < COUNT; ++i) {
+        Bytes key = numbered_key(buffer, i);
+        assert(store_set(&store, key, key, 0));
+    }
+    assert(store.size == COUNT);
+    for (int i = 0; i < COUNT; i += 2) {
+        assert(store_delete(&store, numbered_key(buffer, i), 1));
+    }
+    assert(store.size == COUNT / 2);
+    for (int i = 0; i < COUNT; ++i) {
+        Bytes key = numbered_key(buffer, i);
+        if (i % 2 == 0) {
+            assert(!store_get(&store, key, 1, &value));
+        } else {
+            expect_value(&store, key, 1, key);
+        }
+    }
+    assert(store_longest_chain(&store) <= 16);
+    store_destroy(&store);
+}
+
 int main(void) {
     test_binary_and_collision();
     test_expiration();
@@ -300,6 +653,21 @@ int main(void) {
     test_old_collision_keys_spread();
     test_hash_key_changes_bucket_layout();
     test_random_key_store_works();
-    puts("10 store unit scenarios passed");
+    test_chain_delete_head_middle_tail();
+    test_rehash_lookup_across_tables();
+    test_rehash_overwrite_keeps_size();
+    test_rehash_delete_in_both_tables();
+    test_rehash_expiration();
+    test_cursor_entry_deleted();
+    test_cursor_entry_overwritten_with_ttl();
+    test_cursor_entry_overwritten_without_ttl();
+    test_cursor_entry_expire_at();
+    test_single_expiring_entry_cursor();
+    test_empty_store_is_safe();
+    test_distinct_binary_keys();
+    test_large_value();
+    test_deadline_boundary();
+    test_many_keys_delete_half();
+    puts("25 store unit scenarios passed");
     return 0;
 }
