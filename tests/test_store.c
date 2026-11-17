@@ -673,6 +673,108 @@ static void test_many_keys_delete_half(void) {
     store_destroy(&store);
 }
 
+/* 살아 있는 항목 40개 뒤에 만료 항목 5개가 있어도 커서가 처음으로 돌아가지 않고 앞으로 나가 결국 모두 지운다 */
+static void test_cursor_advances_past_live_entries(void) {
+    Store store;
+    char buffer[32];
+    assert(store_init(&store));
+    for (int i = 0; i < 40; ++i) {
+        assert(store_set(&store, numbered_key(buffer, i), BYTES("live"), 100000));
+    }
+    for (int i = 40; i < 45; ++i) {
+        assert(store_set(&store, numbered_key(buffer, i), BYTES("dead"), 100));
+    }
+    assert(store.expiring == 45);
+    StoreCycle first = store_maintain(&store, 200);
+    assert(first.checked == 32 && first.removed == 0);
+    int calls = 1;
+    while (store.expiring > 40) {
+        StoreCycle cycle = store_maintain(&store, 200);
+        assert(cycle.checked > 0);
+        assert(++calls <= 3);
+    }
+    assert(store.size == 40 && store.expiring == 40);
+    Bytes value;
+    for (int i = 40; i < 45; ++i) {
+        assert(!store_get(&store, numbered_key(buffer, i), 200, &value));
+    }
+    store_destroy(&store);
+
+    /* 만료 항목 하나가 32개의 살아 있는 항목 바로 뒤에 있는 경우 */
+    assert(store_init(&store));
+    for (int i = 0; i < 32; ++i) {
+        assert(store_set(&store, numbered_key(buffer, i), BYTES("live"), 100000));
+    }
+    assert(store_set(&store, BYTES("dead"), BYTES("x"), 100));
+    assert(store_maintain(&store, 200).removed == 0);
+    assert(store_maintain(&store, 200).removed == 1);
+    assert(store.expiring == 32 && store.size == 32);
+    store_destroy(&store);
+}
+
+/* store_foreach 의 방문 기록 : 방문 횟수와 중단 지점 */
+typedef struct {
+    int visits;
+    int stop_after;
+    int seen[16];
+} Visit;
+
+static bool record_visit(void *context, Bytes key, Bytes value, uint64_t deadline_ms) {
+    Visit *visit = context;
+    int number = -1;
+    (void)value;
+    (void)deadline_ms;
+    assert(key.length < 32);
+    char text[32] = {0};
+    memcpy(text, key.data, key.length);
+    if (sscanf(text, "key-%d", &number) == 1 && number >= 0 && number < 16) {
+        ++visit->seen[number];
+    }
+    ++visit->visits;
+    return visit->stop_after == 0 || visit->visits < visit->stop_after;
+}
+
+/* 방문 함수가 false 를 돌려주면 순회가 그 자리에서 멈추고 store_foreach 도 false 를 돌려준다 */
+static void test_foreach_stops_when_visitor_returns_false(void) {
+    Store store;
+    char buffer[32];
+    assert(store_init(&store));
+    for (int i = 0; i < 5; ++i) {
+        assert(store_set(&store, numbered_key(buffer, i), BYTES("v"), 0));
+    }
+    Visit stop = {.stop_after = 3};
+    assert(!store_foreach(&store, 1, record_visit, &stop));
+    assert(stop.visits == 3);
+    Visit first = {.stop_after = 1};
+    assert(!store_foreach(&store, 1, record_visit, &first) && first.visits == 1);
+    Visit all = {0};
+    assert(store_foreach(&store, 1, record_visit, &all) && all.visits == 5);
+    assert(store.size == 5);
+    store_destroy(&store);
+}
+
+/* 재해시 중에도 모든 키를 중복 · 누락 없이 정확히 한 번씩 방문한다 */
+static void test_foreach_visits_each_key_once_during_rehash(void) {
+    Store store;
+    char buffer[32];
+    make_rehashing_store(&store);
+    for (int round = 0; round < 3; ++round) {
+        assert(store.next.capacity != 0);
+        Visit visit = {0};
+        assert(store_foreach(&store, 1, record_visit, &visit));
+        assert(visit.visits == 7);
+        for (int i = 0; i < 7; ++i) {
+            assert(visit.seen[i] == 1);
+        }
+        /* 조회 한 번이 재해시를 두 단계 진행시킨다 */
+        expect_value(&store, numbered_key(buffer, round), 1, numbered_key(buffer, round));
+    }
+    finish_rehash(&store);
+    Visit after = {0};
+    assert(store_foreach(&store, 1, record_visit, &after) && after.visits == 7);
+    store_destroy(&store);
+}
+
 int main(void) {
     test_binary_and_collision();
     test_expiration();
@@ -699,6 +801,9 @@ int main(void) {
     test_large_value();
     test_deadline_boundary();
     test_many_keys_delete_half();
-    puts("25 store unit scenarios passed");
+    test_cursor_advances_past_live_entries();
+    test_foreach_stops_when_visitor_returns_false();
+    test_foreach_visits_each_key_once_during_rehash();
+    puts("28 store unit scenarios passed");
     return 0;
 }
