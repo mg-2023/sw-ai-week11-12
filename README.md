@@ -4,7 +4,7 @@
 
 <br>
 
-**"해시 테이블로 키-값 서버를 직접 만들고, 고려한 상황마다 무엇을 얻고 무엇을 내주는지 따져서 골랐습니다"**
+**"키 하나가 저장되고, 조회되고, 만료되어 지워지기까지"**
 
 <p>
   <img src="https://img.shields.io/badge/C11-single_thread-dc382d?style=for-the-badge&labelColor=161f31">
