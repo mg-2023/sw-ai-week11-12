@@ -185,7 +185,7 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(restarted.call("GET", "user:1"), b"v1")  # SAVE 뒤의 v2 는 잃는다
         self.assertIsNone(restarted.call("GET", "temp"))           # SAVE 전에 지운 키는 되살아나지 않는다
         self.assertIsNone(restarted.call("GET", "short"))          # 꺼져 있는 동안 만료
-        self.assertLess(restarted.call("PTTL", "long"), 8500)      # TTL 이 10000 으로 다시 시작하지 않는다
+        self.assertTrue(0 < restarted.call("PTTL", "long") < 8500)      # TTL 이 10000 으로 다시 시작하지 않는다
         self.assertIn("1 skipped as expired during downtime", "\n".join(restarted.lines()))
 
     def test_snapshot_loses_delete_after_last_save(self):
@@ -204,7 +204,7 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(restarted.call("GET", "user:1"), b"v2")
         self.assertIsNone(restarted.call("GET", "temp"))
         self.assertIsNone(restarted.call("GET", "short"))
-        self.assertLess(restarted.call("PTTL", "long"), 8500)
+        self.assertTrue(0 < restarted.call("PTTL", "long") < 8500)
         log = "\n".join(restarted.lines())
         self.assertIn("6 records applied, 1 skipped as expired during downtime", log)
 
