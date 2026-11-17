@@ -3,11 +3,18 @@
  * 시계는 읽지 않고 호출자가 넘긴 단조 ms 로 판정한다. 단일 스레드 전용(락 없음).
  */
 
+#ifdef _WIN32
+#define _CRT_RAND_S /* rand_s 를 쓰려면 <stdlib.h> 보다 먼저 정의해야 한다. */
+#endif
+
 #include "store.h"
 
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "siphash.h"
 
 /*
  * 저장 항목 하나. 한 노드가 두 연결 리스트에 동시에 들어간다.
@@ -26,14 +33,32 @@ struct Entry {
     char data[]; /* 키 바로 뒤에 값이 이어지는 가변 길이 영역. 각각 key_length, value_length 로 구분한다. */
 };
 
-/* FNV-1a 64비트. */
-static uint64_t hash_key(Bytes key) {
-    uint64_t hash = UINT64_C(14695981039346656037);
-    for (size_t i = 0; i < key.length; ++i) {
-        hash ^= (unsigned char)key.data[i];
-        hash *= UINT64_C(1099511628211);
+/* 저장소마다 다른 비밀 키로 계산하는 SipHash-2-4 : 키를 모르면 같은 버킷으로 몰리는 키를 미리 만들 수 없다. */
+static uint64_t hash_key(const Store *store, Bytes key) {
+    return siphash24(key.data, key.length, store->hash_seed);
+}
+
+/* 운영체제 난수로 buffer 를 채운다(rand() · 시간은 예측할 수 있어 쓰지 않는다). 못 얻으면 false. */
+static bool fill_random(uint8_t *buffer, size_t length) {
+#ifdef _WIN32
+    for (size_t i = 0; i < length; i += sizeof(unsigned int)) {
+        unsigned int word;
+        if (rand_s(&word) != 0) {
+            return false;
+        }
+        size_t chunk = length - i < sizeof(word) ? length - i : sizeof(word);
+        memcpy(buffer + i, &word, chunk);
     }
-    return hash;
+    return true;
+#else
+    FILE *source = fopen("/dev/urandom", "rb");
+    if (!source) {
+        return false;
+    }
+    bool ok = fread(buffer, 1, length, source) == length;
+    fclose(source);
+    return ok;
+#endif
 }
 
 /* 버킷 머리 포인터의 주소를 돌려줘 머리 삽입과 제거를 같은 방식으로 하게 한다. */
@@ -51,9 +76,17 @@ static bool init_table(Table *table, size_t capacity) {
     return table->buckets != NULL;
 }
 
-bool store_init(Store *store) {
+/* 테스트가 버킷 배치를 재현할 수 있게 해시 키를 직접 받는다. */
+bool store_init_with_key(Store *store, const uint8_t key[16]) {
     *store = (Store){0};
+    memcpy(store->hash_seed, key, sizeof(store->hash_seed));
     return init_table(&store->current, 8);
+}
+
+/* 서버 시작 때 한 번 무작위 128비트 키를 뽑는다. 난수를 못 얻으면 예측 가능한 키로 돌리지 않고 실패한다. */
+bool store_init(Store *store) {
+    uint8_t key[16];
+    return fill_random(key, sizeof(key)) && store_init_with_key(store, key);
 }
 
 /* rehash 중이면 항목이 두 테이블에 나뉘어 있다. 만료 리스트는 같은 노드를 가리킬 뿐이라 따로 해제하지 않는다. */
@@ -100,6 +133,22 @@ static void rehash_step(Store *store, size_t budget) {
             store->rehash_bucket = 0;
         }
     }
+}
+
+/* 가장 긴 충돌 체인의 길이. 해시가 키를 고르게 흩는지 보는 진단용이다. */
+size_t store_longest_chain(const Store *store) {
+    const Table tables[] = {store->current, store->next};
+    size_t longest = 0;
+    for (size_t t = 0; t < 2; ++t) {
+        for (size_t i = 0; i < tables[t].capacity; ++i) {
+            size_t length = 0;
+            for (const Entry *entry = tables[t].buckets[i]; entry; entry = entry->next) {
+                ++length;
+            }
+            longest = length > longest ? length : longest;
+        }
+    }
+    return longest;
 }
 
 /* 같은 버킷에 여러 키가 있으므로 실제 키를 비교한다. 항목이 아니라 링크를 돌려줘 제거 · 교체를 쉽게 한다. */
@@ -182,7 +231,7 @@ static void notify_expired(Store *store, const Entry *entry, StoreExpireCause ca
 /* 조회 시 만료 : 주기 정리가 아직 못 본 만료 항목도 접근하는 순간 지워 사용자는 만료된 값을 보지 않는다. */
 static Entry **find_live(Store *store, Bytes key, uint64_t now_ms) {
     rehash_step(store, 2);
-    Entry **link = find_link(store, key, hash_key(key));
+    Entry **link = find_link(store, key, hash_key(store, key));
     /* lazy expiration: deadline_ms 가 0 이면 TTL 없음이라 건너뛰고, 현재 시각 이하이면 만료된 것으로 본다. */
     if (link && (*link)->deadline_ms && (*link)->deadline_ms <= now_ms) {
         notify_expired(store, *link, STORE_EXPIRED_ON_ACCESS);
@@ -203,7 +252,7 @@ bool store_set(Store *store, Bytes key, Bytes value, uint64_t deadline_ms) {
     if (!entry) {
         return false;
     }
-    *entry = (Entry){.hash = hash_key(key), .key_length = key.length, .value_length = value.length};
+    *entry = (Entry){.hash = hash_key(store, key), .key_length = key.length, .value_length = value.length};
     memcpy(entry->data, key.data, key.length);
     memcpy(entry->data + key.length, value.data, value.length);
 
