@@ -568,6 +568,94 @@ static void test_aof_sync_if_due(void) {
     remove(AOF);
 }
 
+/* AOF : TTL 있는 SET 뒤 PEXPIREAT 로 연장했다면, 첫 만료 시각이 지났어도 연장한 시각 전이면 재생 뒤 키가 살아 있어야 한다 */
+static void test_aof_extended_ttl_survives_replay(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    append(&aof, CHANGE_SET, BYTES("k"), BYTES("v"), RUN1_MONO + 2000);          /* 첫 만료 : 2초 뒤 */
+    append(&aof, CHANGE_EXPIRE, BYTES("k"), (Bytes){0}, RUN1_MONO + 10000);      /* 10초 뒤로 연장 */
+    aof_close(&aof);
+    store_destroy(&store);
+
+    /* 3초 꺼져 있다가 재시작 : 첫 시각(2초)은 지났고 연장한 시각(10초)은 7초 남았다 */
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 2 && report.skipped_expired == 0);
+    expect_value(&store, BYTES("k"), RUN2_MONO, "v");
+    assert(store_pttl(&store, BYTES("k"), RUN2_MONO) == 7000);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
+/* AOF : 지난 만료 시각의 SET 뒤 TTL 없는 SET 이 오면 키가 살아 있고 TTL 이 없다 */
+static void test_aof_past_ttl_then_plain_set(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    append(&aof, CHANGE_SET, BYTES("k"), BYTES("old"), RUN1_MONO + 1000);
+    append(&aof, CHANGE_SET, BYTES("k"), BYTES("new"), 0);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.skipped_expired == 0);
+    expect_value(&store, BYTES("k"), RUN2_MONO, "new");
+    assert(store_pttl(&store, BYTES("k"), RUN2_MONO) == -1);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
+/* AOF : 지난 만료 시각의 SET 하나만 있으면 재생 뒤 키가 없고 skipped_expired 가 1 이다 */
+static void test_aof_only_past_ttl_set(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    append(&aof, CHANGE_SET, BYTES("k"), BYTES("v"), RUN1_MONO + 1000);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == 1 && report.skipped_expired == 1 && store.size == 0);
+    assert(store_pttl(&store, BYTES("k"), RUN2_MONO) == -2);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
+/* AOF : 재시작한 단조 시계가 0 이어도 지난 만료 시각의 키는 재생 뒤 지운다 */
+static void test_aof_past_ttl_dropped_at_monotonic_zero(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN1_MONO, RUN1_UNIX, &report));
+    append(&aof, CHANGE_SET, BYTES("k"), BYTES("v"), RUN1_MONO + 1000);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_ALWAYS, &store, 0, RUN2_UNIX, &report));
+    assert(report.skipped_expired == 1 && store.size == 0);
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
 int main(void) {
     test_snapshot_round_trip_with_downtime();
     test_snapshot_interrupted_and_corrupt();
@@ -587,9 +675,13 @@ int main(void) {
     test_aof_large_values();
     test_aof_semantically_invalid_records();
     test_aof_sync_if_due();
+    test_aof_extended_ttl_survives_replay();
+    test_aof_past_ttl_then_plain_set();
+    test_aof_only_past_ttl_set();
+    test_aof_past_ttl_dropped_at_monotonic_zero();
     remove(SNAP);
     remove(SNAP_TMP);
     remove(AOF);
-    puts("18 persistence unit scenarios passed");
+    puts("22 persistence unit scenarios passed");
     return 0;
 }

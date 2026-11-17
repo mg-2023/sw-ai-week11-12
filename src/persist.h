@@ -16,7 +16,8 @@ typedef enum { FSYNC_ALWAYS, FSYNC_EVERYSEC, FSYNC_NO } FsyncPolicy;
 
 /*
  * 불러오기 결과.
- * loaded : 저장소에 반영한 항목(스냅샷) 또는 레코드(AOF) 수, skipped_expired : 서버가 꺼져 있는 동안 만료돼 반영하지 않은 수
+ * loaded : 저장소에 반영한 항목(스냅샷) 또는 레코드(AOF) 수
+ * skipped_expired : 서버가 꺼져 있는 동안 만료돼 지운 수. 스냅샷은 항목 수, AOF 는 모든 기록을 재생한 뒤 만료 시각이 지나 지운 키 수
  * truncated_bytes : AOF 끝에서 잘라 낸 불완전한 레코드 바이트 수, error : 실패 이유
  */
 typedef struct {

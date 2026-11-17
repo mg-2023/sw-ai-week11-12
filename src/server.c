@@ -447,6 +447,11 @@ static bool run_loop(Socket listener, Store *store) {
         now = net_now_ms();
         /* 입력이 없어도 주기 정리 시각(또는 everysec fsync)에 맞춰 깨어나도록 poll 대기 시간을 정한다. 주기 정리를 껐으면 1초마다 깬다. */
         uint64_t wake = server.expire_cycle_ms ? next_maintenance : now + 1000;
+        /* everysec 에서 아직 fsync 하지 않은 쓰기가 있으면 aof_sync_if_due 의 1초 기준 시각에 맞춰 깬다. 주기 정리 간격이 길어도 fsync 가 늦어지지 않는다. */
+        if (server.aof_enabled && server.aof.policy == FSYNC_EVERYSEC && server.aof.pending_sync &&
+            server.aof.last_sync_ms + 1000 < wake) {
+            wake = server.aof.last_sync_ms + 1000;
+        }
         int timeout = now >= wake ? 0 : (int)(wake - now);
         int ready = net_poll(fds, count, timeout);
         if (ready < 0) {
