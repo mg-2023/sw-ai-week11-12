@@ -4,6 +4,9 @@
       <stop offset="0" stop-color="#dc382d"/>
       <stop offset="1" stop-color="#8f1a10"/>
     </linearGradient>
+    <marker id="tip" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="8" refX="0" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#ffe1dd"/>
+    </marker>
   </defs>
 
   <rect width="1200" height="400" rx="28" fill="url(#bg)"/>
@@ -24,38 +27,45 @@
 
   <text x="66" y="346" font-size="15" fill="#ffc9c2">크래프톤 정글 · C11 · 외부 라이브러리 0</text>
 
-  <!-- 오른쪽 : 동시에 입장한 두 클라이언트가 받는 번호 -->
+  <!-- 오른쪽 : 키 하나가 해시 테이블에서 저장되는 자리 -->
   <rect x="640" y="48" width="500" height="304" rx="20" fill="#3d0b06" fill-opacity="0.45"/>
-  <text x="668" y="86" font-size="16" font-weight="700" fill="#ffe1dd">두 클라이언트가 동시에 입장</text>
+  <text x="668" y="86" font-size="16" font-weight="700" fill="#ffe1dd">키 하나가 저장되는 자리</text>
 
-  <!-- GET 뒤 SET -->
-  <text x="668" y="126" font-size="16" font-weight="800" fill="#ffffff">GET 뒤 SET</text>
-  <text x="772" y="126" font-size="13" fill="#ffc9c2">명령 두 개 사이에 다른 명령이 끼어듭니다</text>
-  <rect x="668" y="140" width="130" height="36" rx="10" fill="#ffffff" fill-opacity="0.14"/>
-  <text x="733" y="164" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">클라이언트 1</text>
-  <rect x="816" y="140" width="72" height="36" rx="10" fill="none" stroke="#ffd166" stroke-width="2"/>
-  <text x="852" y="164" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">2번</text>
-  <rect x="912" y="140" width="130" height="36" rx="10" fill="#ffffff" fill-opacity="0.14"/>
-  <text x="977" y="164" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">클라이언트 2</text>
-  <rect x="1056" y="140" width="62" height="36" rx="10" fill="none" stroke="#ffd166" stroke-width="2"/>
-  <text x="1087" y="164" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">2번</text>
+  <rect x="668" y="104" width="96" height="34" rx="10" fill="#ffffff"/>
+  <text x="716" y="126" font-size="15" font-weight="800" fill="#a41e11" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace">user:1</text>
+  <line x1="770" y1="121" x2="786" y2="121" stroke="#ffe1dd" stroke-width="2" marker-end="url(#tip)"/>
+  <rect x="796" y="104" width="128" height="34" rx="10" fill="#ffffff" fill-opacity="0.14"/>
+  <text x="860" y="126" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">SipHash-2-4</text>
+  <line x1="930" y1="121" x2="946" y2="121" stroke="#ffe1dd" stroke-width="2" marker-end="url(#tip)"/>
+  <rect x="956" y="104" width="156" height="34" rx="10" fill="#ffffff" fill-opacity="0.14"/>
+  <text x="1034" y="126" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">해시 % 버킷 수 = 2</text>
 
-  <line x1="668" y1="202" x2="1112" y2="202" stroke="#ffffff" stroke-opacity="0.18"/>
+  <rect x="668" y="166" width="60" height="28" rx="8" fill="none" stroke="#ffffff" stroke-opacity="0.45"/>
+  <text x="698" y="185" font-size="14" font-weight="700" fill="#ffe1dd" text-anchor="middle">버킷 0</text>
+  <line x1="732" y1="180" x2="746" y2="180" stroke="#ffe1dd" stroke-width="2" marker-end="url(#tip)"/>
+  <rect x="756" y="166" width="104" height="28" rx="8" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.45"/>
+  <text x="808" y="185" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace">page:3</text>
 
-  <!-- INCR -->
-  <text x="668" y="234" font-size="16" font-weight="800" fill="#ffffff">INCR</text>
-  <text x="724" y="234" font-size="13" fill="#ffc9c2">읽고 더하고 쓰기가 명령 하나입니다</text>
-  <rect x="668" y="248" width="130" height="36" rx="10" fill="#ffffff" fill-opacity="0.14"/>
-  <text x="733" y="272" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">클라이언트 1</text>
-  <rect x="816" y="248" width="72" height="36" rx="10" fill="#ffffff"/>
-  <text x="852" y="272" font-size="15" font-weight="800" fill="#a41e11" text-anchor="middle">2번</text>
-  <rect x="912" y="248" width="130" height="36" rx="10" fill="#ffffff" fill-opacity="0.14"/>
-  <text x="977" y="272" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">클라이언트 2</text>
-  <rect x="1056" y="248" width="62" height="36" rx="10" fill="#ffffff"/>
-  <text x="1087" y="272" font-size="15" font-weight="800" fill="#a41e11" text-anchor="middle">3번</text>
+  <rect x="668" y="202" width="60" height="28" rx="8" fill="none" stroke="#ffffff" stroke-opacity="0.45"/>
+  <text x="698" y="221" font-size="14" font-weight="700" fill="#ffe1dd" text-anchor="middle">버킷 1</text>
 
-  <rect x="668" y="316" width="12" height="12" rx="3" fill="none" stroke="#ffd166" stroke-width="2"/>
-  <text x="688" y="327" font-size="13" fill="#ffc9c2">같은 번호 = 백이 두 명</text>
-  <rect x="868" y="316" width="12" height="12" rx="3" fill="#ffffff"/>
-  <text x="888" y="327" font-size="13" fill="#ffc9c2">2번은 백, 3번은 관전자</text>
+  <rect x="668" y="238" width="60" height="28" rx="8" fill="#ffd166"/>
+  <text x="698" y="257" font-size="14" font-weight="800" fill="#5a1008" text-anchor="middle">버킷 2</text>
+  <line x1="732" y1="252" x2="746" y2="252" stroke="#ffe1dd" stroke-width="2" marker-end="url(#tip)"/>
+  <rect x="756" y="238" width="104" height="28" rx="8" fill="#ffffff"/>
+  <text x="808" y="257" font-size="14" font-weight="800" fill="#a41e11" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace">user:1</text>
+  <line x1="864" y1="252" x2="882" y2="252" stroke="#ffe1dd" stroke-width="2" marker-end="url(#tip)"/>
+  <rect x="892" y="238" width="104" height="28" rx="8" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.45"/>
+  <text x="944" y="257" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace">cart:7</text>
+
+  <rect x="668" y="274" width="60" height="28" rx="8" fill="none" stroke="#ffffff" stroke-opacity="0.45"/>
+  <text x="698" y="293" font-size="14" font-weight="700" fill="#ffe1dd" text-anchor="middle">버킷 3</text>
+  <line x1="732" y1="288" x2="746" y2="288" stroke="#ffe1dd" stroke-width="2" marker-end="url(#tip)"/>
+  <rect x="756" y="274" width="104" height="28" rx="8" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.45"/>
+  <text x="808" y="293" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace">job:9</text>
+
+  <rect x="668" y="320" width="12" height="12" rx="3" fill="#ffffff"/>
+  <text x="688" y="331" font-size="13" fill="#ffc9c2">새 키는 체인 맨 앞에 넣습니다</text>
+  <rect x="892" y="320" width="12" height="12" rx="3" fill="#ffffff" fill-opacity="0.14" stroke="#ffffff" stroke-opacity="0.6"/>
+  <text x="912" y="331" font-size="13" fill="#ffc9c2">같은 버킷의 키는 연결 리스트</text>
 </svg>
