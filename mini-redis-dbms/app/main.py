@@ -6,8 +6,10 @@ mini-redis HTTP API 서버
     API 문서/테스트 페이지:      http://127.0.0.1:8000/docs
 
 계층:  웹사이트(fetch) → [이 파일: HTTP ↔ store 변환] → RedisStore → HashTable
-이 파일은 Redis 규칙을 직접 판단하지 않는다. 검증과 동작은 전부 store가 하고,
-여기서는 요청을 store 호출로 바꾸고 결과를 JSON으로 돌려주는 일만 한다.
+                    └ /sql → CachedSQL ─ SELECT ─→ RedisStore (캐시)
+                                       └ miss / INSERT → Executor → CSV + B+ 트리
+이 파일은 Redis 규칙이나 캐시 규칙을 직접 판단하지 않는다. 검증과 동작은 전부 store / sqlcache가 하고,
+여기서는 요청을 그 호출로 바꾸고 결과를 JSON으로 돌려주는 일만 한다.
 """
 
 import os
@@ -27,6 +29,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 이렇게 하면 app/ 안에서 실행하든 루트에서 `app.main:app`으로 실행하든 동작한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from sqlcache import CachedSQL  # noqa: E402
+from sqlparser import SQLError  # noqa: E402
 from store import RedisStore  # noqa: E402
 # 대기열 방식(store2)이 요청을 거부할 때 던지는 예외. 락 방식(store)을 쓸 때는 발생하지 않으므로
 # 위의 RedisStore import를 어느 쪽으로 바꾸든 이 줄은 그대로 둬도 된다.
@@ -52,6 +56,11 @@ class AmountBody(BaseModel):
     amount: StrictInt = 1
 
 
+class SQLBody(BaseModel):
+    sql: str                  # 문장 여러 개를 ;로 이어서 보내도 됨
+    use_cache: bool = True    # False면 SELECT가 캐시를 읽지도 쓰지도 않음 (성능 비교용)
+
+
 # ----------------------------------------------------------------------
 # Swagger UI(/docs) 그룹
 #   엔드포인트마다 tags=[...]를 달면 같은 태그끼리 묶여서 보인다.
@@ -61,12 +70,14 @@ TAG_BASIC = "기본 명령"
 TAG_TTL = "TTL"
 TAG_COUNTER = "증감"
 TAG_ADMIN = "관리"
+TAG_SQL = "SQL (DBMS + 캐시)"
 
 OPENAPI_TAGS = [
     {"name": TAG_BASIC, "description": "SET / GET / DEL / EXISTS"},
     {"name": TAG_TTL, "description": "EXPIRE / TTL / PERSIST"},
     {"name": TAG_COUNTER, "description": "INCR / DECR (원자적 증감)"},
     {"name": TAG_ADMIN, "description": "KEYS / DBSIZE / FLUSHALL"},
+    {"name": TAG_SQL, "description": "CSV DBMS에 SQL 실행. SELECT 결과는 Redis에 캐시 (Cache-aside + 테이블 버전 키)"},
 ]
 
 
@@ -75,8 +86,10 @@ OPENAPI_TAGS = [
 #   store를 밖에서 넣을 수 있게 해서, 테스트에서는 가짜 시계를 단 store를 쓸 수 있다.
 #   store는 앱 하나당 딱 하나. 요청마다 새로 만들면 데이터가 매번 사라진다.
 # ----------------------------------------------------------------------
-def create_app(store: RedisStore | None = None) -> FastAPI:
+def create_app(store: RedisStore | None = None, sql: CachedSQL | None = None) -> FastAPI:
     store = store if store is not None else RedisStore()
+    # SQL 캐시는 위 store를 그대로 쓴다 → /keys로 캐시 키(dbcache:...)를 직접 들여다볼 수 있다
+    sql = sql if sql is not None else CachedSQL(store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -86,6 +99,7 @@ def create_app(store: RedisStore | None = None) -> FastAPI:
 
     app = FastAPI(title="mini-redis", lifespan=lifespan, openapi_tags=OPENAPI_TAGS)
     app.state.store = store
+    app.state.sql = sql
 
     # store는 잘못된 입력에 ValueError를 던진다 (예: "value is not an integer or out of range").
     # 핸들러마다 try/except를 쓰지 않고 여기서 한 번에 400으로 바꾼다.
@@ -169,6 +183,22 @@ def create_app(store: RedisStore | None = None) -> FastAPI:
     def flushall():
         store.flushall()
         return {"ok": True}
+
+    # ---------------- SQL: DBMS + Redis 캐시 ----------------
+    @app.post("/sql", tags=[TAG_SQL])
+    def run_sql(body: SQLBody):
+        """SQL 실행 — 문장마다 결과를 돌려주고, SELECT 결과에는 cache: hit / miss / bypass가 붙는다.
+        한 문장이 실패해도 다음 문장은 계속 실행하며, 실패한 문장은 type=error로 들어간다."""
+        try:
+            results = sql.run(body.sql, use_cache=body.use_cache)
+        except SQLError as e:     # 닫히지 않은 문자열 등, 스크립트 전체를 읽을 수 없는 오류
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"results": results, "errors": sum(r["type"] == "error" for r in results)}
+
+    @app.get("/sql/stats", tags=[TAG_SQL])
+    def sql_stats():
+        """캐시 hit / miss 횟수, hit률, 무효화(INSERT) 횟수"""
+        return sql.stats()
 
     # ---------------- html 라우팅 / js, css 마운트 ----------------
     @app.get("/", include_in_schema=False)   # /docs 목록에서는 숨김

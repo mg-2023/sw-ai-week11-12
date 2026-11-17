@@ -63,6 +63,7 @@ Redis를 캐시로 앞에 두기 위한, CSV 파일 기반의 간단한 DBMS
 - 처리 순서: Tokenizer(토큰 분리) → Parser(구문 트리 생성) → Executor(CSV 읽기/쓰기)
 
 ```bash
+# sql/ 디렉토리에 sample.txt를 만들었다고 가정
 python app/sqlparser.py sql/sample.txt
 python app/sqlparser.py my.txt --data-dir 다른/디렉토리
 ```
@@ -125,3 +126,51 @@ python app/benchmark_index.py --data-dir bench_data    # 만든 CSV 를 남김 (
 
 - 트리 생성은 처음 한 번만 걸리는 비용 (CSV 읽기 + 50만 번 삽입, 약 0.9 s, order 32에서 높이 5)
 - 인덱스 조회 시간의 대부분은 헤더 읽기 등 SELECT 처리이고, 트리 탐색 자체(`tree.get`)는 1 µs 미만
+
+# DBMS API + Redis 캐시 (app/sqlcache.py)
+`POST /sql`로 DBMS에 SQL을 보내고, SELECT 결과는 같은 서버의 `RedisStore`에 캐시한다. 캐시 방식은 **Cache-aside + 테이블 버전 키**.
+
+```
+SELECT ─→ Redis 확인 ─ hit ─→ 바로 응답
+              └ miss ─→ Executor(CSV/B+ 트리) ─→ 결과를 Redis에 저장(TTL) ─→ 응답
+INSERT ─→ Executor(CSV 쓰기) ─→ 테이블 버전 INCR (이 테이블의 옛 캐시 결과는 더 이상 쓰이지 않음)
+```
+
+### 키 구조
+| 키 | 값 | TTL |
+|---|---|---|
+| `dbcache:ver:<테이블>` | 테이블 버전 (INSERT/CREATE 때마다 `INCR`) | 없음 |
+| `dbcache:q:<테이블>:v<버전>:<해시>` | SELECT 결과 JSON | 60초 + 0~10초 무작위 |
+
+- **캐시 단위는 행이 아니라 SELECT 결과 전체.** id 조회는 B+ 트리가 이미 메모리에서 끝내므로, 캐시의 효과가 큰 쪽은 CSV 전체 스캔이 필요한 조회
+- **해시는 원문이 아니라 구문 트리로 만든다.** 공백, 줄바꿈, 주석, 키워드 대소문자만 다르면 같은 캐시를 씀
+- **무효화는 버전 번호 하나로 한다.** INSERT 때 어떤 결과가 낡았는지 따지지 않고 버전만 올리면, 옛 키는 다시 조회되지 않고 TTL이 지나면 사라짐. UPDATE/DELETE가 없어 기존 행이 바뀌지 않으므로 테이블 단위 버전으로 충분함
+- **버전 키가 지워지면 새 세대로 시작한다.** `FLUSHALL`이나 `DEL`로 버전 키만 사라졌을 때 1부터 다시 세면, TTL이 남은 옛 결과와 번호가 겹칠 수 있음. 그래서 현재 시각(ns)을 새 시작 번호로 씀
+
+### 동시성과 일관성
+- DB 쓰기와 버전 증가를 **같은 락** 안에서 함. miss가 난 SELECT도 그 락 안에서 버전을 다시 읽고 DB를 읽으므로, `v<N>` 키의 결과는 항상 버전 N 시점의 테이블 내용과 같음
+- 같은 쿼리가 동시에 miss 나면 락을 먼저 잡은 요청만 DB를 읽음. 나머지는 락을 얻은 뒤 캐시를 다시 확인해 hit로 처리 (single-flight, cache stampede 방지)
+- 캐시 hit는 DB 락을 잡지 않음
+- TTL에 무작위 지터를 더해, 한꺼번에 들어간 결과가 같은 순간 만료되지 않게 함
+- CSV 파일을 서버 밖에서 직접 고치면 버전이 바뀌지 않아, 최대 TTL 동안 옛 결과가 보일 수 있음
+
+### 엔드포인트
+| 메서드 / 경로 | 설명 |
+|---|---|
+| `POST /sql` | body: `{"sql": "...", "use_cache": true}`. 문장마다 결과를 돌려주고, SELECT에는 `cache: hit / miss / bypass`가 붙음 |
+| `GET /sql/stats` | hit / miss / bypass 횟수, hit률, 무효화 횟수 |
+
+```bash
+curl -X POST http://127.0.0.1:8000/sql -H "Content-Type: application/json" \
+     -d '{"sql": "SELECT name, age FROM users WHERE age >= 25;"}'
+```
+```json
+{"results": [{"type": "select", "statement": "SELECT name, age FROM users WHERE age >= 25",
+              "columns": ["name", "age"], "rows": [["김철수", "25"], ...], "count": 4,
+              "used_index": false, "cache": "miss"}],
+ "errors": 0}
+```
+- 한 문장이 실패해도 다음 문장은 계속 실행하고, 실패한 문장은 `"type": "error"`로 응답 (200)
+- 닫히지 않은 문자열처럼 스크립트 전체를 읽을 수 없는 오류는 400
+- `use_cache: false`면 캐시를 읽지도 쓰지도 않음 (성능 비교용, `cache: "bypass"`)
+- 캐시 키도 일반 Redis 키이므로 `GET /keys`, `GET /keys/{key}/ttl`로 직접 볼 수 있음
