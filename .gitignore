@@ -13,3 +13,5 @@ __pycache__/
 /demo-output/
 /test-siphash
 /test-siphash.exe
+/test-commands
+/test-commands.exe
