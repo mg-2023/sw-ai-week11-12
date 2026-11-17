@@ -353,9 +353,15 @@ done:
 
 /* ───────── AOF ───────── */
 
-/* 지난 PXAT 의 SET 은 "덮어쓴 뒤 만료" 이므로 키를 지운 결과가 맞다. */
-static bool replay_record(Store *store, const Bytes *args, size_t count, uint64_t now_ms, uint64_t unix_ms,
-                          LoadReport *report) {
+/* 재생 중 지난 만료 시각을 나타내는 값. 0 은 TTL 없음이라 쓸 수 없다. */
+enum { REPLAYED_PAST_DEADLINE = 1 };
+
+/*
+ * 기록을 순서대로 모두 적용한다. 지난 만료 시각도 키를 지우지 않고 "이미 지난 시각"으로만 저장한다 :
+ * 뒤에 오는 PEXPIREAT 나 SET 이 그 TTL 을 늘리거나 없앨 수 있기 때문이다. 만료된 키는 재생이 끝난 뒤 한꺼번에 지운다.
+ * 저장소 호출에 now 로 0 을 넘겨 재생 중에는 만료 판단이 일어나지 않게 한다(store_expire_at 은 deadline <= now 일 때만 지운다).
+ */
+static bool replay_record(Store *store, const Bytes *args, size_t count, uint64_t now_ms, uint64_t unix_ms) {
     int64_t unix_deadline = 0;
     uint64_t deadline_ms = 0;
     if (resp_equals(args[0], "SET") && (count == 3 || count == 5)) {
@@ -363,26 +369,67 @@ static bool replay_record(Store *store, const Bytes *args, size_t count, uint64_
             return false;
         }
         if (!to_monotonic((uint64_t)unix_deadline, now_ms, unix_ms, &deadline_ms)) {
-            store_delete(store, args[1], now_ms);
-            ++report->skipped_expired;
-            return true;
+            deadline_ms = REPLAYED_PAST_DEADLINE;
         }
         return store_set(store, args[1], args[2], deadline_ms);
     }
     if (resp_equals(args[0], "DEL") && count == 2) {
-        store_delete(store, args[1], now_ms);
+        store_delete(store, args[1], 0);
         return true;
     }
     if (resp_equals(args[0], "PEXPIREAT") && count == 3 && resp_integer(args[2], &unix_deadline) && unix_deadline > 0) {
         if (!to_monotonic((uint64_t)unix_deadline, now_ms, unix_ms, &deadline_ms)) {
-            store_delete(store, args[1], now_ms);
-            ++report->skipped_expired;
-            return true;
+            deadline_ms = REPLAYED_PAST_DEADLINE;
         }
-        store_expire_at(store, args[1], now_ms, deadline_ms);
+        store_expire_at(store, args[1], 0, deadline_ms);
         return true;
     }
     return false;
+}
+
+static bool append_raw(char **buffer, size_t *used, size_t *capacity, const char *data, size_t length);
+
+/* 만료 시각이 now_ms 이하인 키의 이름을 길이와 함께 한 덩어리에 모으는 상태 */
+typedef struct {
+    char *data;
+    size_t used;
+    size_t capacity;
+    size_t keys;
+    uint64_t now_ms;
+    bool ok;
+} ExpiredKeys;
+
+static bool collect_expired(void *context, Bytes key, Bytes value, uint64_t deadline_ms) {
+    ExpiredKeys *found = context;
+    (void)value;
+    if (!deadline_ms || deadline_ms > found->now_ms) {
+        return true;
+    }
+    if (!append_raw(&found->data, &found->used, &found->capacity, (const char *)&key.length, sizeof key.length) ||
+        !append_raw(&found->data, &found->used, &found->capacity, key.data, key.length)) {
+        found->ok = false;
+        return false;
+    }
+    ++found->keys;
+    return true;
+}
+
+/* 재생이 끝난 뒤 만료 시각이 지난 키를 지우고 그 수를 센다. 순회 중에는 지우지 않고 이름을 복사해 둔 뒤 지운다. */
+static bool drop_expired_after_replay(Store *store, uint64_t now_ms, LoadReport *report) {
+    ExpiredKeys found = {.now_ms = now_ms, .ok = true};
+    store_foreach(store, 0, collect_expired, &found);
+    size_t offset = 0;
+    for (size_t i = 0; found.ok && i < found.keys; ++i) {
+        size_t length;
+        memcpy(&length, found.data + offset, sizeof length);
+        offset += sizeof length;
+        if (store_delete(store, (Bytes){found.data + offset, length}, 0)) {
+            ++report->skipped_expired;
+        }
+        offset += length;
+    }
+    free(found.data);
+    return found.ok;
 }
 
 /*
@@ -414,7 +461,7 @@ bool aof_open(Aof *aof, const char *path, FsyncPolicy policy, Store *store,
         for (size_t i = 0; i < parser.count && result == RESP_READY; ++i) {
             args[i] = (Bytes){data + offset + parser.start[i], parser.length[i]};
         }
-        if (result != RESP_READY || !replay_record(store, args, parser.count, now_ms, unix_ms, report)) {
+        if (result != RESP_READY || !replay_record(store, args, parser.count, now_ms, unix_ms)) {
             snprintf(report->error, sizeof(report->error), "%s has a corrupt record at byte %zu", path, offset);
             ok = false;
             break;
@@ -423,6 +470,10 @@ bool aof_open(Aof *aof, const char *path, FsyncPolicy policy, Store *store,
         offset += parser.offset;
     }
     free(data);
+    if (ok && !drop_expired_after_replay(store, now_ms, report)) {
+        snprintf(report->error, sizeof(report->error), "out of memory dropping expired keys of %s", path);
+        ok = false;
+    }
     if (!ok) {
         return false;
     }
