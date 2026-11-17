@@ -428,6 +428,146 @@ static void test_aof_close_twice(void) {
     remove(AOF);
 }
 
+/* 큰 값 시험에 쓰는 크기 : 1MiB 와 64KiB(쓰기 버퍼) 경계 근처 */
+static const size_t BIG_SIZES[] = {65535 - 64, 65535 - 17, 65535, 65536, 65537, 65536 + 17, 65536 + 64, 131072, 1024 * 1024};
+#define BIG_COUNT (sizeof(BIG_SIZES) / sizeof(*BIG_SIZES))
+
+static char big_value[1024 * 1024];
+
+static void fill_big_value(void) {
+    for (size_t i = 0; i < sizeof big_value; ++i) {
+        big_value[i] = (char)(i % 251);
+    }
+}
+
+/* 스냅샷 : 값 크기가 64KiB 쓰기 버퍼 경계 근처이거나 1MiB 여도 그대로 복원된다 */
+static void test_snapshot_large_values(void) {
+    fill_big_value();
+    for (size_t n = 0; n < BIG_COUNT; ++n) {
+        remove(SNAP);
+        Store store;
+        LoadReport report;
+        char error[192];
+        assert(store_init(&store));
+        assert(store_set(&store, BYTES("small-before"), BYTES("s"), 0));
+        assert(store_set(&store, BYTES("big"), (Bytes){big_value, BIG_SIZES[n]}, 0));
+        assert(store_set(&store, BYTES("small-after"), BYTES("t"), RUN1_MONO + 10000));
+        assert(snapshot_save(&store, SNAP, RUN1_MONO, RUN1_UNIX, NULL, error, sizeof(error)));
+        store_destroy(&store);
+
+        assert(store_init(&store));
+        assert(snapshot_load(&store, SNAP, RUN2_MONO, RUN2_UNIX, &report));
+        assert(report.loaded == 3);
+        Bytes value;
+        assert(store_get(&store, BYTES("big"), RUN2_MONO, &value));
+        assert(value.length == BIG_SIZES[n] && memcmp(value.data, big_value, value.length) == 0);
+        expect_value(&store, BYTES("small-before"), RUN2_MONO, "s");
+        assert(store_pttl(&store, BYTES("small-after"), RUN2_MONO) == 7000);
+        store_destroy(&store);
+    }
+    remove(SNAP);
+}
+
+/* AOF : 같은 크기들의 값을 덧붙였다가 재생해도 그대로다 */
+static void test_aof_large_values(void) {
+    fill_big_value();
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    char name[16];
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_NO, &store, RUN1_MONO, RUN1_UNIX, &report));
+    for (size_t n = 0; n < BIG_COUNT; ++n) {
+        int length = snprintf(name, sizeof name, "big-%zu", n);
+        append(&aof, CHANGE_SET, (Bytes){name, (size_t)length}, (Bytes){big_value, BIG_SIZES[n]}, 0);
+    }
+    aof_close(&aof);
+    store_destroy(&store);
+
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_NO, &store, RUN2_MONO, RUN2_UNIX, &report));
+    assert(report.loaded == BIG_COUNT && report.truncated_bytes == 0 && store.size == BIG_COUNT);
+    for (size_t n = 0; n < BIG_COUNT; ++n) {
+        int length = snprintf(name, sizeof name, "big-%zu", n);
+        Bytes value;
+        assert(store_get(&store, (Bytes){name, (size_t)length}, RUN2_MONO, &value));
+        assert(value.length == BIG_SIZES[n] && memcmp(value.data, big_value, value.length) == 0);
+    }
+    aof_close(&aof);
+    store_destroy(&store);
+    remove(AOF);
+}
+
+/* AOF : RESP 문법은 맞지만 의미가 잘못된 레코드가 있으면 aof_open 이 거부한다 */
+static void test_aof_semantically_invalid_records(void) {
+    const char *records[] = {
+        "*1\r\n$3\r\nFOO\r\n",                                           /* 모르는 명령 */
+        "*2\r\n$3\r\nSET\r\n$1\r\nk\r\n",                                /* SET 인자 수 부족 */
+        "*4\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n$4\r\nPXAT\r\n",      /* SET 인자 수 4 */
+        "*5\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n$2\r\nEX\r\n$2\r\n10\r\n",    /* PXAT 대신 다른 단어 */
+        "*5\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n$4\r\nPXAT\r\n$3\r\nabc\r\n", /* 정수 아님 */
+        "*5\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n$4\r\nPXAT\r\n$1\r\n0\r\n",   /* 0 */
+        "*5\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n$4\r\nPXAT\r\n$2\r\n-5\r\n",  /* 음수 */
+        "*3\r\n$3\r\nDEL\r\n$1\r\na\r\n$1\r\nb\r\n",                     /* DEL 인자 수 */
+        "*1\r\n$3\r\nDEL\r\n",                                           /* DEL 인자 없음 */
+        "*3\r\n$9\r\nPEXPIREAT\r\n$1\r\nk\r\n$3\r\nabc\r\n",             /* PEXPIREAT 값이 정수 아님 */
+        "*3\r\n$9\r\nPEXPIREAT\r\n$1\r\nk\r\n$1\r\n0\r\n",               /* PEXPIREAT 0 */
+        "*2\r\n$9\r\nPEXPIREAT\r\n$1\r\nk\r\n",                          /* PEXPIREAT 인자 수 부족 */
+    };
+    const char good[] = "*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n";
+    for (size_t i = 0; i < sizeof(records) / sizeof(*records); ++i) {
+        /* 앞에 정상 레코드가 있어도 잘못된 레코드를 만나면 일부만 복원한 채 시작하지 않는다 */
+        write_bytes(AOF, "wb", good, sizeof(good) - 1);
+        write_bytes(AOF, "ab", records[i], strlen(records[i]));
+        Store store;
+        Aof aof = {0};
+        LoadReport report;
+        assert(store_init(&store));
+        assert(!aof_open(&aof, AOF, FSYNC_ALWAYS, &store, RUN2_MONO, RUN2_UNIX, &report));
+        assert(strstr(report.error, "corrupt record"));
+        store_destroy(&store);
+    }
+    remove(AOF);
+}
+
+/* everysec : 마지막 동기화 뒤 999ms 는 하지 않고 1000ms 는 한다. 기록할 것이 없거나 다른 정책이면 하지 않는다 */
+static void test_aof_sync_if_due(void) {
+    remove(AOF);
+    Store store;
+    Aof aof = {0};
+    LoadReport report;
+    bool synced = true;
+    assert(store_init(&store));
+    assert(aof_open(&aof, AOF, FSYNC_EVERYSEC, &store, RUN1_MONO, RUN1_UNIX, &report));
+    assert(aof_sync_if_due(&aof, RUN1_MONO + 5000, &synced) && !synced);   /* 기록할 것이 없다 */
+    append(&aof, CHANGE_SET, BYTES("k"), BYTES("v"), 0);
+    assert(aof.pending_sync);
+    assert(aof_sync_if_due(&aof, RUN1_MONO + 999, &synced) && !synced && aof.pending_sync);
+    assert(aof_sync_if_due(&aof, RUN1_MONO + 1000, &synced) && synced && !aof.pending_sync);
+    assert(aof.last_sync_ms == RUN1_MONO + 1000);
+    assert(aof_sync_if_due(&aof, RUN1_MONO + 9000, &synced) && !synced);   /* 이미 동기화했다 */
+    uint64_t synced_at = aof.last_sync_ms;
+    append(&aof, CHANGE_SET, BYTES("k2"), BYTES("v"), 0);
+    assert(aof_sync_if_due(&aof, synced_at + 999, &synced) && !synced);
+    assert(aof_sync_if_due(&aof, synced_at + 1000, &synced) && synced);
+    aof_close(&aof);
+    store_destroy(&store);
+
+    /* always · no 는 이 함수가 동기화하지 않는다 (always 는 기록 때, no 는 운영체제에 맡김) */
+    FsyncPolicy others[] = {FSYNC_ALWAYS, FSYNC_NO};
+    for (int i = 0; i < 2; ++i) {
+        remove(AOF);
+        assert(store_init(&store));
+        assert(aof_open(&aof, AOF, others[i], &store, RUN1_MONO, RUN1_UNIX, &report));
+        append(&aof, CHANGE_SET, BYTES("k"), BYTES("v"), 0);
+        assert(aof_sync_if_due(&aof, RUN1_MONO + 5000, &synced) && !synced);
+        aof_close(&aof);
+        store_destroy(&store);
+    }
+    remove(AOF);
+}
+
 int main(void) {
     test_snapshot_round_trip_with_downtime();
     test_snapshot_interrupted_and_corrupt();
@@ -443,9 +583,13 @@ int main(void) {
     test_empty_aof_file();
     test_aof_expire_record_in_the_past();
     test_aof_close_twice();
+    test_snapshot_large_values();
+    test_aof_large_values();
+    test_aof_semantically_invalid_records();
+    test_aof_sync_if_due();
     remove(SNAP);
     remove(SNAP_TMP);
     remove(AOF);
-    puts("14 persistence unit scenarios passed");
+    puts("18 persistence unit scenarios passed");
     return 0;
 }
