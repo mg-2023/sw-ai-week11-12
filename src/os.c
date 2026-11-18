@@ -187,3 +187,123 @@ int os_append(OsFile *f, const void *buf, size_t n, uint64_t *off_out) {
     if (off_out) *off_out = off;
     return 0;
 }
+
+/* ---- sockets (the only place that knows Winsock from POSIX sockets) ---- */
+#ifdef _WIN32
+#define SOCK_NATIVE(s) ((SOCKET)(s))
+typedef int sock_len_t;
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <poll.h>
+typedef socklen_t sock_len_t;
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#endif
+
+/* Wait until s can be read (for_write 0) or written, or the deadline passes. 1 ready, 0 timeout, -1 error. */
+static int sock_wait(SOCKET_T s, int for_write, uint64_t deadline_us) {
+    uint64_t now = os_now_us();
+    uint64_t left = deadline_us > now ? deadline_us - now : 0;
+#ifdef _WIN32
+    fd_set set; struct timeval tv;
+    FD_ZERO(&set); FD_SET(SOCK_NATIVE(s), &set);
+    tv.tv_sec = (long)(left / 1000000); tv.tv_usec = (long)(left % 1000000);
+    int rc = select(0, for_write ? NULL : &set, for_write ? &set : NULL, NULL, &tv);
+    return rc < 0 ? -1 : rc == 0 ? 0 : 1;
+#else
+    struct pollfd p = {.fd = (int)s, .events = for_write ? POLLOUT : POLLIN};
+    int ms = left > 2000000000ull * 1000 ? 2000000000 : (int)((left + 999) / 1000), rc;
+    do { rc = poll(&p, 1, ms); } while (rc < 0 && errno == EINTR);
+    return rc < 0 ? -1 : rc == 0 ? 0 : 1;
+#endif
+}
+
+/* Listen on 127.0.0.1:port (0 picks a free port, reported through port_out). */
+SOCKET_T os_sock_listen(uint16_t port, int backlog, uint16_t *port_out) {
+    struct sockaddr_in addr = {0}; sock_len_t len = sizeof addr;
+#ifdef _WIN32
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return OS_INVALID_SOCKET;
+#define LISTEN_FAIL do { closesocket(s); return OS_INVALID_SOCKET; } while (0)
+#else
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return OS_INVALID_SOCKET;
+#define LISTEN_FAIL do { close(s); return OS_INVALID_SOCKET; } while (0)
+#endif
+    addr.sin_family = AF_INET; addr.sin_port = htons(port); addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(s, (struct sockaddr *)&addr, sizeof addr) || listen(s, backlog)) LISTEN_FAIL;
+    if (getsockname(s, (struct sockaddr *)&addr, &len)) LISTEN_FAIL;
+#undef LISTEN_FAIL
+    if (port_out) *port_out = ntohs(addr.sin_port);
+    return (SOCKET_T)s;
+}
+
+/* Block until a client connects; OS_INVALID_SOCKET on error or a closed listener. */
+SOCKET_T os_sock_accept(SOCKET_T listener) {
+#ifdef _WIN32
+    SOCKET s = accept(SOCK_NATIVE(listener), NULL, NULL);
+    return s == INVALID_SOCKET ? OS_INVALID_SOCKET : (SOCKET_T)s;
+#else
+    int s;
+    do { s = accept((int)listener, NULL, NULL); } while (s < 0 && errno == EINTR);
+    return s < 0 ? OS_INVALID_SOCKET : (SOCKET_T)s;
+#endif
+}
+
+/* Connect to 127.0.0.1:port (tests and local clients). */
+SOCKET_T os_sock_connect_local(uint16_t port) {
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET; addr.sin_port = htons(port); addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+#ifdef _WIN32
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return OS_INVALID_SOCKET;
+    if (connect(s, (struct sockaddr *)&addr, sizeof addr)) { closesocket(s); return OS_INVALID_SOCKET; }
+#else
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return OS_INVALID_SOCKET;
+    if (connect(s, (struct sockaddr *)&addr, sizeof addr)) { close(s); return OS_INVALID_SOCKET; }
+#endif
+    return (SOCKET_T)s;
+}
+
+/* Receive up to n bytes, waiting no later than the deadline. */
+int64_t os_sock_recv(SOCKET_T s, void *buf, size_t n, uint64_t deadline_us) {
+    int ready = sock_wait(s, 0, deadline_us);
+    if (ready < 0) return -1;
+    if (ready == 0) return OS_SOCK_TIMEOUT;
+#ifdef _WIN32
+    int got = recv(SOCK_NATIVE(s), buf, n > (1u << 30) ? (1 << 30) : (int)n, 0);
+    return got < 0 ? -1 : got;
+#else
+    ssize_t got;
+    do { got = recv((int)s, buf, n, 0); } while (got < 0 && errno == EINTR);
+    return got < 0 ? -1 : (int64_t)got;
+#endif
+}
+
+/* Send up to n bytes, waiting no later than the deadline. */
+int64_t os_sock_send(SOCKET_T s, const void *buf, size_t n, uint64_t deadline_us) {
+    int ready = sock_wait(s, 1, deadline_us);
+    if (ready < 0) return -1;
+    if (ready == 0) return OS_SOCK_TIMEOUT;
+#ifdef _WIN32
+    int sent = send(SOCK_NATIVE(s), buf, n > (1u << 30) ? (1 << 30) : (int)n, 0);
+    return sent < 0 ? -1 : sent;
+#else
+    ssize_t sent;
+    do { sent = send((int)s, buf, n, MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
+    return sent < 0 ? -1 : (int64_t)sent;
+#endif
+}
+
+/* Close a socket; OS_INVALID_SOCKET is ignored. */
+void os_sock_close(SOCKET_T s) {
+    if (s == OS_INVALID_SOCKET) return;
+#ifdef _WIN32
+    closesocket(SOCK_NATIVE(s));
+#else
+    close((int)s);
+#endif
+}

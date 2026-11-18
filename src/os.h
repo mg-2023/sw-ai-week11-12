@@ -22,6 +22,18 @@ void os_close(OsFile *);
 uint64_t os_now_us(void);
 int os_lock_dir(const char *dir);
 void os_unlock_dir(void);
+/* Sockets. SOCKET_T holds a Winsock SOCKET or a POSIX fd; -1 is invalid. All
+ * waits end at deadline_us (os_now_us clock). recv/send return bytes moved
+ * (recv 0 = peer closed), OS_SOCK_TIMEOUT on timeout, -1 on error. */
+typedef intptr_t SOCKET_T;
+#define OS_INVALID_SOCKET ((SOCKET_T)-1)
+#define OS_SOCK_TIMEOUT ((int64_t)-2)
+SOCKET_T os_sock_listen(uint16_t port, int backlog, uint16_t *port_out);  /* 127.0.0.1 only, port 0 = any */
+SOCKET_T os_sock_accept(SOCKET_T listener);
+SOCKET_T os_sock_connect_local(uint16_t port);
+int64_t os_sock_recv(SOCKET_T s, void *buf, size_t n, uint64_t deadline_us);
+int64_t os_sock_send(SOCKET_T s, const void *buf, size_t n, uint64_t deadline_us);
+void os_sock_close(SOCKET_T s);
 #ifdef MINI_DBMS_TESTING
 void os_test_fail_sync(void);
 void os_test_fail_append(void);
