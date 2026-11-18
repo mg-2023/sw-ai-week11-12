@@ -173,5 +173,6 @@ table.data td.empty { color: var(--muted); text-align: center; }
 .created .short a { font-size: 18px; font-weight: 600; word-break: break-all; }
 .created .meta { color: var(--muted); font-size: 13px; word-break: break-all; }
 table.data td.url { white-space: normal; word-break: break-all; min-width: 220px; }
-table.data td.actions { display: flex; gap: 4px; }
+/* td 에 직접 flex 를 주면 표 칸이 아니게 되어 행 높이만큼 늘어나지 않는다 (줄바꿈된 행에서 아래 선이 끊김) */
+table.data .actions { display: flex; gap: 4px; }
 .lookup { display: inline-flex; gap: 6px; align-items: center; }

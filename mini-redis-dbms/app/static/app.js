@@ -501,7 +501,7 @@ async function refreshLinks() {
       el("td", { class: "mono" }, String(link.id)),
       el("td", { class: "url" }, link.url),
       el("td", {}, cacheCell),
-      el("td", { class: "actions" }, lookup, evict),
+      el("td", {}, el("div", { class: "actions" }, lookup, evict)),
     );
   }));
 }
