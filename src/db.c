@@ -192,6 +192,11 @@ bad:
     return -1;
 }
 
+uint64_t db_table_row_count(const Db *db, const char *table) {
+    const TableSchema *schema = catalog_find(&db->catalog, table);
+    return schema ? table_row_count(db->tables[schema - db->catalog.tables]) : UINT64_MAX;
+}
+
 uint64_t db_rows_written(const Db *db) {
     uint64_t count = 0;
     for (int i = 0; i < db->catalog.n; i++) count += table_rows_written(db->tables[i]);

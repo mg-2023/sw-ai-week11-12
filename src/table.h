@@ -35,6 +35,14 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
                                TableOpenVisitor visitor, void *ctx, DbError *err);
 int table_append(Table *table, const Value *fields_without_id, int64_t *id_out,
                  uint64_t *off_out, DbError *err);
+/* Statement-atomic append of nrows rows (row-major, ncols - 1 fields each).
+ * Reserves index nodes, writes every record, syncs once (sync always), then
+ * registers all rows and publishes ids_out[0..nrows). Any failure truncates back
+ * to the confirmed end, so no row of the statement remains. Same locking rule
+ * as table_append. Rollback failure disables further appends until reopen.
+ */
+int table_append_rows(Table *table, const Value *rows, size_t nrows,
+                      int64_t *ids_out, DbError *err);
 int table_read_at(Table *table, uint64_t off, Row *out, DbError *err);
 int table_scan(Table *table, RowVisitor visitor, void *ctx, DbError *err);
 void row_free(Row *row);
@@ -48,6 +56,8 @@ int table_write_lock(Table *table);
 int table_unlock(Table *table);
 void table_set_sync(Table *table, int sync_always);
 uint64_t table_rows_written(const Table *table);
+/* Rows in the confirmed file (counted at open, grown by appends). */
+uint64_t table_row_count(const Table *table);
 
 /* db_open attaches the index built from its open callback before publication.
  * Transfers ownership to Table. Storage-only callers may leave it unattached.
@@ -55,5 +65,10 @@ uint64_t table_rows_written(const Table *table);
  */
 void table_set_index(Table *table, BPTree *index);
 const BPTree *table_index(const Table *table);
+
+#ifdef MINI_DBMS_TESTING
+/* Largest buffer written per os_append call (default 1 MiB); 1 = one record each. */
+void table_test_set_write_chunk(size_t bytes);
+#endif
 
 #endif

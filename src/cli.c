@@ -17,7 +17,8 @@ static int usage(void) {
     report_error("invalid command or arguments", DB_ERROR_SQL);
     fputs("usage: mini-dbms run <file.sql|-> [--data DIR] "
           "[--sync always|none] [--repair]\n"
-          "       mini-dbms bench --rows N [--data DIR] [--queries 100] [--seed 42]\n", stderr);
+          "       mini-dbms bench --rows N [--data DIR] [--queries 100] [--seed 42]\n"
+          "       mini-dbms bench --query-only --data DIR [--queries 100] [--seed 42]\n", stderr);
     return 1;
 }
 
@@ -143,7 +144,9 @@ static int bench_queries(Db *db, uint64_t rows, size_t queries, uint64_t seed,
         uint64_t id = random_next(&seed) % rows + 1;
         char name[32], sql[128];
         snprintf(name, sizeof name, "user_%" PRIu64, id);
-        for (int plan = 0; plan < 2; plan++) {
+        /* Alternate which plan runs first, so neither one always meets the colder cache. */
+        for (int step = 0; step < 2; step++) {
+            int plan = i % 2 ? 1 - step : step;
             if (plan == 0) snprintf(sql, sizeof sql, "SELECT * FROM users WHERE id = %" PRIu64 ";", id);
             else snprintf(sql, sizeof sql, "SELECT * FROM users WHERE name = '%s';", name);
             Result result = {0};
@@ -176,6 +179,53 @@ static int bench_queries(Db *db, uint64_t rows, size_t queries, uint64_t seed,
     return 0;
 }
 
+static void print_stats_table(const BenchStats stats[4], uint64_t queries) {
+    puts("| pass | plan | queries | rows/result | rows_examined/query | median_ms | p99_ms | max_ms |");
+    puts("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (int i = 0; i < 4; i++) {
+        printf("| %s | %s | %" PRIu64 " | %zu | %" PRIu64 " | %.3f | %.3f | %.3f |\n",
+               i < 2 ? "first" : "repeat", stats[i].plan == PLAN_INDEX ? "index" : "scan",
+               queries, stats[i].returned, stats[i].examined, stats[i].median_ms, stats[i].p99_ms, stats[i].max_ms);
+    }
+}
+
+/* Open an existing bench folder without inserting; measure only startup and queries.
+ * Run right after a reboot to see the first open and first queries with a cold OS cache. */
+static int bench_query_only(const char *dir, uint64_t queries, uint64_t seed) {
+    DbError err = {.kind = DB_ERROR_INTERNAL};
+    uint64_t *times = malloc((size_t)queries * 2 * sizeof *times);
+    if (!times) return report_error("out of memory for benchmark samples", DB_ERROR_INTERNAL);
+    if (os_init()) { free(times); return report_error("cannot initialize OS layer", DB_ERROR_INTERNAL); }
+    uint64_t start = os_now_us();
+    Db *db = db_open(dir, (DbOptions){.sync_always = 0}, &err);
+    uint64_t startup_us = os_now_us() - start;
+    int rc = 1;
+    BenchStats stats[4] = {0};
+    uint64_t rows = db ? db_table_row_count(db, "users") : 0;
+    if (!db) goto done;
+    if (!rows || rows == UINT64_MAX || rows > INT64_MAX) {
+        snprintf(err.message, sizeof err.message, "query-only benchmark needs a users table with rows: %s", dir);
+        goto done;
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        if (bench_queries(db, rows, (size_t)queries, seed, times, stats + pass * 2, &err)) goto done;
+    }
+    db_close(db); db = NULL;
+    uint64_t peak = os_peak_memory_bytes();
+    if (peak == UINT64_MAX) { snprintf(err.message, sizeof err.message, "cannot measure peak memory"); goto done; }
+    printf("rows=%" PRIu64 " queries=%" PRIu64 " seed=%" PRIu64 " query_only=1 sync=none\n", rows, queries, seed);
+    puts("cache: first=OS cache as found at start (cold only if it was emptied, e.g. by a reboot); repeat=same query sequence");
+    printf("startup_ms: %.3f\n", (double)startup_us / 1000.0);
+    print_stats_table(stats, queries);
+    printf("peak_memory_bytes: %" PRIu64 "\n", peak);
+    rc = 0;
+done:
+    if (rc) bench_error(&err);
+    db_close(db); os_cleanup(); free(times);
+    if (fflush(stdout) == EOF || ferror(stdout)) return 1;
+    return rc;
+}
+
 static int bench_main(int argc, char **argv) {
     const char *dir = "bench-data";
     uint64_t rows = 0, queries = 100, seed = 42;
@@ -187,11 +237,20 @@ static int bench_main(int argc, char **argv) {
         else if (strcmp(argv[i], "--queries") == 0) { flag = 2; value = &queries; maximum = SIZE_MAX / (2 * sizeof(uint64_t)); }
         else if (strcmp(argv[i], "--seed") == 0) { flag = 4; value = &seed; }
         else if (strcmp(argv[i], "--data") == 0) flag = 8;
+        else if (strcmp(argv[i], "--query-only") == 0) {
+            if (seen & 16) return usage();
+            seen |= 16; continue;
+        }
         else return usage();
         if ((seen & flag) || ++i >= argc) return usage();
         seen |= flag;
         if (value) { if (decimal(argv[i], maximum, value)) return usage(); }
         else { dir = argv[i]; if (!*dir) return usage(); }
+    }
+    if (seen & 16) {
+        /* Existing data only: the folder is required and the row count is not given. */
+        if ((seen & 1) || !(seen & 8) || !queries) return usage();
+        return bench_query_only(dir, queries, seed);
     }
     if (!rows || !queries) return usage();
     uint64_t *times = malloc((size_t)queries * 2 * sizeof *times);
@@ -243,13 +302,7 @@ static int bench_main(int argc, char **argv) {
     printf("rows=%" PRIu64 " queries=%" PRIu64 " seed=%" PRIu64 " batch_rows=1000 sync=none\n", rows, queries, seed);
     puts("cache: first=warm OS cache after INSERT and reopen; repeat=same query sequence");
     printf("insert_total_ms: %.3f\nstartup_ms: %.3f\n", (double)insert_us / 1000.0, (double)startup_us / 1000.0);
-    puts("| pass | plan | queries | rows/result | rows_examined/query | median_ms | p99_ms | max_ms |");
-    puts("| --- | --- | --- | --- | --- | --- | --- | --- |");
-    for (int i = 0; i < 4; i++) {
-        printf("| %s | %s | %" PRIu64 " | %zu | %" PRIu64 " | %.3f | %.3f | %.3f |\n",
-               i < 2 ? "first" : "repeat", stats[i].plan == PLAN_INDEX ? "index" : "scan",
-               queries, stats[i].returned, stats[i].examined, stats[i].median_ms, stats[i].p99_ms, stats[i].max_ms);
-    }
+    print_stats_table(stats, queries);
     printf("peak_memory_bytes: %" PRIu64 "\n", peak);
     rc = 0;
 done:

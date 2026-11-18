@@ -50,6 +50,16 @@ def invoke(work, args, sql=None):
     return proc.returncode, normalize(proc.stdout.decode("utf-8")), proc.stderr.decode("utf-8").replace("\r\n", "\n")
 
 
+def check_repair(work, err, before, off):
+    """Check the --repair report and backup; returns (record count, id range or None)."""
+    m = re.fullmatch(r"repair: cut (\d+) bytes at offset (\d+), backup (\S+), (\d+) intact records in the cut bytes"
+                     r"(?:, ids (\d+)\.\.(\d+))?\n", err)
+    assert m, err
+    assert int(m[1]) == len(before) - off and int(m[2]) == off, err
+    assert (work / m[3]).read_bytes() == bytes(before[off:]), "backup differs from the cut bytes"
+    return int(m[4]), (int(m[5]), int(m[6])) if m[5] else None
+
+
 def expect(actual, code, stdout, stderr=""):
     wanted = (code, stdout, stderr)
     if actual != wanted:
@@ -143,8 +153,10 @@ def test_recovery_and_repair():
         rc, out, err = invoke(work, ["run", "-"], b"SELECT id FROM users;")
         assert rc == 1 and "CRC mismatch" in out and "offset" in out and not err, (rc, out, err)
         assert table.read_bytes() == damaged, "startup refusal modified corrupt file"
-        expect(invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;"), 0,
-               "id\n--\n1\n(1 row, plan=scan, examined=1, <time> ms)\n")
+        rc, out, err = invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;")
+        assert (rc, out) == (0, "id\n--\n1\n(1 row, plan=scan, examined=1, <time> ms)\n"), (rc, out)
+        # The third record after the damaged one is reported, not silently dropped.
+        assert check_repair(work, err, damaged, first_end) == (1, (3, 3)), err
         assert table.stat().st_size == first_end
 
 
@@ -190,7 +202,8 @@ def test_length_corruption_refuses_and_repairs():
             assert rc == 1 and out.startswith("internal error:") and f"offset {off}" in out and not err, (rc, out, err)
             assert table.read_bytes() == damaged
             rc, out, err = invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;")
-            assert rc == 0 and f"({int(off != 0)} row" in out and not err, (rc, out, err)
+            assert rc == 0 and f"({int(off != 0)} row" in out, (rc, out, err)
+            assert check_repair(work, err, damaged, off)[0] == 2 - int(off != 0), err
             assert table.read_bytes() == raw[:off]
 
 
@@ -272,7 +285,8 @@ def test_paired_length_corruption_refuses():
                 assert rc == 1 and "invalid record length" in out and f"offset {off}" in out and not err, (bit, rc, out, err)
                 assert table.read_bytes() == damaged
         rc, out, err = invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;")
-        assert rc == 0 and "(1 row," in out and not err, (rc, out, err)
+        assert rc == 0 and "(1 row," in out, (rc, out, err)
+        check_repair(work, err, damaged, first_end)
         assert table.read_bytes() == raw[:first_end]
 
 
@@ -291,7 +305,8 @@ def test_complete_record_inside_incomplete_tail():
             assert rc == 1 and "offset" in out and not err, (rc, out, err)
             assert table.read_bytes() == prefix + tail
         rc, out, err = invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;")
-        assert rc == 0 and "(1 row," in out and not err, (rc, out, err)
+        assert rc == 0 and "(1 row," in out, (rc, out, err)
+        check_repair(work, err, prefix + tail, len(prefix))
         assert table.read_bytes() == prefix
         # A partial candidate, bad header check, or bad payload CRC is insufficient.
         bad_check, bad_crc = bytearray(prefix), bytearray(prefix)
@@ -368,6 +383,33 @@ def test_bench_10000():
                "(1 row, plan=index, examined=1, <time> ms)\n")
 
 
+def test_bench_query_only():
+    with database() as (work, _):
+        rc, out, err = invoke(work, ["bench", "--rows", "10000"])
+        assert rc == 0, (rc, out, err)
+        before = {path.name: path.read_bytes() for path in (work / "bench-data").iterdir() if path.suffix == ".tbl"}
+        rc, out, err = invoke(work, ["bench", "--query-only", "--data", work / "bench-data", "--queries", "30", "--seed", "5"])
+        assert rc == 0 and not err, (rc, out, err)
+        assert "rows=10000 queries=30 seed=5 query_only=1 sync=none\n" in out, out
+        assert "insert_total_ms" not in out and re.search(r"^startup_ms: [0-9]+\.[0-9]{3}$", out, re.M), out
+        records = re.findall(
+            r"^\| (first|repeat) \| (index|scan) \| ([0-9]+) \| ([0-9]+) \| ([0-9]+) \| "
+            r"([0-9]+\.[0-9]{3}) \| ([0-9]+\.[0-9]{3}) \| ([0-9]+\.[0-9]{3}) \|$", out, re.M)
+        assert len(records) == 4, out
+        medians = {(r[0], r[1]): float(r[5]) for r in records}
+        for phase in ("first", "repeat"):
+            # The index lookup reads one record; the scan reads all 10000. It must stay faster.
+            assert medians[(phase, "index")] < medians[(phase, "scan")], out
+        assert {path.name: path.read_bytes() for path in (work / "bench-data").iterdir() if path.suffix == ".tbl"} == before
+        # --query-only never inserts: it needs a folder and takes no row count.
+        for args in (["--query-only"], ["--query-only", "--rows", "5", "--data", work / "bench-data"],
+                     ["--query-only", "--query-only", "--data", work / "bench-data"]):
+            rc, out, err = invoke(work, ["bench", *args])
+            assert rc == 1 and "error at 0:0:" in out and "usage:" in err, (args, rc, out, err)
+        rc, out, err = invoke(work, ["bench", "--query-only", "--data", work / "missing"])
+        assert rc == 1 and "internal error:" in out, (rc, out, err)
+
+
 def test_bench_options_and_partial_batch():
     with database() as (work, _):
         for rows, queries, seed in ((1001, 3, 7), (1, 1, 0)):
@@ -419,7 +461,7 @@ def main():
         test_invalid_length_guards, test_catalog_names, test_missing_data_directory,
         test_length_checksum_wire_format, test_paired_length_corruption_refuses,
         test_complete_record_inside_incomplete_tail, test_catalog_reserved_identifiers,
-        test_bench_10000, test_bench_options_and_partial_batch,
+        test_bench_10000, test_bench_query_only, test_bench_options_and_partial_batch,
         test_bench_invalid_arguments, test_bench_preserves_existing_directory,
     )]
     passed = failed = 0

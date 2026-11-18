@@ -1,8 +1,9 @@
 #include "test.h"
+#include "test_dir.h"
 #include "catalog.h"
 
 static int load_text(const char *text, Catalog *out, DbError *err) {
-    const char *path = "build/test_catalog_input.txt";
+    const char *path = test_path("test_catalog_input.txt");
     FILE *file = fopen(path, "wb");
     if (!file) return -2;
     size_t len = strlen(text);
@@ -167,7 +168,7 @@ static void test_failure_cleanup_and_reuse(void) {
 
 static void test_missing_file(void) {
     Catalog catalog = {0}; DbError err = {0};
-    ASSERT(catalog_load("build/missing_catalog_dir/catalog.txt", &catalog, &err) == -1);
+    ASSERT(catalog_load(test_path("missing_catalog_dir/catalog.txt"), &catalog, &err) == -1);
     ASSERT(catalog.tables == NULL && catalog.n == 0 && err.message[0]);
 }
 
@@ -196,6 +197,7 @@ static void test_keyword_prefix_names(void) {
 }
 
 int main(void) {
+    test_dir_init("catalog");
     RUN(test_reserved_names);
     RUN(test_keyword_prefix_names);
     RUN(test_load_default);

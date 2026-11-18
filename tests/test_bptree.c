@@ -235,7 +235,65 @@ static void test_reserved_insert_needs_no_allocation(void) {
     bpt_free(tree);
 }
 
+/* Reserve a range after `count` keys, insert it, and prove nothing was allocated. */
+static int range_case(size_t count, size_t n, int bulk) {
+    BPTree *tree = bpt_create(); if (!tree) return 0;
+    if (bulk) {
+        int64_t *keys = malloc(count * sizeof *keys); uint64_t *values = malloc(count * sizeof *values);
+        if (!keys || !values) return 0;
+        for (size_t i = 0; i < count; i++) { keys[i] = (int64_t)i + 1; values[i] = value_for((int64_t)i + 1); }
+        int rc = bpt_bulk_load(tree, keys, values, count); free(keys); free(values);
+        if (rc) return 0;
+    } else {
+        for (size_t i = 0; i < count; i++) if (bpt_insert(tree, (int64_t)i + 1, value_for((int64_t)i + 1))) return 0;
+    }
+    if (bpt_reserve_insert_range(tree, (int64_t)count + 1, n)) return 0;
+    size_t allocs = bpt_test_node_allocs();
+    for (size_t i = 0; i < n; i++) {
+        int64_t key = (int64_t)(count + i) + 1;
+        if (bpt_insert_reserved(tree, key, value_for(key))) return 0;
+    }
+    int ok = bpt_test_node_allocs() == allocs && valid(tree);
+    bpt_release_reserved(tree);
+    for (size_t i = 0; ok && i < count + n; i++) {
+        uint64_t value; ok = bpt_find(tree, (int64_t)i + 1, &value) && value == value_for((int64_t)i + 1);
+    }
+    bpt_free(tree);
+    return ok;
+}
+
+static void test_reserved_range_needs_no_allocation(void) {
+    size_t counts[] = {0, 1, 31, 62, 63, 64, 100, 1000, 3968, 3969, 4000, 20000};
+    size_t sizes[] = {1, 2, 31, 32, 33, 63, 64, 65, 1000, 5000, 20000};
+    for (size_t c = 0; c < sizeof counts / sizeof *counts; c++) {
+        for (size_t n = 0; n < sizeof sizes / sizeof *sizes; n++) {
+            for (int bulk = 0; bulk <= (counts[c] > 0); bulk++) {
+                if (!range_case(counts[c], sizes[n], bulk)) {
+                    fprintf(stderr, "range case count=%zu n=%zu bulk=%d\n", counts[c], sizes[n], bulk);
+                    ASSERT(0);
+                }
+            }
+        }
+    }
+}
+
+static void test_reserved_range_rejects_bad_ranges_and_frees_on_failure(void) {
+    BPTree *tree = bpt_create(); ASSERT(tree);
+    for (int64_t k = 1; k <= 100; k++) ASSERT(bpt_insert(tree, k, value_for(k)) == 0);
+    ASSERT(bpt_reserve_insert_range(tree, 100, 3) == -1); /* Not past the maximum key. */
+    ASSERT(bpt_reserve_insert_range(tree, 101, 0) == -1);
+    ASSERT(bpt_reserve_insert_range(tree, INT64_MAX, 2) == -1); /* Would overflow. */
+    bpt_test_fail_node_after(1);
+    ASSERT(bpt_reserve_insert_range(tree, 101, 1000) == -1 && valid(tree)); /* Fails midway, all freed. */
+    ASSERT(bpt_reserve_insert_range(tree, 101, 1000) == 0);
+    bpt_release_reserved(tree); bpt_release_reserved(NULL);
+    ASSERT(valid(tree) && bpt_find(tree, 101, NULL) == 0);
+    bpt_free(tree);
+}
+
 int main(void) {
+    RUN(test_reserved_range_needs_no_allocation);
+    RUN(test_reserved_range_rejects_bad_ranges_and_frees_on_failure);
     RUN(test_reserved_insert_needs_no_allocation);
     RUN(test_insert_find_sequential_100k);
     RUN(test_insert_random_100k_check);

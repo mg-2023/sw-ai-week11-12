@@ -1,11 +1,12 @@
 #include "test.h"
+#include "test_dir.h"
 #include "os.h"
 #include <pthread.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <unistd.h>
 
-static OsFile *fresh(void) { remove("build/os-test.bin"); return os_open("build/os-test.bin", 1); }
+static OsFile *fresh(void) { remove(test_path("os-test.bin")); return os_open(test_path("os-test.bin"), 1); }
 static void test_read_at_does_not_move(void) {
     OsFile *f = fresh(); char c; uint64_t off;
     ASSERT(f && os_append(f, "abcd", 4, &off) == 0);
@@ -13,7 +14,7 @@ static void test_read_at_does_not_move(void) {
         ASSERT(os_read_at(f, &c, 1, 3) == 1 && c == 'd');
         ASSERT(os_read_at(f, &c, 1, 0) == 1 && c == 'a');
     }
-    int fd = open("build/os-test.bin", O_RDONLY | O_BINARY);
+    int fd = open(test_path("os-test.bin"), O_RDONLY | O_BINARY);
     ASSERT(fd >= 0 && lseek(fd, 2, SEEK_SET) == 2);
     ASSERT(os_pread(fd, &c, 1, 0) == 1 && c == 'a');
     ASSERT(lseek(fd, 0, SEEK_CUR) == 2);
@@ -43,7 +44,7 @@ static void *pread_many(void *ctx) {
 }
 static void test_concurrent_pread_preserves_fd_cursor(void) {
     OsFile *f = fresh(); ASSERT(f && os_append(f, "01234567", 8, NULL) == 0);
-    int fd = open("build/os-test.bin", O_RDONLY | O_BINARY);
+    int fd = open(test_path("os-test.bin"), O_RDONLY | O_BINARY);
     ASSERT(fd >= 0 && lseek(fd, 3, SEEK_SET) == 3);
     pthread_t threads[8]; DirectReader readers[8];
     for (int i = 0; i < 8; i++) {
@@ -58,14 +59,16 @@ static void test_append_returns_offset(void) { OsFile *f = fresh(); uint64_t a, 
 static void test_truncate(void) { OsFile *f = fresh(); ASSERT(f && !os_append(f, "abc", 3, NULL)); ASSERT(!os_truncate(f, 1) && os_size(f) == 1); os_close(f); }
 static void test_now_us_monotonic(void) { uint64_t a = os_now_us(); for (int i = 0; i < 10000; i++) { uint64_t b = os_now_us(); ASSERT(b >= a); a = b; } }
 static void test_lock_dir_twice_fails(void) {
-    ASSERT(!os_lock_dir("build"));
-    ASSERT(os_lock_dir("build") == -1);
-    ASSERT(system("build\\test_os.exe --lock-child") == 0);
-    os_unlock_dir(); ASSERT(!os_lock_dir("build")); os_unlock_dir();
+    ASSERT(!os_lock_dir(test_dir));
+    ASSERT(os_lock_dir(test_dir) == -1);
+    char command[256]; snprintf(command, sizeof command, "build\\test_os.exe --lock-child %s", test_dir);
+    ASSERT(system(command) == 0);
+    os_unlock_dir(); ASSERT(!os_lock_dir(test_dir)); os_unlock_dir();
 }
 int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "--lock-child")) { int rc = os_lock_dir("build"); if (!rc) os_unlock_dir(); return rc == -1 ? 0 : 1; }
+    if (argc == 3 && !strcmp(argv[1], "--lock-child")) { int rc = os_lock_dir(argv[2]); if (!rc) os_unlock_dir(); return rc == -1 ? 0 : 1; }
     if (os_init()) return 1;
+    test_dir_init("os");
     RUN(test_concurrent_pread_preserves_fd_cursor);
     RUN(test_read_at_does_not_move); RUN(test_concurrent_read_at); RUN(test_append_returns_offset); RUN(test_truncate); RUN(test_now_us_monotonic); RUN(test_lock_dir_twice_fails);
     os_cleanup(); return test_finish();

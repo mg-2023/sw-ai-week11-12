@@ -30,16 +30,22 @@ struct BPTree {
 };
 
 #ifdef MINI_DBMS_TESTING
-static size_t fail_node_after = SIZE_MAX;
-void bpt_test_fail_node_after(size_t n) { fail_node_after = n; }
+#include <stdatomic.h>
+/* Atomic so Phase 3 worker threads can run with the injection point armed. */
+static atomic_size_t fail_node_after = SIZE_MAX;
+static atomic_size_t node_allocs;
+void bpt_test_fail_node_after(size_t n) { atomic_store(&fail_node_after, n); }
+size_t bpt_test_node_allocs(void) { return atomic_load(&node_allocs); }
 #endif
 
 static BPTNode *node_new(int leaf) {
 #ifdef MINI_DBMS_TESTING
-    if (fail_node_after != SIZE_MAX) {
-        if (!fail_node_after) { fail_node_after = SIZE_MAX; return NULL; }
-        fail_node_after--;
+    size_t left = atomic_load(&fail_node_after);
+    if (left != SIZE_MAX) {
+        if (!left) { atomic_store(&fail_node_after, SIZE_MAX); return NULL; }
+        atomic_store(&fail_node_after, left - 1);
     }
+    atomic_fetch_add(&node_allocs, 1);
 #endif
     BPTNode *node = calloc(1, sizeof *node);
     if (node) node->leaf = leaf;
@@ -139,6 +145,21 @@ static void free_reserved(BPTree *tree) {
     }
 }
 
+/* Top the reserved list up to `needed` nodes; on failure free it all. */
+static int reserve_nodes(BPTree *tree, size_t needed) {
+    size_t available = 0;
+    for (BPTNode *p = tree->reserved; p; p = p->next) available++;
+    for (size_t i = available; i < needed; i++) {
+        BPTNode *fresh = node_new(0);
+        if (!fresh) {
+            free_reserved(tree);
+            return -1;
+        }
+        fresh->next = tree->reserved; tree->reserved = fresh;
+    }
+    return 0;
+}
+
 int bpt_reserve_insert(BPTree *tree, int64_t key) {
     if (!tree || tree->count == SIZE_MAX) return -1;
     /* Only the consecutive full nodes ending at the leaf can split. Reserve all
@@ -155,17 +176,62 @@ int bpt_reserve_insert(BPTree *tree, int64_t key) {
         node = node->data.children[pos];
     }
     if (needed == tree->height) needed++;
-    size_t available = 0;
-    for (BPTNode *p = tree->reserved; p; p = p->next) available++;
-    for (size_t i = available; i < needed; i++) {
-        BPTNode *fresh = node_new(0);
-        if (!fresh) {
-            free_reserved(tree);
-            return -1;
+    return reserve_nodes(tree, needed);
+}
+
+/* Upper bound of nodes that n ascending inserts past the maximum key can create.
+ * A node that has split needs 32 more additions before it can split again, so
+ * splits per level are 1 + (additions - 1) / 32. Levels above the current root
+ * each add one new root plus its own splits. */
+static size_t range_nodes_needed(size_t height, size_t n) {
+    size_t needed = 0, added = n;
+    for (size_t level = 0; added; level++) {
+        if (level < height) {
+            added = 1 + (added - 1) / BPT_MIN_LEAF;
+            needed += added;
+        } else {
+            size_t nodes = 1 + added / BPT_MIN_LEAF;
+            needed += nodes;
+            added = nodes - 1;
         }
-        fresh->next = tree->reserved; tree->reserved = fresh;
     }
+    return needed;
+}
+
+int bpt_reserve_insert_range(BPTree *tree, int64_t first_key, size_t n) {
+    if (!tree || !n || tree->count > SIZE_MAX - n) return -1;
+    /* Keys first_key .. first_key + n - 1 must fit and exceed the current maximum. */
+    if (first_key >= 0 && (uint64_t)n - 1 > (uint64_t)INT64_MAX - (uint64_t)first_key) return -1;
+    const BPTNode *node = tree->root;
+    while (node && !node->leaf) node = node->data.children[node->n];
+    if (node && node->keys[node->n - 1] >= first_key) return -1;
+    return reserve_nodes(tree, range_nodes_needed(tree->height, n));
+}
+
+/* Insert without allocating or releasing the reserved list. */
+int bpt_insert_reserved(BPTree *tree, int64_t key, uint64_t value) {
+    if (!tree || tree->count == SIZE_MAX) return -1;
+    if (!tree->root) {
+        if (!tree->reserved) return -1;
+        BPTNode *root = take_node(&tree->reserved, 1);
+        root->keys[0] = key; root->data.values[0] = value; root->n = 1;
+        tree->root = root; tree->height = 1; tree->count = 1;
+        return 0;
+    }
+    int64_t separator;
+    BPTNode *right = insert_node(tree->root, key, value, &tree->reserved, &separator);
+    if (right) {
+        BPTNode *root = take_node(&tree->reserved, 0);
+        root->n = 1; root->keys[0] = separator;
+        root->data.children[0] = tree->root; root->data.children[1] = right;
+        tree->root = root; tree->height++;
+    }
+    tree->count++;
     return 0;
+}
+
+void bpt_release_reserved(BPTree *tree) {
+    if (tree) free_reserved(tree);
 }
 
 int bpt_insert(BPTree *tree, int64_t key, uint64_t value) {

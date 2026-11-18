@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define HEADER_SIZE 12u
 #define MAX_RECORD (1024u * 1024u)
@@ -15,6 +16,9 @@ struct Table {
     pthread_rwlock_t lock;
     OsFile *file;
     TableSchema schema;
+    /* Confirmed end: bytes before it belong to committed rows. Scans and point
+     * reads stop here, so unconfirmed bytes left by a failed rollback stay invisible. */
+    uint64_t end;
     int64_t next_id; /* 0 means the int64 id space is exhausted. */
     uint64_t row_count;
     uint64_t written;
@@ -244,6 +248,79 @@ static int valid_schema(const TableSchema *s) {
     return 1;
 }
 
+/* Bytes of the cut range that still parse as intact records (header check + CRC). */
+typedef struct { uint64_t records; int64_t min_id, max_id; } CutInfo;
+
+/* Copy bytes [from, size) to `backup`, then sync it. The copy is removed on failure. */
+static int copy_cut_range(Table *t, const char *backup, uint64_t from, uint64_t size, DbError *err) {
+    OsFile *out = os_open(backup, 1);
+    unsigned char *buf = malloc(MAX_RECORD);
+    int ok = out && buf;
+    for (uint64_t pos = from; ok && pos < size;) {
+        size_t n = size - pos < MAX_RECORD ? (size_t)(size - pos) : MAX_RECORD;
+        ok = os_read_at(t->file, buf, n, pos) == (int64_t)n && os_append(out, buf, n, NULL) == 0;
+        pos += n;
+    }
+    if (ok) ok = os_sync(out) == 0;
+    free(buf);
+    if (out) os_close(out);
+    if (!ok) { remove(backup); return fail(err, from, "cannot back up table bytes before repair"); }
+    return 0;
+}
+
+/* Find every record in [from, size) whose length check and payload CRC are intact. */
+static int scan_cut_range(Table *t, uint64_t from, uint64_t size, CutInfo *info, DbError *err) {
+    enum { WINDOW = 2 * MAX_RECORD };
+    unsigned char *buf = malloc(WINDOW);
+    if (!buf) return fail(err, from, "out of memory");
+    for (uint64_t pos = from; pos < size;) {
+        size_t n = size - pos < WINDOW ? (size_t)(size - pos) : WINDOW;
+        int last = pos + n == size;
+        if (os_read_at(t->file, buf, n, pos) != (int64_t)n) { free(buf); return fail(err, pos, "cannot read cut range"); }
+        size_t limit = last ? n : n - MAX_RECORD, p = 0; /* Inside limit every record fits the window. */
+        while (p + HEADER_SIZE <= (last ? n : limit)) {
+            const unsigned char *h = buf + p;
+            uint32_t len = get_u32(h);
+            if (len >= 8 && len <= MAX_RECORD - HEADER_SIZE && len <= n - p - HEADER_SIZE &&
+                get_u32(h + 4) == length_check(h) && get_u32(h + 8) == crc32(h + HEADER_SIZE, len)) {
+                int64_t id = get_i64(h + HEADER_SIZE);
+                if (id > 0) {
+                    if (!info->records || id < info->min_id) info->min_id = id;
+                    if (!info->records || id > info->max_id) info->max_id = id;
+                    info->records++;
+                }
+                p += HEADER_SIZE + len;
+            } else p++;
+        }
+        pos += p ? p : n;
+    }
+    free(buf);
+    return 0;
+}
+
+/* Back up the bytes repair is about to cut, then report them. Name: <table>.tbl.repair-YYYYMMDD-HHMMSS. */
+static int back_up_before_repair(Table *t, const char *dir, uint64_t off, uint64_t size,
+                                 CutInfo *info, DbError *err) {
+    char stamp[32], backup[4096];
+    time_t now = time(NULL); struct tm *tm = localtime(&now);
+    if (!tm || !strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", tm)) return fail(err, off, "cannot name repair backup");
+    for (int attempt = 1; attempt <= 100; attempt++) {
+        int n = attempt == 1 ? snprintf(backup, sizeof backup, "%s/%s.tbl.repair-%s", dir, t->schema.name, stamp)
+                             : snprintf(backup, sizeof backup, "%s/%s.tbl.repair-%s-%d", dir, t->schema.name, stamp, attempt);
+        if (n < 0 || (size_t)n >= sizeof backup) return fail(err, off, "repair backup path too long");
+        OsFile *existing = os_open(backup, 0);
+        if (!existing) break; /* Unused name. */
+        os_close(existing);
+        if (attempt == 100) return fail(err, off, "cannot choose repair backup name");
+    }
+    if (copy_cut_range(t, backup, off, size, err) || scan_cut_range(t, off, size, info, err)) return -1;
+    fprintf(stderr, "repair: cut %" PRIu64 " bytes at offset %" PRIu64 ", backup %s, %" PRIu64 " intact records in the cut bytes",
+            size - off, off, backup, info->records);
+    if (info->records) fprintf(stderr, ", ids %" PRId64 "..%" PRId64, info->min_id, info->max_id);
+    fputc('\n', stderr);
+    return 0;
+}
+
 Table *table_open(const char *dir, const TableSchema *schema, int repair, DbError *err) {
     return table_open_with_visitor(dir, schema, repair, NULL, NULL, err);
 }
@@ -270,6 +347,7 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
     t->schema = *schema; t->next_id = 1; t->sync_always = 1;
     uint64_t size = os_size(t->file), off = 0;
     int64_t last_id = 0;
+    CutInfo cut = {0};
     if (size == UINT64_MAX) { fail(err, 0, "cannot get table size"); goto bad; }
     if (size) {
         reader = calloc(1, sizeof *reader);
@@ -284,6 +362,8 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
         }
         if (rc != RECORD_OK) {
             if (rc != RECORD_INCOMPLETE && !(repair && rc == RECORD_CORRUPT)) goto bad;
+            /* Repair cuts good-looking bytes too: keep a copy and never reuse their ids. */
+            if (rc == RECORD_CORRUPT && back_up_before_repair(t, dir, off, size, &cut, err)) goto bad;
             if (os_truncate(t->file, off) || os_sync(t->file)) {
                 fail(err, off, "cannot truncate/sync recovered table"); goto bad;
             }
@@ -298,6 +378,8 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
         last_id = row.id; t->row_count++; off = next;
     }
     free(reader);
+    t->end = off;
+    if (cut.records && cut.max_id > last_id) last_id = cut.max_id;
     t->next_id = last_id == INT64_MAX ? 0 : last_id + 1;
     clear_error(err);
     return t;
@@ -307,7 +389,18 @@ bad:
     return NULL;
 }
 
+#ifdef MINI_DBMS_TESTING
+#include <stdatomic.h>
+static atomic_size_t write_chunk = MAX_RECORD;
+void table_test_set_write_chunk(size_t bytes) { atomic_store(&write_chunk, bytes); }
+#define WRITE_CHUNK atomic_load(&write_chunk)
+#else
+#define WRITE_CHUNK ((size_t)MAX_RECORD)
+#endif
+
+/* Cut the file back to the statement start; if that fails the table refuses appends. */
 static int rollback(Table *t, uint64_t off, DbError *err, const char *message) {
+    if (t->index) bpt_release_reserved(t->index);
     if (os_truncate(t->file, off) || os_sync(t->file)) {
         t->write_failed = 1;
         return fail(err, off, "append rollback failed; close and reopen table");
@@ -315,13 +408,8 @@ static int rollback(Table *t, uint64_t off, DbError *err, const char *message) {
     return fail(err, off, message);
 }
 
-int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_out, DbError *err) {
-    clear_error(err);
-    if (!t || (t->schema.ncols > 1 && !fields)) return fail(err, 0, "missing table or fields");
-    uint64_t off = os_size(t->file);
-    if (off == UINT64_MAX) return fail(err, 0, "cannot get table size");
-    if (t->write_failed) return fail(err, off, "table needs reopening after rollback failure");
-    if (!t->next_id) return sql_fail(err, off, "id space exhausted");
+/* Validate one row and return its payload length (id and fields). */
+static int payload_length(const Table *t, const Value *fields, uint64_t off, size_t *len_out, DbError *err) {
     size_t len = 8;
     for (int i = 1; i < t->schema.ncols; i++) {
         const Value *v = &fields[i - 1];
@@ -333,12 +421,15 @@ int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_o
         if (field_len > MAX_RECORD - HEADER_SIZE - len) return sql_fail(err, off, "record exceeds 1 MiB");
         len += field_len;
     }
-    if (off > UINT64_MAX - HEADER_SIZE - len) return fail(err, off, "table size overflow");
-    unsigned char *record = malloc(HEADER_SIZE + len);
-    if (!record) return fail(err, off, "out of memory");
+    *len_out = len;
+    return 0;
+}
+
+/* Write header, id and fields of one row at record. */
+static void encode_record(const Table *t, const Value *fields, int64_t id, size_t len, unsigned char *record) {
     put_u32(record, (uint32_t)len);
     put_u32(record + 4, length_check(record));
-    put_i64(record + HEADER_SIZE, t->next_id);
+    put_i64(record + HEADER_SIZE, id);
     size_t pos = HEADER_SIZE + 8;
     for (int i = 1; i < t->schema.ncols; i++) {
         const Value *v = &fields[i - 1];
@@ -350,23 +441,80 @@ int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_o
         }
     }
     put_u32(record + 8, crc32(record + HEADER_SIZE, len));
-    /* Reserve every possible split before touching the file. The write lock
-     * keeps the key/path unchanged until the allocation-free registration. */
-    if (t->index && bpt_reserve_insert(t->index, t->next_id)) {
-        free(record);
-        return fail(err, off, "cannot reserve index memory");
+}
+
+int table_append_rows(Table *t, const Value *rows, size_t nrows, int64_t *ids_out, DbError *err) {
+    clear_error(err);
+    size_t width = t && t->schema.ncols > 1 ? (size_t)t->schema.ncols - 1 : 0;
+    if (!t || !nrows || (width && !rows)) return fail(err, 0, "missing table or fields");
+    uint64_t start = t->end;
+    if (t->write_failed) return fail(err, start, "table needs reopening after rollback failure");
+    if (!t->next_id || (uint64_t)(nrows - 1) > (uint64_t)(INT64_MAX - t->next_id)) {
+        return sql_fail(err, start, "id space exhausted");
     }
-    int rc = os_append(t->file, record, HEADER_SIZE + len, NULL);
-    free(record);
-    if (rc) return rollback(t, off, err, "cannot append record");
-    if (t->sync_always && os_sync(t->file)) return rollback(t, off, err, "cannot sync record");
-    if (t->index && bpt_insert(t->index, t->next_id, off)) {
-        return rollback(t, off, err, "cannot register record in index");
+    if (nrows > SIZE_MAX / sizeof(uint32_t)) return fail(err, start, "too many rows");
+    /* Pass 1: validate every row before touching the index or the file. */
+    uint32_t *sizes = malloc(nrows * sizeof *sizes);
+    if (!sizes) return fail(err, start, "out of memory");
+    uint64_t total = 0; size_t largest = 0;
+    for (size_t r = 0; r < nrows; r++) {
+        size_t len;
+        if (payload_length(t, width ? rows + r * width : NULL, start, &len, err)) { free(sizes); return -1; }
+        sizes[r] = (uint32_t)(HEADER_SIZE + len);
+        if (sizes[r] > largest) largest = sizes[r];
+        if (total > UINT64_MAX - sizes[r] || start > UINT64_MAX - total - sizes[r]) {
+            free(sizes); return fail(err, start, "table size overflow");
+        }
+        total += sizes[r];
     }
-    if (id_out) *id_out = t->next_id;
+    size_t chunk = WRITE_CHUNK, capacity = total < chunk ? (size_t)total : chunk;
+    if (capacity < largest) capacity = largest;
+    unsigned char *buf = malloc(capacity);
+    if (!buf) { free(sizes); return fail(err, start, "out of memory"); }
+    /* Reserve every possible index split first; the write lock keeps the keys unchanged. */
+    if (t->index && bpt_reserve_insert_range(t->index, t->next_id, nrows)) {
+        free(buf); free(sizes);
+        return fail(err, start, "cannot reserve index memory");
+    }
+    int64_t id = t->next_id;
+    size_t used = 0; int rc = 0;
+    for (size_t r = 0; r < nrows && !rc; r++, id++) {
+        if (used && used + sizes[r] > chunk) {
+            rc = os_append(t->file, buf, used, NULL); used = 0;
+            if (rc) break;
+        }
+        encode_record(t, width ? rows + r * width : NULL, id, sizes[r] - HEADER_SIZE, buf + used);
+        used += sizes[r];
+    }
+    if (!rc && used) rc = os_append(t->file, buf, used, NULL);
+    free(buf);
+    if (rc) { free(sizes); return rollback(t, start, err, "cannot append record"); }
+    if (t->sync_always && os_sync(t->file)) { free(sizes); return rollback(t, start, err, "cannot sync record"); }
+    /* Success from here on: registration uses only reserved nodes and cannot fail. */
+    uint64_t off = start;
+    for (size_t r = 0; r < nrows; r++) {
+        int64_t row_id = t->next_id + (int64_t)r;
+        if (t->index && bpt_insert_reserved(t->index, row_id, off)) {
+            t->write_failed = 1; free(sizes);
+            return fail(err, start, "cannot register record in index; close and reopen table");
+        }
+        if (ids_out) ids_out[r] = row_id;
+        off += sizes[r];
+    }
+    free(sizes);
+    if (t->index) bpt_release_reserved(t->index);
+    t->end = start + total;
+    t->row_count += nrows; t->written += nrows;
+    int64_t last = t->next_id + (int64_t)(nrows - 1);
+    t->next_id = last == INT64_MAX ? 0 : last + 1;
+    return 0;
+}
+
+int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_out, DbError *err) {
+    uint64_t off = t ? t->end : 0; int64_t id = 0;
+    if (table_append_rows(t, fields, 1, &id, err)) return -1;
+    if (id_out) *id_out = id;
     if (off_out) *off_out = off;
-    t->row_count++; t->written++;
-    t->next_id = t->next_id == INT64_MAX ? 0 : t->next_id + 1;
     return 0;
 }
 
@@ -375,8 +523,7 @@ int table_read_at(Table *t, uint64_t off, Row *out, DbError *err) {
     if (!out) return fail(err, off, "missing row output");
     *out = (Row){0};
     if (!t) return fail(err, off, "missing table");
-    uint64_t size = os_size(t->file);
-    if (size == UINT64_MAX) return fail(err, off, "cannot get table size");
+    uint64_t size = t->end;
     /* A point read needs only this record, not a full scan workspace. It never
      * repairs the file; incomplete and corrupt inputs both return an error. */
     unsigned char header[HEADER_SIZE];
@@ -398,8 +545,7 @@ int table_read_at(Table *t, uint64_t off, Row *out, DbError *err) {
 int table_scan(Table *t, RowVisitor visitor, void *ctx, DbError *err) {
     clear_error(err);
     if (!t || !visitor) return fail(err, 0, "missing table or visitor");
-    uint64_t size = os_size(t->file), off = 0;
-    if (size == UINT64_MAX) return fail(err, 0, "cannot get table size");
+    uint64_t size = t->end, off = 0;
     if (!size) return 0;
     BlockReader *reader = calloc(1, sizeof *reader);
     if (!reader) return fail(err, 0, "out of memory");
@@ -429,5 +575,6 @@ int table_write_lock(Table *t) { return pthread_rwlock_wrlock(&t->lock); }
 int table_unlock(Table *t) { return pthread_rwlock_unlock(&t->lock); }
 void table_set_sync(Table *t, int sync_always) { t->sync_always = sync_always != 0; }
 uint64_t table_rows_written(const Table *t) { return t->written; }
+uint64_t table_row_count(const Table *t) { return t->row_count; }
 void table_set_index(Table *t, BPTree *index) { bpt_free(t->index); t->index = index; }
 const BPTree *table_index(const Table *t) { return t->index; }

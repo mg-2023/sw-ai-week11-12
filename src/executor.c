@@ -45,23 +45,29 @@ static int insert_mapping(const TableSchema *schema, const Statement *s, int map
     return 0;
 }
 
+/* Reorder every row into schema column order and append the whole statement at once. */
 static int insert_rows(Table *table, const Statement *s, const int map[32], StmtResult *out, DbError *err) {
-    if ((size_t)s->nrows > SIZE_MAX / sizeof *out->inserted_ids) return internal(s, err, "too many inserted ids");
-    out->inserted_ids = malloc((size_t)s->nrows * sizeof *out->inserted_ids);
-    if (!out->inserted_ids) return internal(s, err, "out of memory");
-    for (int row = 0; row < s->nrows; row++) {
-        Value fields[32] = {0};
-        for (int i = 0; i < s->row_width; i++) fields[map[i]] = s->values[(size_t)row * (size_t)s->row_width + (size_t)i];
-        if (table_append(table, fields, &out->inserted_ids[row], NULL, err)) {
-            if (err) {
-                char detail[sizeof err->message]; memcpy(detail, err->message, sizeof detail);
-                if (err->kind == DB_ERROR_SQL) { err->line = s->line; err->col = s->col; }
-                snprintf(err->message, sizeof err->message, "%.180s (%zu rows already inserted)", detail, out->ninserted);
-            }
-            return -1;
-        }
-        out->ninserted++;
+    size_t width = (size_t)s->row_width, rows = (size_t)s->nrows;
+    if (rows > SIZE_MAX / sizeof *out->inserted_ids || (width && rows > SIZE_MAX / width / sizeof(Value))) {
+        return internal(s, err, "too many inserted ids");
     }
+    out->inserted_ids = malloc(rows * sizeof *out->inserted_ids);
+    Value *fields = malloc(rows * width * sizeof *fields + 1);
+    if (!out->inserted_ids || !fields) { free(fields); return internal(s, err, "out of memory"); }
+    for (size_t row = 0; row < rows; row++) {
+        for (size_t i = 0; i < width; i++) fields[row * width + (size_t)map[i]] = s->values[row * width + i];
+    }
+    int rc = table_append_rows(table, fields, rows, out->inserted_ids, err);
+    free(fields);
+    if (rc) {
+        if (err) {
+            char detail[sizeof err->message]; memcpy(detail, err->message, sizeof detail);
+            if (err->kind == DB_ERROR_SQL) { err->line = s->line; err->col = s->col; }
+            snprintf(err->message, sizeof err->message, "%.160s (no row of this statement was committed)", detail);
+        }
+        return -1;
+    }
+    out->ninserted = rows;
     return 0;
 }
 
@@ -133,7 +139,8 @@ static int select_rows(Table *table, const TableSchema *schema, const Statement 
         scan.where_col = schema_col_index(schema, s->where_col);
         if (scan.where_col < 0) return fail(s, err, "unknown WHERE column");
         if (schema->cols[scan.where_col].type != s->where_val.type) return fail(s, err, "WHERE value type mismatch");
-        if (scan.where_col == 0) out->plan = PLAN_INDEX;
+        /* A table without an index (storage-only callers) falls back to a scan. */
+        if (scan.where_col == 0 && table_index(table)) out->plan = PLAN_INDEX;
     }
     if (s->limit == 0) return 0;
     if (out->plan == PLAN_INDEX) {
@@ -141,6 +148,9 @@ static int select_rows(Table *table, const TableSchema *schema, const Statement 
         if (!bpt_find(table_index(table), s->where_val.i, &off)) return 0;
         Row row = {0};
         int rc = table_read_at(table, off, &row, err);
+        if (!rc && row.id != s->where_val.i) {
+            rc = internal(s, err, "index/file mismatch: index entry points at a different record");
+        }
         if (!rc) (void)visit_row(&row, off, &scan);
         row_free(&row);
         return rc || scan.failed ? -1 : 0;

@@ -86,7 +86,7 @@ int64_t os_pread(int fd_or_handle, void *buf, size_t n, uint64_t off) {
     int64_t got = read_handle(h, buf, n, off); CloseHandle(h); return got;
 }
 uint64_t os_size(OsFile *f) { LARGE_INTEGER n; return GetFileSizeEx(f->handle, &n) ? (uint64_t)n.QuadPart : UINT64_MAX; }
-int os_truncate(OsFile *f, uint64_t n) { FILE_END_OF_FILE_INFO info; info.EndOfFile.QuadPart = (LONGLONG)n; return SetFileInformationByHandle(f->handle, FileEndOfFileInfo, &info, sizeof(info)) ? 0 : -1; }
+static int truncate_file(OsFile *f, uint64_t n) { FILE_END_OF_FILE_INFO info; info.EndOfFile.QuadPart = (LONGLONG)n; return SetFileInformationByHandle(f->handle, FileEndOfFileInfo, &info, sizeof(info)) ? 0 : -1; }
 static int sync_file(OsFile *f) { return FlushFileBuffers(f->handle) ? 0 : -1; }
 static int write_at(OsFile *f, const void *buf, size_t n, uint64_t off) {
     if (n > INT_MAX) return -1;
@@ -132,7 +132,7 @@ OsFile *os_open(const char *path, int create) { int fd = open(path, O_RDWR | (cr
 int64_t os_pread(int fd, void *buf, size_t n, uint64_t off) { ssize_t got; do { got = pread(fd, buf, n, (off_t)off); } while (got < 0 && errno == EINTR); return got; }
 static int64_t read_at(OsFile *f, void *buf, size_t n, uint64_t off) { return os_pread(f->fd, buf, n, off); }
 uint64_t os_size(OsFile *f) { struct stat s; return fstat(f->fd, &s) ? UINT64_MAX : (uint64_t)s.st_size; }
-int os_truncate(OsFile *f, uint64_t n) { return ftruncate(f->fd, (off_t)n); }
+static int truncate_file(OsFile *f, uint64_t n) { return ftruncate(f->fd, (off_t)n); }
 static int sync_file(OsFile *f) { return fsync(f->fd); }
 static int write_at(OsFile *f, const void *buf, size_t n, uint64_t off) { size_t done = 0; while (done < n) { ssize_t r = pwrite(f->fd, (const char *)buf + done, n - done, (off_t)(off + done)); if (r < 0 && errno == EINTR) continue; if (r <= 0) return -1; done += (size_t)r; } return 0; }
 void os_close(OsFile *f) { if (f) { close(f->fd); free(f); } }
@@ -148,25 +148,39 @@ int64_t os_read_at(OsFile *f, void *buf, size_t n, uint64_t off) {
     return read_at(f, buf, n, off);
 }
 #ifdef MINI_DBMS_TESTING
-static int fail_sync;
-static unsigned fail_append_after;
-static int fail_append;
-void os_test_fail_sync(void) { fail_sync = 1; }
-void os_test_fail_append_after(unsigned n) { fail_append = 1; fail_append_after = n; }
+/* Atomic so Phase 3 worker threads can run with injection points armed. */
+static atomic_int fail_sync;
+static atomic_uint fail_append_after;
+static atomic_int fail_append;
+static atomic_int fail_truncate;
+static atomic_uint sync_calls;
+void os_test_fail_sync(void) { atomic_store(&fail_sync, 1); }
+void os_test_fail_append_after(unsigned n) { atomic_store(&fail_append_after, n); atomic_store(&fail_append, 1); }
 void os_test_fail_append(void) { os_test_fail_append_after(0); }
+void os_test_fail_truncate(void) { atomic_store(&fail_truncate, 1); }
+void os_test_reset_syncs(void) { atomic_store(&sync_calls, 0); }
+unsigned os_test_sync_calls(void) { return atomic_load(&sync_calls); }
 #endif
+int os_truncate(OsFile *f, uint64_t n) {
+#ifdef MINI_DBMS_TESTING
+    if (atomic_exchange(&fail_truncate, 0)) return -1;
+#endif
+    return truncate_file(f, n);
+}
 int os_sync(OsFile *f) {
 #ifdef MINI_DBMS_TESTING
-    if (fail_sync) { fail_sync = 0; return -1; }
+    atomic_fetch_add(&sync_calls, 1);
+    if (atomic_exchange(&fail_sync, 0)) return -1;
 #endif
     return sync_file(f);
 }
 int os_append(OsFile *f, const void *buf, size_t n, uint64_t *off_out) {
     uint64_t off = os_size(f); if (off == UINT64_MAX) return -1;
 #ifdef MINI_DBMS_TESTING
-    if (fail_append) {
-        if (fail_append_after) fail_append_after--;
-        else { fail_append = 0; if (n > 1) (void)write_at(f, buf, n / 2, off); return -1; }
+    if (atomic_load(&fail_append)) {
+        unsigned left = atomic_load(&fail_append_after);
+        if (left) atomic_store(&fail_append_after, left - 1);
+        else { atomic_store(&fail_append, 0); if (n > 1) (void)write_at(f, buf, n / 2, off); return -1; }
     }
 #endif
     if (write_at(f, buf, n, off)) return -1;
