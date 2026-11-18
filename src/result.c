@@ -84,5 +84,8 @@ void result_print_text(const Result *result, FILE *file) {
             fprintf(file, ", %.3f ms)\n", (double)s->elapsed_us / 1000.0);
         }
     }
-    if (!result->ok) fprintf(file, "error at %d:%d: %s\n", result->err.line, result->err.col, result->err.message);
+    if (!result->ok) {
+        if (result->err.kind == DB_ERROR_INTERNAL) fprintf(file, "internal error: %s\n", result->err.message);
+        else fprintf(file, "error at %d:%d: %s\n", result->err.line, result->err.col, result->err.message);
+    }
 }

@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HEADER_SIZE 8u
+#define HEADER_SIZE 12u
 #define MAX_RECORD (1024u * 1024u)
 #define MAX_TEXT (64u * 1024u)
 
@@ -17,6 +17,7 @@ struct Table {
     TableSchema schema;
     int64_t next_id; /* 0 means the int64 id space is exhausted. */
     uint64_t row_count;
+    uint64_t written;
     int write_failed;
     int sync_always;
 };
@@ -27,9 +28,15 @@ static void clear_error(DbError *err) {
 
 static int fail(DbError *err, uint64_t off, const char *message) {
     if (err) {
-        *err = (DbError){0};
+        *err = (DbError){.kind = DB_ERROR_INTERNAL};
         snprintf(err->message, sizeof err->message, "%s at offset %" PRIu64, message, off);
     }
+    return -1;
+}
+
+static int sql_fail(DbError *err, uint64_t off, const char *message) {
+    fail(err, off, message);
+    if (err) err->kind = DB_ERROR_SQL;
     return -1;
 }
 
@@ -74,17 +81,29 @@ void row_free(Row *row) {
  * incomplete/corrupt records may be removed, never a read/allocation failure. */
 enum { RECORD_OK, RECORD_INCOMPLETE, RECORD_CORRUPT, RECORD_IO };
 
+/* Per-call buffers. Rows passed to visitors borrow this workspace; read_at
+ * still returns owned rows. TEXT remains NUL-terminated in both cases. */
+typedef struct { Value fields[32]; unsigned char text[MAX_RECORD + 32]; } RowWorkspace;
+typedef struct {
+    Table *table;
+    uint64_t size, base;
+    size_t used;
+    unsigned char data[MAX_RECORD];
+    RowWorkspace row;
+} BlockReader;
+
 static int decode_row(const TableSchema *schema, const unsigned char *p, size_t n,
-                      Row *out, uint64_t off, DbError *err) {
+                      Row *out, uint64_t off, RowWorkspace *workspace, DbError *err) {
+    if (n < 8) { fail(err, off, "invalid record fields"); return RECORD_CORRUPT; }
     Row row = {.n = schema->ncols, .id = get_i64(p)};
     if (row.id <= 0) {
         fail(err, off, "invalid record id");
         return RECORD_CORRUPT;
     }
-    row.fields = calloc((size_t)row.n, sizeof *row.fields);
+    row.fields = workspace ? workspace->fields : calloc((size_t)row.n, sizeof *row.fields);
     if (!row.fields) { fail(err, off, "out of memory"); return RECORD_IO; }
     row.fields[0] = (Value){.type = TYPE_INT, .i = row.id};
-    size_t pos = 8;
+    size_t pos = 8, text_used = 0;
     for (int i = 1; i < row.n; i++) {
         Value *v = &row.fields[i];
         v->type = schema->cols[i].type;
@@ -96,50 +115,88 @@ static int decode_row(const TableSchema *schema, const unsigned char *p, size_t 
             if (n - pos < 4) goto corrupt;
             v->len = get_u32(p + pos); pos += 4;
             if (v->len > MAX_TEXT || v->len > n - pos) goto corrupt;
-            v->s = malloc((size_t)v->len + 1);
+            v->s = workspace ? (char *)workspace->text + text_used : malloc((size_t)v->len + 1);
             if (!v->s) {
                 row_free(&row); fail(err, off, "out of memory"); return RECORD_IO;
             }
             memcpy(v->s, p + pos, v->len);
             v->s[v->len] = '\0'; pos += v->len;
+            text_used += (size_t)v->len + 1;
         }
     }
     if (pos != n) goto corrupt;
     *out = row;
     return RECORD_OK;
 corrupt:
-    row_free(&row);
+    if (!workspace) row_free(&row);
     fail(err, off, "invalid record fields");
     return RECORD_CORRUPT;
 }
 
-static int read_record(Table *t, uint64_t off, uint64_t size, Row *out,
-                       uint64_t *next, DbError *err) {
-    unsigned char header[HEADER_SIZE];
-    if (off > size || size - off < HEADER_SIZE) {
+/* Preserve the unconsumed suffix when a header or record crosses a block.
+ * Every refill uses a positional read, never a shared file cursor. */
+static const unsigned char *block_bytes(BlockReader *r, uint64_t off, size_t n, DbError *err) {
+    if (off >= r->base && off - r->base <= r->used &&
+        n <= r->used - (size_t)(off - r->base)) return r->data + (size_t)(off - r->base);
+    size_t keep = 0;
+    if (off >= r->base && off - r->base < r->used) {
+        keep = r->used - (size_t)(off - r->base);
+        memmove(r->data, r->data + (size_t)(off - r->base), keep);
+    }
+    r->base = off; r->used = keep;
+    size_t wanted = r->size - off < MAX_RECORD ? (size_t)(r->size - off) : MAX_RECORD;
+    while (r->used < wanted) {
+        int64_t got = os_read_at(r->table->file, r->data + r->used, wanted - r->used, off + r->used);
+        if (got <= 0) { fail(err, off, "cannot read table block"); return NULL; }
+        r->used += (size_t)got;
+    }
+    if (r->used < n) { fail(err, off, "cannot read table block"); return NULL; }
+    return r->data;
+}
+
+static int all_zero(const unsigned char *p, size_t n) {
+    for (size_t i = 0; i < n; i++) if (p[i]) return 0;
+    return 1;
+}
+
+static int zero_tail(BlockReader *r, uint64_t off, DbError *err) {
+    while (off < r->size) {
+        size_t n = r->size - off < MAX_RECORD ? (size_t)(r->size - off) : MAX_RECORD;
+        const unsigned char *p = block_bytes(r, off, n, err);
+        if (!p) return -1;
+        if (!all_zero(p, n)) return 0;
+        off += n;
+    }
+    return 1;
+}
+
+static int read_record(BlockReader *r, uint64_t off, Row *out, uint64_t *next,
+                       DbError *err) {
+    if (off > r->size || r->size - off < HEADER_SIZE) {
         fail(err, off, "incomplete record header"); return RECORD_INCOMPLETE;
     }
-    if (os_read_at(t->file, header, sizeof header, off) != (int64_t)sizeof header) {
-        fail(err, off, "cannot read record header"); return RECORD_IO;
+    const unsigned char *header = block_bytes(r, off, HEADER_SIZE, err);
+    if (!header) return RECORD_IO;
+    if (all_zero(header, HEADER_SIZE)) {
+        int zeros = zero_tail(r, off, err);
+        if (zeros < 0) return RECORD_IO;
+        fail(err, off, zeros ? "incomplete zero-filled tail" : "invalid record length");
+        return zeros ? RECORD_INCOMPLETE : RECORD_CORRUPT;
     }
-    uint32_t len = get_u32(header);
-    if (len < 8 || len > MAX_RECORD - HEADER_SIZE) {
+    uint32_t len = get_u32(header), crc = get_u32(header + 8);
+    if (get_u32(header + 4) != ~len || len == 0 || len > MAX_RECORD - HEADER_SIZE) {
         fail(err, off, "invalid record length"); return RECORD_CORRUPT;
     }
-    if (len > size - off - HEADER_SIZE) {
+    if (len > r->size - off - HEADER_SIZE) {
         fail(err, off, "incomplete record payload"); return RECORD_INCOMPLETE;
     }
-    unsigned char *payload = malloc(len);
-    if (!payload) { fail(err, off, "out of memory"); return RECORD_IO; }
-    int rc;
-    if (os_read_at(t->file, payload, len, off + HEADER_SIZE) != len) {
-        fail(err, off, "cannot read record payload"); rc = RECORD_IO;
-    } else if (crc32(payload, len) != get_u32(header + 4)) {
-        fail(err, off, "record CRC mismatch"); rc = RECORD_CORRUPT;
-    } else {
-        rc = decode_row(&t->schema, payload, len, out, off, err);
+    const unsigned char *record = block_bytes(r, off, HEADER_SIZE + len, err);
+    if (!record) return RECORD_IO;
+    const unsigned char *payload = record + HEADER_SIZE;
+    if (crc32(payload, len) != crc) {
+        fail(err, off, "record CRC mismatch"); return RECORD_CORRUPT;
     }
-    free(payload);
+    int rc = decode_row(&r->table->schema, payload, len, out, off, &r->row, err);
     if (rc == RECORD_OK) *next = off + HEADER_SIZE + len;
     return rc;
 }
@@ -161,7 +218,13 @@ static int valid_schema(const TableSchema *s) {
 }
 
 Table *table_open(const char *dir, const TableSchema *schema, int repair, DbError *err) {
+    return table_open_with_visitor(dir, schema, repair, NULL, NULL, err);
+}
+
+Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int repair,
+                               TableOpenVisitor visitor, void *ctx, DbError *err) {
     clear_error(err);
+    BlockReader *reader = NULL;
     if (!dir || !valid_schema(schema)) { fail(err, 0, "invalid table path or schema"); return NULL; }
     size_t dir_len = strlen(dir);
     if (dir_len > SIZE_MAX - sizeof schema->name - 6) {
@@ -181,27 +244,38 @@ Table *table_open(const char *dir, const TableSchema *schema, int repair, DbErro
     uint64_t size = os_size(t->file), off = 0;
     int64_t last_id = 0;
     if (size == UINT64_MAX) { fail(err, 0, "cannot get table size"); goto bad; }
+    if (size) {
+        reader = calloc(1, sizeof *reader);
+        if (!reader) { fail(err, 0, "out of memory"); goto bad; }
+        reader->table = t; reader->size = size;
+    }
     while (off < size) {
         Row row = {0}; uint64_t next = 0;
-        int rc = read_record(t, off, size, &row, &next, err);
+        int rc = read_record(reader, off, &row, &next, err);
         if (rc == RECORD_OK && row.id <= last_id) {
             fail(err, off, "record ids are not increasing"); rc = RECORD_CORRUPT;
         }
         if (rc != RECORD_OK) {
-            row_free(&row);
             if (rc != RECORD_INCOMPLETE && !(repair && rc == RECORD_CORRUPT)) goto bad;
             if (os_truncate(t->file, off) || os_sync(t->file)) {
                 fail(err, off, "cannot truncate/sync recovered table"); goto bad;
             }
+            if (rc == RECORD_INCOMPLETE) {
+                fprintf(stderr, "%" PRIu64 " bytes of incomplete tail truncated at offset %" PRIu64 "\n", size - off, off);
+            }
             break;
         }
+        if (visitor && visitor(row.id, off, ctx)) {
+            fail(err, off, "table open visitor failed"); goto bad;
+        }
         last_id = row.id; t->row_count++; off = next;
-        row_free(&row);
     }
+    free(reader);
     t->next_id = last_id == INT64_MAX ? 0 : last_id + 1;
     clear_error(err);
     return t;
 bad:
+    free(reader);
     table_close(t);
     return NULL;
 }
@@ -220,22 +294,23 @@ int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_o
     uint64_t off = os_size(t->file);
     if (off == UINT64_MAX) return fail(err, 0, "cannot get table size");
     if (t->write_failed) return fail(err, off, "table needs reopening after rollback failure");
-    if (!t->next_id) return fail(err, off, "id space exhausted");
+    if (!t->next_id) return sql_fail(err, off, "id space exhausted");
     size_t len = 8;
     for (int i = 1; i < t->schema.ncols; i++) {
         const Value *v = &fields[i - 1];
-        if (v->type != t->schema.cols[i].type) return fail(err, off, "field type mismatch");
+        if (v->type != t->schema.cols[i].type) return sql_fail(err, off, "field type mismatch");
         if (v->type == TYPE_TEXT && (v->len > MAX_TEXT || (v->len && !v->s))) {
-            return fail(err, off, "invalid TEXT (maximum 64 KiB)");
+            return sql_fail(err, off, "invalid TEXT (maximum 64 KiB)");
         }
         size_t field_len = v->type == TYPE_INT ? 8 : 4 + (size_t)v->len;
-        if (field_len > MAX_RECORD - HEADER_SIZE - len) return fail(err, off, "record exceeds 1 MiB");
+        if (field_len > MAX_RECORD - HEADER_SIZE - len) return sql_fail(err, off, "record exceeds 1 MiB");
         len += field_len;
     }
     if (off > UINT64_MAX - HEADER_SIZE - len) return fail(err, off, "table size overflow");
     unsigned char *record = malloc(HEADER_SIZE + len);
     if (!record) return fail(err, off, "out of memory");
     put_u32(record, (uint32_t)len);
+    put_u32(record + 4, ~(uint32_t)len);
     put_i64(record + HEADER_SIZE, t->next_id);
     size_t pos = HEADER_SIZE + 8;
     for (int i = 1; i < t->schema.ncols; i++) {
@@ -247,14 +322,14 @@ int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_o
             pos += v->len;
         }
     }
-    put_u32(record + 4, crc32(record + HEADER_SIZE, len));
+    put_u32(record + 8, crc32(record + HEADER_SIZE, len));
     int rc = os_append(t->file, record, HEADER_SIZE + len, NULL);
     free(record);
     if (rc) return rollback(t, off, err, "cannot append record");
     if (t->sync_always && os_sync(t->file)) return rollback(t, off, err, "cannot sync record");
     if (id_out) *id_out = t->next_id;
     if (off_out) *off_out = off;
-    t->row_count++;
+    t->row_count++; t->written++;
     t->next_id = t->next_id == INT64_MAX ? 0 : t->next_id + 1;
     return 0;
 }
@@ -264,9 +339,24 @@ int table_read_at(Table *t, uint64_t off, Row *out, DbError *err) {
     if (!out) return fail(err, off, "missing row output");
     *out = (Row){0};
     if (!t) return fail(err, off, "missing table");
-    uint64_t size = os_size(t->file), next;
+    uint64_t size = os_size(t->file);
     if (size == UINT64_MAX) return fail(err, off, "cannot get table size");
-    return read_record(t, off, size, out, &next, err) == RECORD_OK ? 0 : -1;
+    /* A point read needs only this record, not a full scan workspace. It never
+     * repairs the file; incomplete and corrupt inputs both return an error. */
+    unsigned char header[HEADER_SIZE];
+    if (off > size || size - off < HEADER_SIZE) return fail(err, off, "incomplete record header");
+    if (os_read_at(t->file, header, HEADER_SIZE, off) != HEADER_SIZE) return fail(err, off, "cannot read record header");
+    uint32_t len = get_u32(header);
+    if (get_u32(header + 4) != ~len || !len || len > MAX_RECORD - HEADER_SIZE) return fail(err, off, "invalid record length");
+    if (len > size - off - HEADER_SIZE) return fail(err, off, "incomplete record payload");
+    unsigned char *payload = malloc(len);
+    if (!payload) return fail(err, off, "out of memory");
+    int rc;
+    if (os_read_at(t->file, payload, len, off + HEADER_SIZE) != len) rc = fail(err, off, "cannot read record payload");
+    else if (crc32(payload, len) != get_u32(header + 8)) rc = fail(err, off, "record CRC mismatch");
+    else rc = decode_row(&t->schema, payload, len, out, off, NULL, err);
+    free(payload);
+    return rc == RECORD_OK ? 0 : -1;
 }
 
 int table_scan(Table *t, RowVisitor visitor, void *ctx, DbError *err) {
@@ -274,15 +364,20 @@ int table_scan(Table *t, RowVisitor visitor, void *ctx, DbError *err) {
     if (!t || !visitor) return fail(err, 0, "missing table or visitor");
     uint64_t size = os_size(t->file), off = 0;
     if (size == UINT64_MAX) return fail(err, 0, "cannot get table size");
+    if (!size) return 0;
+    BlockReader *reader = calloc(1, sizeof *reader);
+    if (!reader) return fail(err, 0, "out of memory");
+    reader->table = t; reader->size = size;
+    int rc = 0;
     while (off < size) {
         Row row = {0}; uint64_t next;
-        if (read_record(t, off, size, &row, &next, err) != RECORD_OK) return -1;
+        if (read_record(reader, off, &row, &next, err) != RECORD_OK) { rc = -1; break; }
         int stop = visitor(&row, off, ctx);
-        row_free(&row);
-        if (stop) return 0;
+        if (stop) break;
         off = next;
     }
-    return 0;
+    free(reader);
+    return rc;
 }
 
 void table_close(Table *t) {
@@ -296,3 +391,4 @@ int table_read_lock(Table *t) { return pthread_rwlock_rdlock(&t->lock); }
 int table_write_lock(Table *t) { return pthread_rwlock_wrlock(&t->lock); }
 int table_unlock(Table *t) { return pthread_rwlock_unlock(&t->lock); }
 void table_set_sync(Table *t, int sync_always) { t->sync_always = sync_always != 0; }
+uint64_t table_rows_written(const Table *t) { return t->written; }

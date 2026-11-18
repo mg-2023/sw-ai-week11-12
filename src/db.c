@@ -14,7 +14,9 @@ struct Db {
 
 static int fail(DbError *err, int line, int col, const char *message) {
     if (err) {
-        err->line = line; err->col = col;
+        (void)line; (void)col;
+        err->kind = DB_ERROR_INTERNAL;
+        err->line = 0; err->col = 0;
         snprintf(err->message, sizeof err->message, "%s", message);
     }
     return -1;
@@ -34,6 +36,11 @@ void db_close(Db *db) {
 Db *db_open(const char *dir, DbOptions options, DbError *err) {
     if (err) *err = (DbError){0};
     if (!dir) { fail(err, 0, 0, "missing database directory"); return NULL; }
+    if (!os_is_directory(dir)) {
+        fail(err, 0, 0, "data directory not found");
+        if (err) snprintf(err->message, sizeof err->message, "data directory not found: %s", dir);
+        return NULL;
+    }
     Db *db = calloc(1, sizeof *db);
     if (!db) { fail(err, 0, 0, "out of memory"); return NULL; }
     if (os_lock_dir(dir)) { fail(err, 0, 0, "cannot lock database directory (already open or unavailable)"); goto bad; }
@@ -107,7 +114,7 @@ int db_execute_sql(Db *db, const char *sql, Result *out) {
         int rc = parse_sql(chunk, &statements, &out->err);
         free(chunk);
         if (rc) {
-            absolute_position(&out->err.line, &out->err.col, line, col);
+            if (out->err.kind == DB_ERROR_SQL) absolute_position(&out->err.line, &out->err.col, line, col);
             goto bad;
         }
         if (statements.n) {
@@ -128,7 +135,10 @@ int db_execute_sql(Db *db, const char *sql, Result *out) {
                 out->items = items; capacity = next;
             }
             const TableSchema *schema = catalog_find(&db->catalog, s->table);
-            if (!schema) rc = fail(&out->err, s->line, s->col, "unknown table");
+            if (!schema) {
+                rc = fail(&out->err, s->line, s->col, "unknown table");
+                out->err.kind = DB_ERROR_SQL; out->err.line = s->line; out->err.col = s->col;
+            }
             else rc = executor_execute(db->tables[schema - db->catalog.tables], schema, s, &out->items[out->n], &out->err);
             statements_free(&statements);
             if (rc) goto bad;
@@ -147,4 +157,10 @@ bad:
     out->failed_index = out->n;
     out->elapsed_us = os_now_us() - start;
     return -1;
+}
+
+uint64_t db_rows_written(const Db *db) {
+    uint64_t count = 0;
+    for (int i = 0; i < db->catalog.n; i++) count += table_rows_written(db->tables[i]);
+    return count;
 }

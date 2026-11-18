@@ -32,6 +32,28 @@ static void test_concurrent_read_at(void) {
     for (int i = 0; i < 8; i++) { ASSERT(pthread_join(threads[i], NULL) == 0); ASSERT(r[i].ok); }
     os_close(f);
 }
+typedef struct { int fd, i, ok; } DirectReader;
+static void *pread_many(void *ctx) {
+    DirectReader *r = ctx; r->ok = 1;
+    for (int i = 0; i < 1000; i++) {
+        char c;
+        if (os_pread(r->fd, &c, 1, (uint64_t)r->i) != 1 || c != '0' + r->i) { r->ok = 0; break; }
+    }
+    return NULL;
+}
+static void test_concurrent_pread_preserves_fd_cursor(void) {
+    OsFile *f = fresh(); ASSERT(f && os_append(f, "01234567", 8, NULL) == 0);
+    int fd = open("build/os-test.bin", O_RDONLY | O_BINARY);
+    ASSERT(fd >= 0 && lseek(fd, 3, SEEK_SET) == 3);
+    pthread_t threads[8]; DirectReader readers[8];
+    for (int i = 0; i < 8; i++) {
+        readers[i] = (DirectReader){fd, i, 0};
+        ASSERT(pthread_create(&threads[i], NULL, pread_many, &readers[i]) == 0);
+    }
+    for (int i = 0; i < 8; i++) ASSERT(pthread_join(threads[i], NULL) == 0 && readers[i].ok);
+    ASSERT(lseek(fd, 0, SEEK_CUR) == 3);
+    close(fd); os_close(f);
+}
 static void test_append_returns_offset(void) { OsFile *f = fresh(); uint64_t a, b; ASSERT(f); ASSERT(!os_append(f, "abc", 3, &a) && !os_append(f, "de", 2, &b)); ASSERT(a == 0 && b == 3 && os_size(f) == 5); ASSERT(!os_sync(f)); os_close(f); }
 static void test_truncate(void) { OsFile *f = fresh(); ASSERT(f && !os_append(f, "abc", 3, NULL)); ASSERT(!os_truncate(f, 1) && os_size(f) == 1); os_close(f); }
 static void test_now_us_monotonic(void) { uint64_t a = os_now_us(); for (int i = 0; i < 10000; i++) { uint64_t b = os_now_us(); ASSERT(b >= a); a = b; } }
@@ -44,6 +66,7 @@ static void test_lock_dir_twice_fails(void) {
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--lock-child")) { int rc = os_lock_dir("build"); if (!rc) os_unlock_dir(); return rc == -1 ? 0 : 1; }
     if (os_init()) return 1;
+    RUN(test_concurrent_pread_preserves_fd_cursor);
     RUN(test_read_at_does_not_move); RUN(test_concurrent_read_at); RUN(test_append_returns_offset); RUN(test_truncate); RUN(test_now_us_monotonic); RUN(test_lock_dir_twice_fails);
     os_cleanup(); return test_finish();
 }

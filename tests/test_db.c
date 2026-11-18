@@ -61,7 +61,7 @@ static void expect_error(const char *sql, const char *message) {
     Result r = {0};
     ASSERT(db_execute_sql(db, sql, &r) == -1);
     ASSERT(!r.ok && r.n == 0 && r.committed == 0 && r.failed_index == 0);
-    ASSERT(r.err.line > 0 && r.err.col > 0 && strstr(r.err.message, message));
+    ASSERT(r.err.kind == DB_ERROR_SQL && r.err.line > 0 && r.err.col > 0 && strstr(r.err.message, message));
     result_free(&r);
 }
 
@@ -178,16 +178,18 @@ static void test_open_failure_releases_lock(void) {
     ASSERT(db_open("build", (DbOptions){0}, &err) == NULL && err.message[0]);
     ASSERT(fresh(0)); db_close(db); db = NULL;
     /* Fail on the last table, after earlier tables have already been opened. */
-    FILE *f = fopen("build/moves.tbl", "wb"); ASSERT(f); ASSERT(fwrite("bad data", 1, 8, f) == 8); fclose(f);
+    FILE *f = fopen("build/moves.tbl", "wb"); ASSERT(f); ASSERT(fwrite("bad data data", 1, 13, f) == 13); fclose(f);
     ASSERT(db_open("build", (DbOptions){0}, &err) == NULL && strstr(err.message, "offset"));
     db = db_open("build", (DbOptions){.repair = 1}, &err); ASSERT(db);
 }
 static void test_sync_option_and_io_failure(void) {
     ASSERT(fresh(1)); Result r = {0}; os_test_fail_sync();
-    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('bad',1)", &r) == -1 && r.err.line == 1 && strstr(r.err.message, "sync")); result_free(&r);
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('bad',1)", &r) == -1 && r.err.kind == DB_ERROR_INTERNAL && r.err.line == 0 && r.err.col == 0 && strstr(r.err.message, "sync")); result_free(&r);
     ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('ok',2)", &r) == 0 && r.items[0].inserted_ids[0] == 1); result_free(&r);
     os_test_fail_append();
-    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('bad',3)", &r) == -1); result_free(&r);
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('bad',3)", &r) == -1 && r.err.kind == DB_ERROR_INTERNAL); result_free(&r);
+    os_test_fail_read();
+    ASSERT(db_execute_sql(db, "SELECT * FROM users", &r) == -1 && r.err.kind == DB_ERROR_INTERNAL && !r.err.line && !r.err.col); result_free(&r);
     ASSERT(db_execute_sql(db, "SELECT * FROM users", &r) == 0 && r.items[0].nrows == 1); result_free(&r);
     ASSERT(fresh(0)); os_test_fail_sync();
     ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('no_sync',1)", &r) == 0); result_free(&r);

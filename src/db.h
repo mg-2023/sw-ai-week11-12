@@ -12,6 +12,9 @@ typedef struct Db Db;
  */
 Db *db_open(const char *dir, DbOptions options, DbError *err);
 void db_close(Db *db);
+/* Successful appends during this open session, including partial INSERTs.
+ * Call after execution has stopped (used by the CLI durability warning). */
+uint64_t db_rows_written(const Db *db);
 /* Use an empty output. Statements execute in order, including when a later
  * statement cannot be parsed. Errors carry original SQL line/byte-column.
  * Concurrent calls may share Db, but must use separate Result objects.

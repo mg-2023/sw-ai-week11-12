@@ -19,8 +19,15 @@ static int fail(DbError *err, int line, int col, const char *message) {
     if (err) {
         err->line = line;
         err->col = col;
+        err->kind = DB_ERROR_SQL;
         snprintf(err->message, sizeof err->message, "%s", message);
     }
+    return -1;
+}
+
+static int internal(DbError *err, const char *message) {
+    fail(err, 0, 0, message);
+    if (err) err->kind = DB_ERROR_INTERNAL;
     return -1;
 }
 
@@ -85,7 +92,7 @@ static int scan_string(Scanner *s, Token *t, DbError *err) {
         advance(s);
     }
     char *decoded = malloc((size_t)len + 1);
-    if (!decoded) return fail(err, t->line, t->col, "out of memory");
+    if (!decoded) return internal(err, "out of memory");
     for (uint32_t i = 0; i < len; i++) {
         decoded[i] = *content++;
         if (decoded[i] == '\'') content++; /* Doubled quote. */
@@ -100,11 +107,11 @@ static int scan_string(Scanner *s, Token *t, DbError *err) {
 static int push(TokenList *list, size_t *capacity, Token token, DbError *err) {
     if (list->n == *capacity) {
         if (*capacity > SIZE_MAX / 2 / sizeof *list->items) {
-            return fail(err, token.line, token.col, "too many tokens");
+            return internal(err, "too many tokens");
         }
         size_t next = *capacity ? *capacity * 2 : 32;
         Token *items = realloc(list->items, next * sizeof *items);
-        if (!items) return fail(err, token.line, token.col, "out of memory");
+        if (!items) return internal(err, "out of memory");
         list->items = items;
         *capacity = next;
     }

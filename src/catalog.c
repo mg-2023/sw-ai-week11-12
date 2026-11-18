@@ -15,9 +15,26 @@ static int fail_at(CatalogReader *r, int col, const char *message) {
     if (r->err) {
         r->err->line = r->line;
         r->err->col = col;
+        r->err->kind = DB_ERROR_SQL;
         snprintf(r->err->message, sizeof r->err->message, "%s", message);
     }
     return -1;
+}
+
+static int internal(CatalogReader *r, const char *message) {
+    fail_at(r, 0, message);
+    if (r->err) { r->err->kind = DB_ERROR_INTERNAL; r->err->line = r->err->col = 0; }
+    return -1;
+}
+
+static int same_table_name(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        int x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x += 'a' - 'A';
+        if (y >= 'A' && y <= 'Z') y += 'a' - 'A';
+        if (x != y) return 0;
+    }
+    return *a == *b;
 }
 
 static void advance(CatalogReader *r) {
@@ -83,7 +100,9 @@ void catalog_free(Catalog *catalog) {
 static int read_schema(CatalogReader *r, const Catalog *catalog, TableSchema *schema) {
     int col = r->col;
     if (identifier(r, schema->name, "expected table identifier")) return -1;
-    if (catalog_find(catalog, schema->name)) return fail_at(r, col, "duplicate table name");
+    for (int i = 0; i < catalog->n; i++) {
+        if (same_table_name(catalog->tables[i].name, schema->name)) return fail_at(r, col, "duplicate table name");
+    }
     skip_space(r);
     if (r->ch != ':') return fail_at(r, r->col, "expected ':' after table name");
     advance(r);
@@ -130,16 +149,16 @@ static int read_catalog(CatalogReader *r, Catalog *out) {
         if ((size_t)out->n == capacity) {
             size_t next = capacity ? capacity * 2 : 4;
             if (next > INT_MAX || next > SIZE_MAX / sizeof *out->tables) {
-                return fail_at(r, r->col, "too many tables");
+                return internal(r, "too many tables");
             }
             TableSchema *tables = realloc(out->tables, next * sizeof *tables);
-            if (!tables) return fail_at(r, r->col, "out of memory");
+            if (!tables) return internal(r, "out of memory");
             out->tables = tables;
             capacity = next;
         }
         out->tables[out->n++] = schema;
     }
-    if (ferror(r->file)) return fail_at(r, r->col, "cannot read catalog file");
+    if (ferror(r->file)) return internal(r, "cannot read catalog file");
     return 0;
 }
 
@@ -150,10 +169,10 @@ int catalog_load(const char *path, Catalog *out, DbError *err) {
     *out = (Catalog){0};
     if (!path) return fail_at(&r, 1, "missing catalog path");
     r.file = fopen(path, "rb");
-    if (!r.file) return fail_at(&r, 1, "cannot open catalog file");
+    if (!r.file) return internal(&r, "cannot open catalog file");
     r.ch = fgetc(r.file);
     int rc = read_catalog(&r, out);
-    if (fclose(r.file) != 0 && rc == 0) rc = fail_at(&r, r.col, "cannot close catalog file");
+    if (fclose(r.file) != 0 && rc == 0) rc = internal(&r, "cannot close catalog file");
     if (rc) catalog_free(out);
     return rc;
 }

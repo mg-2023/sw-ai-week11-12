@@ -13,6 +13,7 @@ static int fail_at(DbError *err, int line, int col, const char *message) {
     if (err) {
         err->line = line;
         err->col = col;
+        err->kind = DB_ERROR_SQL;
         snprintf(err->message, sizeof err->message, "%s", message);
     }
     return -1;
@@ -21,6 +22,12 @@ static int fail_at(DbError *err, int line, int col, const char *message) {
 static int fail(Parser *p, const char *message) {
     Token *t = current(p);
     return fail_at(p->err, t->line, t->col, message);
+}
+
+static int internal(Parser *p, const char *message) {
+    fail_at(p->err, 0, 0, message);
+    if (p->err) p->err->kind = DB_ERROR_INTERNAL;
+    return -1;
 }
 
 static int match(Parser *p, TokenKind kind) {
@@ -91,7 +98,7 @@ static int append_value(Parser *p, Statement *s, size_t *n, size_t *capacity) {
         }
         size_t next = *capacity ? *capacity * 2 : 16;
         Value *values = realloc(s->values, next * sizeof *values);
-        if (!values) return fail(p, "out of memory");
+        if (!values) return internal(p, "out of memory");
         s->values = values;
         *capacity = next;
     }
@@ -157,7 +164,7 @@ static int append_statement(Parser *p, StatementList *list, size_t *capacity, St
         }
         size_t next = *capacity ? *capacity * 2 : 4;
         Statement *items = realloc(list->items, next * sizeof *items);
-        if (!items) return fail(p, "out of memory");
+        if (!items) return internal(p, "out of memory");
         list->items = items;
         *capacity = next;
     }

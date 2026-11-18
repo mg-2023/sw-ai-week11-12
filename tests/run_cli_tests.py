@@ -12,7 +12,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / "build" / "mini-dbms.exe"
 FIXTURES = ROOT / "tests" / "sql"
-UNSYNCED = "warning: --sync none: acknowledged writes may be lost on crash\n"
+UNSYNCED = "warning: --sync none: rows written since the last synchronization may be lost on OS failure; rows written this run: {}\n"
 
 
 def normalize(text):
@@ -81,7 +81,11 @@ def test_defaults_and_reopen():
 def test_sync_none():
     with database() as (work, data):
         expect(invoke(work, ["run", "-", "--sync", "none", "--data", data], b"SELECT id FROM users;"), 0,
-               "id\n--\n(0 rows, plan=scan, examined=0, <time> ms)\n", UNSYNCED)
+               "id\n--\n(0 rows, plan=scan, examined=0, <time> ms)\n", UNSYNCED.format(0))
+        expect(invoke(work, ["run", "-", "--sync", "none", "--data", data],
+                      b"INSERT INTO users VALUES ('a',1),('b',2); SELECT * FROM absent;"), 1,
+               "(2 rows inserted, ids=1,2, <time> ms)\nerror at 1:43: unknown table\n(1 statement committed before error)\n",
+               UNSYNCED.format(2))
 
 
 def test_empty_and_bom_input():
@@ -95,7 +99,7 @@ def test_empty_and_bom_input():
 def test_input_errors():
     with database() as (work, _):
         rc, out, err = invoke(work, ["run", "missing.sql"])
-        assert rc == 1 and out.startswith("error at 0:0: cannot open SQL file") and not err, (rc, out, err)
+        assert rc == 1 and out.startswith("internal error: cannot open SQL file") and not err, (rc, out, err)
         expect(invoke(work, ["run", "-"], b"SELECT id FROM users;\x00INSERT INTO users VALUES ('hidden',1);"),
                1, "error at 0:0: SQL input contains NUL byte\n")
 
@@ -116,7 +120,7 @@ def test_open_error():
     with database() as (work, data):
         (data / "catalog.txt").unlink()
         rc, out, err = invoke(work, ["run", "-"], b"SELECT id FROM users;")
-        assert rc == 1 and re.fullmatch(r"error at [0-9]+:[0-9]+: cannot open catalog file\n", out) and not err, (rc, out, err)
+        assert rc == 1 and out == "internal error: cannot open catalog file\n" and not err, (rc, out, err)
 
 
 def test_recovery_and_repair():
@@ -127,9 +131,11 @@ def test_recovery_and_repair():
         stored = table.read_bytes()
         # Incomplete final record is truncated automatically.
         table.write_bytes(stored[:-5])
+        first_end = 12 + int.from_bytes(stored[:4], "little")
+        second_end = first_end + 12 + int.from_bytes(stored[first_end:first_end + 4], "little")
         expect(invoke(work, ["run", "-"], b"SELECT id FROM users;"), 0,
-               "id\n--\n1\n2\n(2 rows, plan=scan, examined=2, <time> ms)\n")
-        first_end = 8 + int.from_bytes(stored[:4], "little")
+               "id\n--\n1\n2\n(2 rows, plan=scan, examined=2, <time> ms)\n",
+               f"{len(stored) - 5 - second_end} bytes of incomplete tail truncated at offset {second_end}\n")
         damaged = bytearray(stored)
         damaged[first_end + 16] ^= 1  # Second payload, preserving length/header.
         table.write_bytes(damaged)
@@ -139,6 +145,105 @@ def test_recovery_and_repair():
         expect(invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;"), 0,
                "id\n--\n1\n(1 row, plan=scan, examined=1, <time> ms)\n")
         assert table.stat().st_size == first_end
+
+
+def test_binary_stdin_control_z():
+    sql = b"INSERT INTO users VALUES ('a',1);\x1aINSERT INTO users VALUES ('b',2);"
+    results = []
+    for stdin in (False, True):
+        with database() as (work, data):
+            path = work / "input.sql"
+            path.write_bytes(sql)
+            result = invoke(work, ["run", "-" if stdin else path], sql if stdin else None)
+            assert result[0] == 1 and "error at 1:34: unexpected character" in result[1], result
+            assert "(1 statement committed before error)" in result[1], result
+            results.append((result, (data / "users.tbl").read_bytes()))
+    assert results[0] == results[1], results
+
+
+def test_binary_stdin_crlf():
+    stored = []
+    for stdin in (False, True):
+        with database() as (work, data):
+            sql = b"INSERT INTO users VALUES ('x\r\ny',1);"
+            path = work / "input.sql"
+            path.write_bytes(sql)
+            assert invoke(work, ["run", "-" if stdin else path], sql if stdin else None)[0] == 0
+            raw = (data / "users.tbl").read_bytes()
+            assert int.from_bytes(raw[20:24], "little") == 4 and raw[24:28] == b"x\r\ny", raw
+            stored.append(raw)
+    assert stored[0] == stored[1]
+
+
+def test_length_corruption_refuses_and_repairs():
+    with database() as (work, data):
+        assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('a',1),('b',2),('c',3);")[0] == 0
+        table = data / "users.tbl"
+        raw = table.read_bytes()
+        first_end = 12 + int.from_bytes(raw[:4], "little")
+        for off in (0, first_end):
+            damaged = bytearray(raw)
+            damaged[off + 2] ^= 0x08
+            table.write_bytes(damaged)
+            rc, out, err = invoke(work, ["run", "-"], b"SELECT id FROM users;")
+            assert rc == 1 and out.startswith("internal error:") and f"offset {off}" in out and not err, (rc, out, err)
+            assert table.read_bytes() == damaged
+            rc, out, err = invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;")
+            assert rc == 0 and f"({int(off != 0)} row" in out and not err, (rc, out, err)
+            assert table.read_bytes() == raw[:off]
+
+
+def test_incomplete_tails():
+    with database() as (work, data):
+        assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('a',1);")[0] == 0
+        table = data / "users.tbl"
+        raw = table.read_bytes()
+        for tail in [raw[:n] for n in range(1, 12)] + [bytes(40), raw[:-1], bytes(1024 * 1024 + 7)]:
+            table.write_bytes(raw + tail)
+            rc, out, err = invoke(work, ["run", "-"], b"SELECT id FROM users;")
+            assert rc == 0 and "(1 row," in out, (rc, out, err)
+            assert err == f"{len(tail)} bytes of incomplete tail truncated at offset {len(raw)}\n", err
+            assert table.read_bytes() == raw
+        # A zero-looking header with later nonzero bytes is corruption, not padding.
+        tail = bytes(40) + b"x"
+        table.write_bytes(raw + tail)
+        assert invoke(work, ["run", "-"], b"")[0] == 1
+        assert table.read_bytes() == raw + tail
+
+
+def test_invalid_length_guards():
+    with database() as (work, data):
+        assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('a',1);")[0] == 0
+        table = data / "users.tbl"
+        raw = table.read_bytes()
+        for length in (0, 1024 * 1024 - 11, 0xffffffff):
+            damaged = (length.to_bytes(4, "little") + (length ^ 0xffffffff).to_bytes(4, "little") + raw[8:])
+            table.write_bytes(damaged)
+            rc, out, err = invoke(work, ["run", "-"], b"")
+            assert rc == 1 and "invalid record length" in out and not err, (rc, out, err)
+            assert table.read_bytes() == damaged
+        damaged = bytearray(raw)
+        damaged[4] ^= 1
+        table.write_bytes(damaged)
+        assert invoke(work, ["run", "-"], b"")[0] == 1
+        assert table.read_bytes() == damaged
+
+
+def test_catalog_names():
+    for catalog in ("t: id INT\nT: id INT\n", "bad-name: id INT\n", "9bad: id INT\n",
+                    "../bad: id INT\n", "bad/name: id INT\n", "한글: id INT\n"):
+        with database() as (work, data):
+            (data / "catalog.txt").write_text(catalog, encoding="utf-8")
+            rc, out, err = invoke(work, ["run", "-"], b"")
+            assert rc == 1 and out and not err, (catalog, rc, out, err)
+            assert not list(data.glob("*.tbl"))
+
+
+def test_missing_data_directory():
+    with database() as (work, _):
+        missing = work / "missing"
+        expect(invoke(work, ["run", "-", "--data", missing], b""), 1,
+               f"internal error: data directory not found: {missing}\n")
 
 
 def test_parse_error_commits_prefix():
@@ -164,6 +269,9 @@ def main():
         test_defaults_and_reopen, test_sync_none, test_empty_and_bom_input,
         test_input_errors, test_invalid_arguments, test_open_error,
         test_recovery_and_repair, test_parse_error_commits_prefix, test_large_input,
+        test_binary_stdin_control_z, test_binary_stdin_crlf,
+        test_length_corruption_refuses_and_repairs, test_incomplete_tails,
+        test_invalid_length_guards, test_catalog_names, test_missing_data_directory,
     )]
     passed = failed = 0
     for name, test in tests:

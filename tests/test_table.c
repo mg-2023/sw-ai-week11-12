@@ -114,7 +114,7 @@ static void test_truncated_tail_recovered(void) {
 
 static void test_partial_header_recovered(void) {
     uint64_t offsets[3], size; DbError err = {0};
-    for (uint64_t n = 1; n < 8; n++) {
+    for (uint64_t n = 1; n < 12; n++) {
         ASSERT(populate(offsets, &err) == 0 && truncate_to(offsets[2] + n) == 0);
         Table *t = table_open("build", &schema, 0, &err);
         ASSERT(t && file_size(&size) == 0 && size == offsets[2]);
@@ -209,7 +209,7 @@ static void test_sync_failure_rolls_back(void) {
 
 /* Independent little-endian fixture; CRC32/IEEE for id=1, TEXT='a', INT=-2. */
 static const unsigned char fixture[] = {
-    21,0,0,0, 0x9c,0x0a,0x9c,0xc0,
+    21,0,0,0, 0xea,0xff,0xff,0xff, 0x9c,0x0a,0x9c,0xc0,
     1,0,0,0,0,0,0,0, 1,0,0,0,'a', 0xfe,0xff,0xff,0xff,0xff,0xff,0xff,0xff
 };
 static int write_bytes(const unsigned char *bytes, size_t len) {
@@ -261,7 +261,7 @@ static void test_crc_valid_malformed_fields(void) {
      * leaving only 7 bytes for the final INT. CRC success must not bypass bounds. */
     unsigned char bad[sizeof fixture]; memcpy(bad, fixture, sizeof bad);
     const unsigned char crc[] = {0x52, 0x66, 0x56, 0x7d};
-    memcpy(bad + 4, crc, sizeof crc); bad[16] = 2;
+    memcpy(bad + 8, crc, sizeof crc); bad[20] = 2;
     DbError err = {0}; uint64_t size;
     ASSERT(write_bytes(bad, sizeof bad) == 0);
     ASSERT(table_open("build", &schema, 0, &err) == NULL && strstr(err.message, "fields"));
@@ -273,8 +273,8 @@ static void test_crc_valid_malformed_fields(void) {
 static void test_id_exhaustion_after_reopen(void) {
     unsigned char max_id[sizeof fixture]; memcpy(max_id, fixture, sizeof max_id);
     const unsigned char crc[] = {0xd6, 0x52, 0xde, 0x54};
-    memcpy(max_id + 4, crc, sizeof crc);
-    memset(max_id + 8, 0xff, 7); max_id[15] = 0x7f;
+    memcpy(max_id + 8, crc, sizeof crc);
+    memset(max_id + 12, 0xff, 7); max_id[19] = 0x7f;
     DbError err = {0}; uint64_t size; int64_t id = -1; Row row = {0};
     ASSERT(write_bytes(max_id, sizeof max_id) == 0);
     Table *t = table_open("build", &schema, 0, &err);
@@ -305,8 +305,8 @@ static void test_record_exact_size_boundary(void) {
         wide.cols[i + 1].type = TYPE_TEXT;
         fields[i] = (Value){.type = TYPE_TEXT, .s = text, .len = 65536};
     }
-    /* 8-byte header + 8-byte id + 16 length prefixes + TEXT = exactly 1 MiB. */
-    fields[15].len = 65456;
+    /* 12-byte header + 8-byte id + 16 length prefixes + TEXT = exactly 1 MiB. */
+    fields[15].len = 65452;
     remove(path); DbError err = {0}; uint64_t size; int64_t id = -1;
     Table *t = table_open("build", &wide, 0, &err); ASSERT(t);
     ASSERT(table_append(t, fields, &id, NULL, &err) == 0 && id == 1);
@@ -315,9 +315,46 @@ static void test_record_exact_size_boundary(void) {
     ASSERT(table_append(t, fields, &id, NULL, &err) == -1 && id == 1);
     ASSERT(file_size(&size) == 0 && size == 1024 * 1024);
     table_close(t); t = table_open("build", &wide, 0, &err); Row row = {0};
-    ASSERT(t && table_read_at(t, 0, &row, &err) == 0 && row.n == 17 && row.fields[16].len == 65456);
+    ASSERT(t && table_read_at(t, 0, &row, &err) == 0 && row.n == 17 && row.fields[16].len == 65452);
     for (int i = 1; i < row.n; i++) ASSERT(memcmp(row.fields[i].s, text, row.fields[i].len) == 0);
     row_free(&row); table_close(t); free(text);
+}
+
+typedef struct { int count, ok; } WideCheck;
+static int check_wide_row(const Row *row, uint64_t off, void *ctx) {
+    WideCheck *c = ctx;
+    int index = c->count++;
+    if (row->id != index + 1 || (index == 0 ? off != 0 : off != 52u + (uint64_t)(index - 1) * 524340u)) c->ok = 0;
+    for (int i = 1; i < 9; i++) {
+        uint32_t len = index == 0 ? 0 : 65536;
+        if (row->fields[i].len != len || row->fields[i].s[len] != '\0') c->ok = 0;
+        for (uint32_t j = 0; j < len; j++) if (row->fields[i].s[j] != (char)('a' + i - 1)) c->ok = 0;
+    }
+    return 0;
+}
+static int fail_open_visitor(int64_t id, uint64_t off, void *ctx) {
+    (void)id; (void)off; (void)ctx; return -1;
+}
+static void test_block_payload_boundary_and_callback_failure(void) {
+    TableSchema wide = {.name = "task5_table", .cols = {{"id", TYPE_INT}}, .ncols = 9};
+    Value fields[8]; char *text = malloc(8 * 65536); ASSERT(text);
+    for (int i = 0; i < 8; i++) {
+        wide.cols[i + 1].type = TYPE_TEXT;
+        memset(text + i * 65536, 'a' + i, 65536);
+        fields[i] = (Value){.type = TYPE_TEXT, .s = text + i * 65536};
+    }
+    remove(path); DbError err = {0}; Table *t = table_open("build", &wide, 0, &err); ASSERT(t);
+    table_set_sync(t, 0);
+    ASSERT(table_append(t, fields, NULL, NULL, &err) == 0);
+    for (int i = 0; i < 8; i++) fields[i].len = 65536;
+    for (int i = 0; i < 3; i++) ASSERT(table_append(t, fields, NULL, NULL, &err) == 0);
+    table_close(t);
+    uint64_t before, after; ASSERT(file_size(&before) == 0);
+    ASSERT(table_open_with_visitor("build", &wide, 1, fail_open_visitor, NULL, &err) == NULL);
+    ASSERT(err.kind == DB_ERROR_INTERNAL && file_size(&after) == 0 && before == after);
+    t = table_open("build", &wide, 0, &err); ASSERT(t);
+    WideCheck c = {.ok = 1}; ASSERT(table_scan(t, check_wide_row, &c, &err) == 0 && c.ok && c.count == 4);
+    table_close(t); free(text);
 }
 
 typedef struct { Table *t; uint64_t off; int64_t id; int ok; } Reader;
@@ -344,7 +381,48 @@ static void test_concurrent_read_at(void) {
     table_close(t);
 }
 
+typedef struct { int count, ok; uint64_t end; } BlockCheck;
+static int check_open_id(int64_t id, uint64_t off, void *ctx) {
+    BlockCheck *c = ctx;
+    if (id != c->count + 1 || off != c->end) c->ok = 0;
+    c->count++; c->end += 33;
+    return 0;
+}
+static int check_block_row(const Row *row, uint64_t off, void *ctx) {
+    BlockCheck *c = ctx;
+    check_open_id(row->id, off, ctx);
+    if (row->fields[1].len != 1 || strcmp(row->fields[1].s, "a") || row->fields[2].i != 20) c->ok = 0;
+    return 0;
+}
+static void *scan_blocks(void *ctx) {
+    Table *t = ctx; BlockCheck c = {.ok = 1}; DbError err = {0};
+    int rc = table_scan(t, check_block_row, &c, &err);
+    return rc == 0 && c.ok && c.count == 40000 ? NULL : t;
+}
+static void test_block_scan_open_callback_and_concurrency(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    table_set_sync(t, 0);
+    for (int i = 0; i < 40000; i++) ASSERT(append_row(t, "a", 1, 20, NULL, NULL, &err) == 0);
+    table_close(t);
+    BlockCheck c = {.ok = 1}; os_test_reset_reads();
+    t = table_open_with_visitor("build", &schema, 0, check_open_id, &c, &err);
+    ASSERT(t && c.ok && c.count == 40000 && os_test_read_calls() <= 4);
+    os_test_reset_reads();
+    pthread_t threads[4];
+    for (int i = 0; i < 4; i++) ASSERT(pthread_create(&threads[i], NULL, scan_blocks, t) == 0);
+    for (int i = 0; i < 4; i++) { void *result; ASSERT(pthread_join(threads[i], &result) == 0 && !result); }
+    ASSERT(os_test_read_calls() <= 16);
+    os_test_fail_read();
+    ASSERT(table_scan(t, check_block_row, &c, &err) == -1 && err.kind == DB_ERROR_INTERNAL);
+    table_close(t);
+    uint64_t before, after; ASSERT(file_size(&before) == 0); os_test_fail_read();
+    ASSERT(!table_open("build", &schema, 1, &err) && err.kind == DB_ERROR_INTERNAL);
+    ASSERT(file_size(&after) == 0 && before == after);
+}
+
 int main(void) {
+    RUN(test_block_payload_boundary_and_callback_failure);
+    RUN(test_block_scan_open_callback_and_concurrency);
     RUN(test_append_reopen_scan);
     RUN(test_ids_continue_after_reopen);
     RUN(test_truncated_tail_recovered);

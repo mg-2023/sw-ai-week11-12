@@ -4,16 +4,17 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 
-static int report_error(const char *message) {
-    Result result = {.err = {.line = 0, .col = 0}};
+static int report_error(const char *message, DbErrorKind kind) {
+    Result result = {.err = {.kind = kind}};
     snprintf(result.err.message, sizeof result.err.message, "%s", message);
     result_print_text(&result, stdout);
     return 1;
 }
 
 static int usage(void) {
-    report_error("invalid command or arguments");
+    report_error("invalid command or arguments", DB_ERROR_SQL);
     fputs("usage: mini-dbms run <file.sql|-> [--data DIR] "
           "[--sync always|none] [--repair]\n", stderr);
     return 1;
@@ -70,13 +71,14 @@ int cli_main(int argc, char **argv) {
     }
 
     FILE *file = strcmp(input, "-") == 0 ? stdin : fopen(input, "rb");
-    if (!file) return report_error("cannot open SQL file");
+    if (!file) return report_error("cannot open SQL file", DB_ERROR_INTERNAL);
+    if (file == stdin && os_stdin_binary()) return report_error("cannot set binary standard input", DB_ERROR_INTERNAL);
     const char *error = NULL;
     char *sql = read_sql(file, &error);
     if (file != stdin && fclose(file) != 0 && !error) error = "cannot close SQL file";
-    if (error) { free(sql); return report_error(error); }
+    if (error) { free(sql); return report_error(error, strcmp(error, "SQL input contains NUL byte") == 0 ? DB_ERROR_SQL : DB_ERROR_INTERNAL); }
 
-    if (os_init() != 0) { free(sql); return report_error("cannot initialize OS layer"); }
+    if (os_init() != 0) { free(sql); return report_error("cannot initialize OS layer", DB_ERROR_INTERNAL); }
     DbError db_error = {0};
     Db *db = db_open(dir, options, &db_error);
     if (!db) {
@@ -85,11 +87,11 @@ int cli_main(int argc, char **argv) {
         free(sql); os_cleanup();
         return 1;
     }
-    if (!options.sync_always) {
-        fputs("warning: --sync none: acknowledged writes may be lost on crash\n", stderr);
-    }
     Result result = {0};
     int rc = db_execute_sql(db, sql, &result);
+    if (!options.sync_always) {
+        fprintf(stderr, "warning: --sync none: rows written since the last synchronization may be lost on OS failure; rows written this run: %" PRIu64 "\n", db_rows_written(db));
+    }
     result_print_text(&result, stdout);
     if (rc && result.committed) {
         fprintf(stdout, "(%zu %s committed before error)\n", result.committed,

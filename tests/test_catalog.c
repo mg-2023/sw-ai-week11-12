@@ -107,6 +107,7 @@ static void test_invalid_format(void) {
 }
 
 static void test_duplicate_names(void) {
+    ASSERT(rejects_at("t: id INT\nT: id INT", 2, 1, "duplicate table"));
     ASSERT(rejects_at("t: id INT\nt: id INT", 2, 1, "duplicate table"));
     ASSERT(rejects_at("t: id INT, id INT", 1, 12, "duplicate column"));
     ASSERT(rejects_at("t: id INT, name TEXT, name INT", 1, 23, "duplicate column"));
