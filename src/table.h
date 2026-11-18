@@ -16,7 +16,8 @@ typedef int (*RowVisitor)(const Row *row, uint64_t off, void *ctx);
  * Errors include the file offset; line/col are zero (not SQL positions).
  * All successful operations clear err. No internal locking: the caller
  * must serialize writes and exclude them during reads/scans/close.
- * Append synchronizes before publishing outputs/id (default sync always).
+ * Append synchronizes before publishing outputs/id unless sync is disabled
+ * with table_set_sync (default sync always).
  * Failed append rolls back; failed rollback disables further appends.
  * Read uses only os_read_at and returns owned fields, with fields[0] = id.
  * Use an empty Row output. Free it with row_free, even after failure.
@@ -29,5 +30,13 @@ int table_read_at(Table *table, uint64_t off, Row *out, DbError *err);
 int table_scan(Table *table, RowVisitor visitor, void *ctx, DbError *err);
 void row_free(Row *row);
 void table_close(Table *table);
+
+/* Executor lock access without exposing Table's representation. Set the sync
+ * policy before publishing the table to callers; table_open defaults to always.
+ */
+int table_read_lock(Table *table);
+int table_write_lock(Table *table);
+int table_unlock(Table *table);
+void table_set_sync(Table *table, int sync_always);
 
 #endif

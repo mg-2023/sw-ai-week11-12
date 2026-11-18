@@ -18,6 +18,7 @@ struct Table {
     int64_t next_id; /* 0 means the int64 id space is exhausted. */
     uint64_t row_count;
     int write_failed;
+    int sync_always;
 };
 
 static void clear_error(DbError *err) {
@@ -176,7 +177,7 @@ Table *table_open(const char *dir, const TableSchema *schema, int repair, DbErro
     snprintf(path, path_len, "%s/%s.tbl", dir, schema->name);
     t->file = os_open(path, 1); free(path);
     if (!t->file) { fail(err, 0, "cannot open table file"); goto bad; }
-    t->schema = *schema; t->next_id = 1;
+    t->schema = *schema; t->next_id = 1; t->sync_always = 1;
     uint64_t size = os_size(t->file), off = 0;
     int64_t last_id = 0;
     if (size == UINT64_MAX) { fail(err, 0, "cannot get table size"); goto bad; }
@@ -250,7 +251,7 @@ int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_o
     int rc = os_append(t->file, record, HEADER_SIZE + len, NULL);
     free(record);
     if (rc) return rollback(t, off, err, "cannot append record");
-    if (os_sync(t->file)) return rollback(t, off, err, "cannot sync record");
+    if (t->sync_always && os_sync(t->file)) return rollback(t, off, err, "cannot sync record");
     if (id_out) *id_out = t->next_id;
     if (off_out) *off_out = off;
     t->row_count++;
@@ -290,3 +291,8 @@ void table_close(Table *t) {
     pthread_rwlock_destroy(&t->lock);
     free(t);
 }
+
+int table_read_lock(Table *t) { return pthread_rwlock_rdlock(&t->lock); }
+int table_write_lock(Table *t) { return pthread_rwlock_wrlock(&t->lock); }
+int table_unlock(Table *t) { return pthread_rwlock_unlock(&t->lock); }
+void table_set_sync(Table *t, int sync_always) { t->sync_always = sync_always != 0; }

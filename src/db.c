@@ -1,0 +1,150 @@
+#include "db.h"
+#include "executor.h"
+#include "os.h"
+
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct Db {
+    Catalog catalog;
+    Table **tables;
+    int owns_lock;
+};
+
+static int fail(DbError *err, int line, int col, const char *message) {
+    if (err) {
+        err->line = line; err->col = col;
+        snprintf(err->message, sizeof err->message, "%s", message);
+    }
+    return -1;
+}
+
+void db_close(Db *db) {
+    if (!db) return;
+    if (db->tables) {
+        for (int i = 0; i < db->catalog.n; i++) table_close(db->tables[i]);
+    }
+    free(db->tables);
+    catalog_free(&db->catalog);
+    if (db->owns_lock) os_unlock_dir();
+    free(db);
+}
+
+Db *db_open(const char *dir, DbOptions options, DbError *err) {
+    if (err) *err = (DbError){0};
+    if (!dir) { fail(err, 0, 0, "missing database directory"); return NULL; }
+    Db *db = calloc(1, sizeof *db);
+    if (!db) { fail(err, 0, 0, "out of memory"); return NULL; }
+    if (os_lock_dir(dir)) { fail(err, 0, 0, "cannot lock database directory (already open or unavailable)"); goto bad; }
+    db->owns_lock = 1;
+    size_t len = strlen(dir);
+    if (len > SIZE_MAX - sizeof "/catalog.txt") { fail(err, 0, 0, "catalog path too long"); goto bad; }
+    char *path = malloc(len + sizeof "/catalog.txt");
+    if (!path) { fail(err, 0, 0, "out of memory"); goto bad; }
+    snprintf(path, len + sizeof "/catalog.txt", "%s/catalog.txt", dir);
+    int rc = catalog_load(path, &db->catalog, err);
+    free(path);
+    if (rc) goto bad;
+    if (db->catalog.n) {
+        db->tables = calloc((size_t)db->catalog.n, sizeof *db->tables);
+        if (!db->tables) { fail(err, 0, 0, "out of memory"); goto bad; }
+    }
+    for (int i = 0; i < db->catalog.n; i++) {
+        db->tables[i] = table_open(dir, &db->catalog.tables[i], options.repair, err);
+        if (!db->tables[i]) goto bad;
+        table_set_sync(db->tables[i], options.sync_always);
+    }
+    return db;
+bad:
+    db_close(db);
+    return NULL;
+}
+
+/* Find a single statement without lexing later statements: a later lexical or
+ * syntax error must not erase earlier commits. Only delimiters are recognized;
+ * parse_sql remains responsible for all SQL validation and decoded values.
+ */
+static const char *statement_end(const char *p) {
+    int quoted = 0, comment = 0;
+    while (*p) {
+        if (comment) {
+            if (*p == '\n') comment = 0;
+        } else if (quoted) {
+            if (*p == '\'') {
+                if (p[1] == '\'') { p += 2; continue; }
+                quoted = 0;
+            }
+        } else {
+            if (*p == '-' && p[1] == '-') { comment = 1; p += 2; continue; }
+            if (*p == '\'') quoted = 1;
+            else if (*p == ';') return p + 1;
+        }
+        p++;
+    }
+    return p;
+}
+
+static void absolute_position(int *line, int *col, int base_line, int base_col) {
+    if (*line == 1) *col = *col > INT_MAX - (base_col - 1) ? INT_MAX : *col + (base_col - 1);
+    *line = *line > INT_MAX - (base_line - 1) ? INT_MAX : *line + (base_line - 1);
+}
+
+int db_execute_sql(Db *db, const char *sql, Result *out) {
+    if (!out) return -1;
+    *out = (Result){.failed_index = SIZE_MAX};
+    uint64_t start = os_now_us();
+    if (!db || !sql) { fail(&out->err, 1, 1, "missing database or SQL"); goto bad; }
+    const char *begin = sql; int line = 1, col = 1;
+    size_t capacity = 0;
+    while (*begin) {
+        const char *end = statement_end(begin);
+        size_t len = (size_t)(end - begin);
+        char *chunk = malloc(len + 1);
+        if (!chunk) { fail(&out->err, line, col, "out of memory"); goto bad; }
+        memcpy(chunk, begin, len); chunk[len] = '\0';
+        StatementList statements = {0};
+        int rc = parse_sql(chunk, &statements, &out->err);
+        free(chunk);
+        if (rc) {
+            absolute_position(&out->err.line, &out->err.col, line, col);
+            goto bad;
+        }
+        if (statements.n) {
+            Statement *s = &statements.items[0];
+            absolute_position(&s->line, &s->col, line, col);
+            if (out->n == capacity) {
+                size_t max = SIZE_MAX / sizeof *out->items;
+                size_t next = capacity ? capacity * 2 : 4;
+                if (capacity > max / 2 || next > max) {
+                    fail(&out->err, s->line, s->col, "too many results");
+                    statements_free(&statements); goto bad;
+                }
+                StmtResult *items = realloc(out->items, next * sizeof *items);
+                if (!items) {
+                    fail(&out->err, s->line, s->col, "out of memory");
+                    statements_free(&statements); goto bad;
+                }
+                out->items = items; capacity = next;
+            }
+            const TableSchema *schema = catalog_find(&db->catalog, s->table);
+            if (!schema) rc = fail(&out->err, s->line, s->col, "unknown table");
+            else rc = executor_execute(db->tables[schema - db->catalog.tables], schema, s, &out->items[out->n], &out->err);
+            statements_free(&statements);
+            if (rc) goto bad;
+            out->n++; out->committed = out->n;
+        } else statements_free(&statements);
+        for (const char *p = begin; p < end; p++) {
+            if (*p == '\n') { if (line < INT_MAX) line++; col = 1; }
+            else if (col < INT_MAX) col++;
+        }
+        begin = end;
+    }
+    out->ok = 1;
+    out->elapsed_us = os_now_us() - start;
+    return 0;
+bad:
+    out->failed_index = out->n;
+    out->elapsed_us = os_now_us() - start;
+    return -1;
+}
