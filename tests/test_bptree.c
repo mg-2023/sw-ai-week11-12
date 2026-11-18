@@ -1,5 +1,6 @@
 #include "test.h"
 #include "bptree.h"
+#include <pthread.h>
 
 static uint64_t value_for(int64_t key) {
     return (uint64_t)key * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
@@ -291,7 +292,43 @@ static void test_reserved_range_rejects_bad_ranges_and_frees_on_failure(void) {
     bpt_free(tree);
 }
 
+/* A split that finds no reserved node must return an error, not crash on NULL. */
+static void test_insert_reserved_without_nodes_returns_error(void) {
+    BPTree *tree = bpt_create(); ASSERT(tree);
+    for (int64_t k = 0; k < 63; k++) ASSERT(bpt_insert(tree, k, 1) == 0); /* one full leaf */
+    ASSERT(bpt_insert_reserved(tree, 63, 1) == -1);                        /* needs a sibling, none reserved */
+    uint64_t v;
+    ASSERT(valid(tree) && bpt_find(tree, 63, &v) == 0 && bpt_find(tree, 62, &v) == 1);
+    ASSERT(bpt_reserve_insert_range(tree, 63, 1) == 0 && bpt_insert_reserved(tree, 63, 7) == 0);
+    ASSERT(valid(tree) && bpt_find(tree, 63, &v) == 1 && v == 7);
+    bpt_release_reserved(tree); bpt_free(tree);
+    BPTree *empty = bpt_create(); ASSERT(empty);
+    ASSERT(bpt_insert_reserved(empty, 1, 1) == -1); /* empty tree, nothing reserved */
+    bpt_free(empty);
+}
+
+static void *insert_in_private_tree(void *ctx) {
+    int *failures = ctx; BPTree *tree = bpt_create();
+    for (int64_t k = 0; tree && k < 3; k++) if (bpt_insert(tree, k, 1)) (*failures)++;
+    bpt_free(tree);
+    return NULL;
+}
+
+/* The one-shot failure injection fires exactly once even when threads allocate at the same time. */
+static void test_node_failure_injection_fires_exactly_once_across_threads(void) {
+    for (int round = 0; round < 50; round++) {
+        int failures[8] = {0}; pthread_t threads[8];
+        bpt_test_fail_node_after(5);
+        for (int i = 0; i < 8; i++) ASSERT(pthread_create(&threads[i], NULL, insert_in_private_tree, &failures[i]) == 0);
+        for (int i = 0; i < 8; i++) ASSERT(pthread_join(threads[i], NULL) == 0);
+        int total = 0; for (int i = 0; i < 8; i++) total += failures[i];
+        ASSERT(total == 1);
+    }
+}
+
 int main(void) {
+    RUN(test_insert_reserved_without_nodes_returns_error);
+    RUN(test_node_failure_injection_fires_exactly_once_across_threads);
     RUN(test_reserved_range_needs_no_allocation);
     RUN(test_reserved_range_rejects_bad_ranges_and_frees_on_failure);
     RUN(test_reserved_insert_needs_no_allocation);

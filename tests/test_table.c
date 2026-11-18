@@ -140,7 +140,7 @@ static void test_crc_mismatch_repair(void) {
     uint64_t offsets[3], size; DbError err = {0}; int64_t id;
     ASSERT(populate(offsets, &err) == 0 && flip_byte(offsets[1] + 20) == 0);
     Table *t = table_open(test_dir, &schema, 1, &err);
-    ASSERT(t && file_size(&size) == 0 && size == offsets[1]);
+    ASSERT(t && file_size(&size) == 0 && size == offsets[1] + 29);
     Scan s = {.ok = 1};
     ASSERT(table_scan(t, visit, &s, &err) == 0 && s.count == 1 && s.ok);
     /* The cut range held a valid record with id 3, so its id is not reused. */
@@ -224,14 +224,27 @@ static int write_bytes(const unsigned char *bytes, size_t len) {
     return ok ? 0 : -1;
 }
 
+/* COMMIT (1 row) as Python computed it: len 17, check = crc32(len) ^ 0x4D444231, crc32(payload), id 0, kind 1, value 1. */
+static const unsigned char commit_one[29] = {
+    0x11,0x00,0x00,0x00, 0xd7,0xad,0xa5,0x84, 0x60,0xe5,0x3e,0x12,
+    0,0,0,0,0,0,0,0, 0x01, 0x01,0,0,0,0,0,0,0
+};
+/* A one-row file: the given row bytes followed by their COMMIT. */
+static int write_row_and_commit(const unsigned char *row, size_t len) {
+    unsigned char bytes[sizeof fixture + sizeof commit_one];
+    memcpy(bytes, row, len); memcpy(bytes + len, commit_one, sizeof commit_one);
+    return write_bytes(bytes, len + sizeof commit_one);
+}
+
 static void test_wire_format(void) {
-    DbError err = {0}; unsigned char bytes[sizeof fixture];
+    DbError err = {0}; unsigned char bytes[sizeof fixture + sizeof commit_one];
     Table *t = fresh(&err); ASSERT(t && append_row(t, "a", 1, -2, NULL, NULL, &err) == 0);
     table_close(t);
     FILE *f = fopen(path, "rb"); ASSERT(f);
     ASSERT(fread(bytes, 1, sizeof bytes, f) == sizeof bytes && fgetc(f) == EOF);
-    ASSERT(fclose(f) == 0 && memcmp(bytes, fixture, sizeof bytes) == 0);
-    ASSERT(write_bytes(fixture, sizeof fixture) == 0);
+    ASSERT(fclose(f) == 0 && memcmp(bytes, fixture, sizeof fixture) == 0);
+    ASSERT(memcmp(bytes + sizeof fixture, commit_one, sizeof commit_one) == 0);
+    ASSERT(write_row_and_commit(fixture, sizeof fixture) == 0);
     t = table_open(test_dir, &schema, 0, &err); Row row = {0};
     ASSERT(t && table_read_at(t, 0, &row, &err) == 0 && row.id == 1 && row.fields[2].i == -2);
     row_free(&row); table_close(t);
@@ -272,7 +285,8 @@ static void test_crc_valid_malformed_fields(void) {
     ASSERT(table_open(test_dir, &schema, 0, &err) == NULL && strstr(err.message, "fields"));
     ASSERT(file_size(&size) == 0 && size == sizeof bad);
     Table *t = table_open(test_dir, &schema, 1, &err);
-    ASSERT(t && file_size(&size) == 0 && size == 0); table_close(t);
+    ASSERT(t && file_size(&size) == 0 && size == 29); /* only the ID_FLOOR record for the cut id 1 */
+    table_close(t);
 }
 
 static void test_id_exhaustion_after_reopen(void) {
@@ -281,12 +295,12 @@ static void test_id_exhaustion_after_reopen(void) {
     memcpy(max_id + 8, crc, sizeof crc);
     memset(max_id + 12, 0xff, 7); max_id[19] = 0x7f;
     DbError err = {0}; uint64_t size; int64_t id = -1; Row row = {0};
-    ASSERT(write_bytes(max_id, sizeof max_id) == 0);
+    ASSERT(write_row_and_commit(max_id, sizeof max_id) == 0);
     Table *t = table_open(test_dir, &schema, 0, &err);
     ASSERT(t && table_read_at(t, 0, &row, &err) == 0 && row.id == INT64_MAX);
     row_free(&row);
     ASSERT(append_row(t, "a", 1, 20, &id, NULL, &err) == -1 && id == -1 && strstr(err.message, "id"));
-    ASSERT(file_size(&size) == 0 && size == sizeof max_id); table_close(t);
+    ASSERT(file_size(&size) == 0 && size == sizeof max_id + sizeof commit_one); table_close(t);
 }
 
 static void test_record_size_limit(void) {
@@ -315,10 +329,10 @@ static void test_record_exact_size_boundary(void) {
     test_dir_clear(); DbError err = {0}; uint64_t size; int64_t id = -1;
     Table *t = table_open(test_dir, &wide, 0, &err); ASSERT(t);
     ASSERT(table_append(t, fields, &id, NULL, &err) == 0 && id == 1);
-    ASSERT(file_size(&size) == 0 && size == 1024 * 1024);
+    ASSERT(file_size(&size) == 0 && size == 1024 * 1024 + 29); /* record + COMMIT */
     fields[15].len++;
     ASSERT(table_append(t, fields, &id, NULL, &err) == -1 && id == 1);
-    ASSERT(file_size(&size) == 0 && size == 1024 * 1024);
+    ASSERT(file_size(&size) == 0 && size == 1024 * 1024 + 29); /* record + COMMIT */
     table_close(t); t = table_open(test_dir, &wide, 0, &err); Row row = {0};
     ASSERT(t && table_read_at(t, 0, &row, &err) == 0 && row.n == 17 && row.fields[16].len == 65452);
     for (int i = 1; i < row.n; i++) ASSERT(memcmp(row.fields[i].s, text, row.fields[i].len) == 0);
@@ -329,7 +343,7 @@ typedef struct { int count, ok; } WideCheck;
 static int check_wide_row(const Row *row, uint64_t off, void *ctx) {
     WideCheck *c = ctx;
     int index = c->count++;
-    if (row->id != index + 1 || (index == 0 ? off != 0 : off != 52u + (uint64_t)(index - 1) * 524340u)) c->ok = 0;
+    if (row->id != index + 1 || (index == 0 ? off != 0 : off != 81u + (uint64_t)(index - 1) * 524369u)) c->ok = 0;
     for (int i = 1; i < 9; i++) {
         uint32_t len = index == 0 ? 0 : 65536;
         if (row->fields[i].len != len || row->fields[i].s[len] != '\0') c->ok = 0;
@@ -390,7 +404,7 @@ typedef struct { int count, ok; uint64_t end; } BlockCheck;
 static int check_open_id(int64_t id, uint64_t off, void *ctx) {
     BlockCheck *c = ctx;
     if (id != c->count + 1 || off != c->end) c->ok = 0;
-    c->count++; c->end += 33;
+    c->count++; c->end += 33 + 29; /* row + its COMMIT */
     return 0;
 }
 static int check_block_row(const Row *row, uint64_t off, void *ctx) {
@@ -458,7 +472,7 @@ static void test_repair_backs_up_cut_bytes_and_skips_their_ids(void) {
     FILE *f = fopen(path, "rb"); ASSERT(f);
     unsigned char *original = malloc((size_t)size); ASSERT(original && fread(original, 1, (size_t)size, f) == size); fclose(f);
     t = open_capture_stderr(1, &err, text, sizeof text); ASSERT(t);
-    uint64_t after; ASSERT(file_size(&after) == 0 && after == off[2]);
+    uint64_t after; ASSERT(file_size(&after) == 0 && after == off[2] + 29);
     char name[256], expected[256]; ASSERT(find_file(".tbl.repair-", name, sizeof name));
     ASSERT(strlen(name) == strlen("task5_table.tbl.repair-YYYYMMDD-HHMMSS"));
     FILE *backup = fopen(test_path(name), "rb"); ASSERT(backup);
@@ -488,7 +502,7 @@ static void test_repair_without_later_valid_records_reports_none(void) {
     ASSERT(populate(offsets, &err) == 0 && flip_byte(offsets[2] + 20) == 0);
     Table *t = open_capture_stderr(1, &err, text, sizeof text); ASSERT(t);
     ASSERT(strstr(text, "0 intact records") && strstr(text, "backup"));
-    int64_t id; ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 3);
+    int64_t id; ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 4); /* id 3 stays burned (ID_FLOOR) */
     table_close(t);
 }
 
@@ -512,7 +526,7 @@ static void test_append_rows_batch_and_single_sync(void) {
         rows[i * 2 + 1] = (Value){.type = TYPE_INT, .i = 20 + i};
     }
     os_test_reset_syncs();
-    ASSERT(table_append_rows(t, rows, 4, ids, &err) == 0 && os_test_sync_calls() == 1);
+    ASSERT(table_append_rows(t, rows, 4, ids, &err) == 0 && os_test_sync_calls() == 2);
     ASSERT(ids[0] == 1 && ids[3] == 4 && table_rows_written(t) == 4);
     ASSERT(table_scan(t, visit, &s, &err) == 0 && s.ok && s.count == 4);
     table_close(t);
@@ -571,9 +585,307 @@ static void test_scan_yielding_lets_writer_in_and_keeps_snapshot(void) {
     table_close(t);
 }
 
+/* ---- statement commit records (meta records) and the id floor ---- */
+
+/* Independent CRC32/IEEE and meta-record encoder, so the tests do not trust the implementation. */
+static uint32_t test_crc32(const unsigned char *p, size_t n) {
+    uint32_t crc = 0xffffffffu;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (int bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+static void test_put32(unsigned char *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (unsigned char)(v >> (8 * i)); }
+/* 29-byte meta record: id 0, then [u8 kind][i64 value]. */
+static void make_meta(unsigned char out[29], unsigned kind, int64_t value) {
+    memset(out, 0, 29);
+    test_put32(out, 17);
+    test_put32(out + 4, test_crc32(out, 4) ^ 0x4D444231u);
+    out[20] = (unsigned char)kind;
+    for (int i = 0; i < 8; i++) out[21 + i] = (unsigned char)((uint64_t)value >> (8 * i));
+    test_put32(out + 8, test_crc32(out + 12, 17));
+}
+static int append_bytes(const unsigned char *bytes, size_t n) {
+    FILE *f = fopen(path, "ab"); if (!f) return -1;
+    int ok = fwrite(bytes, 1, n, f) == n;
+    return fclose(f) == 0 && ok ? 0 : -1;
+}
+static int read_all(unsigned char *buf, size_t cap, size_t *n) {
+    FILE *f = fopen(path, "rb"); if (!f) return -1;
+    *n = fread(buf, 1, cap, f); fclose(f); return 0;
+}
+static int is_meta_at(const unsigned char *file, uint64_t off, unsigned kind, int64_t value) {
+    unsigned char want[29]; make_meta(want, kind, value);
+    return memcmp(file + off, want, 29) == 0;
+}
+static Value statement_rows[4000];
+static char statement_text[65536];
+/* nrows rows of (TEXT of text_len x's, INT index) in schema order. */
+static Value *statement_of(size_t nrows, size_t text_len) {
+    memset(statement_text, 'x', sizeof statement_text);
+    for (size_t i = 0; i < nrows; i++) {
+        statement_rows[i * 2] = (Value){.type = TYPE_TEXT, .s = statement_text, .len = (uint32_t)text_len};
+        statement_rows[i * 2 + 1] = (Value){.type = TYPE_INT, .i = (int64_t)i};
+    }
+    return statement_rows;
+}
+static int count_visit(const Row *row, uint64_t off, void *ctx) { (void)row; (void)off; (*(int *)ctx)++; return 0; }
+static int count_rows(Table *t, DbError *err) {
+    int n = 0;
+    return table_scan(t, count_visit, &n, err) == 0 ? n : -1;
+}
+typedef struct { int64_t last; int n, ok; } Seen;
+static int open_collect(int64_t id, uint64_t off, void *ctx) {
+    (void)off; Seen *s = ctx;
+    if (id != s->last + 1) s->ok = 0;
+    s->last = id; s->n++;
+    return 0;
+}
+/* Write a statement without its COMMIT: the sync fails and so does the rollback. */
+static int write_unfinished_statement(Table *t, size_t nrows, DbError *err) {
+    os_test_fail_sync(); os_test_fail_truncate();
+    return table_append_rows(t, statement_of(nrows, 1), nrows, NULL, err);
+}
+
+static void test_commit_record_follows_each_statement(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    uint64_t off; int64_t id;
+    ASSERT(append_row(t, "a", 1, 20, &id, &off, &err) == 0 && off == 0);
+    ASSERT(table_append_rows(t, statement_of(3, 1), 3, NULL, &err) == 0);
+    table_close(t);
+    unsigned char file[512]; size_t n; ASSERT(read_all(file, sizeof file, &n) == 0);
+    /* row (33 bytes) + COMMIT(1) + 3 rows (33 each) + COMMIT(3) */
+    ASSERT(n == 33 + 29 + 3 * 33 + 29);
+    ASSERT(memcmp(file + 33, commit_one, 29) == 0 && is_meta_at(file, 33, 1, 1) && is_meta_at(file, 33 + 29 + 99, 1, 3));
+    t = table_open(test_dir, &schema, 0, &err);
+    ASSERT(t && count_rows(t, &err) == 4 && table_row_count(t) == 4);
+    ASSERT(append_row(t, "z", 1, 1, &id, NULL, &err) == 0 && id == 5);
+    table_close(t);
+}
+
+static void test_failed_rollback_leaves_no_row_after_reopen_all_rows(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t && append_row(t, "a", 1, 20, NULL, NULL, &err) == 0);
+    uint64_t before; ASSERT(file_size(&before) == 0);
+    ASSERT(write_unfinished_statement(t, 5, &err) == -1);
+    uint64_t grown; ASSERT(file_size(&grown) == 0 && grown > before); /* all five rows are still in the file */
+    table_close(t);
+    char text[512]; t = open_capture_stderr(0, &err, text, sizeof text);
+    ASSERT(t && count_rows(t, &err) == 1 && table_row_count(t) == 1);
+    ASSERT(strstr(text, "incomplete statement: 5 records") && strstr(text, "truncated at offset"));
+    uint64_t after; int64_t id;
+    ASSERT(file_size(&after) == 0 && after == before);
+    ASSERT(append_row(t, "b", 1, 21, &id, NULL, &err) == 0 && id == 2);
+    table_close(t);
+}
+
+static void test_failed_rollback_leaves_no_row_after_reopen_some_rows(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t && append_row(t, "a", 1, 20, NULL, NULL, &err) == 0);
+    uint64_t before; ASSERT(file_size(&before) == 0);
+    table_test_set_write_chunk(1); os_test_fail_append_after(2); os_test_fail_truncate();
+    ASSERT(table_append_rows(t, statement_of(5, 1), 5, NULL, &err) == -1);
+    table_test_set_write_chunk(1u << 20);
+    uint64_t grown; ASSERT(file_size(&grown) == 0 && grown > before); /* two rows and half of a third remain */
+    table_close(t);
+    t = table_open(test_dir, &schema, 0, &err);
+    ASSERT(t && count_rows(t, &err) == 1);
+    uint64_t after; int64_t id;
+    ASSERT(file_size(&after) == 0 && after == before);
+    ASSERT(append_row(t, "b", 1, 21, &id, NULL, &err) == 0 && id == 2);
+    table_close(t);
+}
+
+static void test_big_statement_stopped_midway_is_cut_on_reopen(void) {
+    /* 20 rows of 64 KiB (about 1.3 MiB): the second 1 MiB write fails, rollback fails too. */
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t && append_row(t, "a", 1, 20, NULL, NULL, &err) == 0);
+    uint64_t before; ASSERT(file_size(&before) == 0);
+    os_test_fail_append_after(1); os_test_fail_truncate();
+    ASSERT(table_append_rows(t, statement_of(20, 65536), 20, NULL, &err) == -1);
+    uint64_t grown; ASSERT(file_size(&grown) == 0 && grown > before + (1u << 20));
+    table_close(t);
+    t = table_open(test_dir, &schema, 0, &err);
+    uint64_t after; ASSERT(t && count_rows(t, &err) == 1 && file_size(&after) == 0 && after == before);
+    table_close(t);
+}
+
+static void test_statement_without_commit_at_end_is_cut_and_earlier_kept(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    ASSERT(table_append_rows(t, statement_of(2, 1), 2, NULL, &err) == 0);
+    uint64_t end; ASSERT(file_size(&end) == 0);
+    ASSERT(table_append_rows(t, statement_of(3, 1), 3, NULL, &err) == 0);
+    table_close(t);
+    uint64_t full; ASSERT(file_size(&full) == 0 && truncate_to(full - 29) == 0); /* drop only the last COMMIT */
+    char text[512]; t = open_capture_stderr(0, &err, text, sizeof text);
+    ASSERT(t && count_rows(t, &err) == 2);
+    uint64_t after; ASSERT(file_size(&after) == 0 && after == end);
+    char expected[128]; snprintf(expected, sizeof expected, "incomplete statement: 3 records (%llu bytes) truncated at offset %llu",
+                                 (unsigned long long)(full - 29 - end), (unsigned long long)end);
+    ASSERT(strstr(text, expected));
+    table_close(t);
+}
+
+static void test_commit_count_mismatch_refuses_and_repair_cuts_statement(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    ASSERT(table_append_rows(t, statement_of(2, 1), 2, NULL, &err) == 0);
+    uint64_t end; ASSERT(file_size(&end) == 0);
+    ASSERT(write_unfinished_statement(t, 3, &err) == -1); /* three rows, no COMMIT */
+    table_close(t);
+    unsigned char commit[29]; make_meta(commit, 1, 2);    /* valid CRC, but claims 2 rows */
+    ASSERT(append_bytes(commit, sizeof commit) == 0);
+    uint64_t before; ASSERT(file_size(&before) == 0);
+    ASSERT(table_open(test_dir, &schema, 0, &err) == NULL && err.message[0]);
+    uint64_t after; ASSERT(file_size(&after) == 0 && after == before);
+    t = table_open(test_dir, &schema, 1, &err);
+    ASSERT(t && count_rows(t, &err) == 2 && file_size(&after) == 0 && after == end + 29);
+    table_close(t);
+}
+
+static void test_commit_without_rows_refused(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    ASSERT(table_append_rows(t, statement_of(1, 1), 1, NULL, &err) == 0);
+    table_close(t);
+    unsigned char commit[29]; make_meta(commit, 1, 1);
+    ASSERT(append_bytes(commit, sizeof commit) == 0); /* a COMMIT with no rows before it */
+    ASSERT(table_open(test_dir, &schema, 0, &err) == NULL);
+}
+
+static void test_id_floor_inside_unfinished_statement_refused(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    ASSERT(write_unfinished_statement(t, 1, &err) == -1);
+    table_close(t);
+    unsigned char floor_rec[29]; make_meta(floor_rec, 2, 9);
+    ASSERT(append_bytes(floor_rec, sizeof floor_rec) == 0); /* something other than COMMIT after a pending row */
+    ASSERT(table_open(test_dir, &schema, 0, &err) == NULL);
+}
+
+static void test_many_statements_reopen_and_visitor_sees_ordered_rows(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    for (size_t i = 0; i < 20; i++) ASSERT(table_append_rows(t, statement_of(i % 4 + 1, 1), i % 4 + 1, NULL, &err) == 0);
+    ASSERT(table_row_count(t) == 50);
+    table_close(t);
+    Seen seen = {0, 0, 1};
+    t = table_open_with_visitor(test_dir, &schema, 0, open_collect, &seen, &err);
+    ASSERT(t && seen.ok && seen.n == 50 && table_row_count(t) == 50 && count_rows(t, &err) == 50);
+    int64_t id; ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 51);
+    table_close(t);
+}
+
+static void test_open_visitor_gets_no_rows_of_unfinished_statement(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    ASSERT(table_append_rows(t, statement_of(2, 1), 2, NULL, &err) == 0);
+    ASSERT(write_unfinished_statement(t, 3, &err) == -1);
+    table_close(t);
+    Seen seen = {0, 0, 1};
+    t = table_open_with_visitor(test_dir, &schema, 0, open_collect, &seen, &err);
+    ASSERT(t && seen.n == 2 && seen.ok); table_close(t);
+}
+
+static void test_sync_always_two_syncs_per_statement_and_none_when_off(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    os_test_reset_syncs();
+    ASSERT(table_append_rows(t, statement_of(1000, 1), 1000, NULL, &err) == 0 && os_test_sync_calls() == 2);
+    table_set_sync(t, 0); os_test_reset_syncs();
+    ASSERT(table_append_rows(t, statement_of(10, 1), 10, NULL, &err) == 0 && os_test_sync_calls() == 0);
+    table_close(t);
+    static unsigned char file[1 << 16]; size_t n; ASSERT(read_all(file, sizeof file, &n) == 0);
+    ASSERT(n == 1000 * 33 + 29 + 10 * 33 + 29 && is_meta_at(file, n - 29, 1, 10)); /* COMMIT is written even with sync off */
+}
+
+static void test_commit_write_failure_rolls_back_statement(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t && append_row(t, "a", 1, 20, NULL, NULL, &err) == 0);
+    uint64_t before; ASSERT(file_size(&before) == 0);
+    os_test_fail_append_after(1); /* rows go out in one write; the COMMIT write fails */
+    ASSERT(table_append_rows(t, statement_of(3, 1), 3, NULL, &err) == -1);
+    uint64_t after; int64_t id;
+    ASSERT(file_size(&after) == 0 && after == before);
+    ASSERT(append_row(t, "b", 1, 21, &id, NULL, &err) == 0 && id == 2);
+    table_close(t);
+}
+
+static void test_repair_writes_id_floor_that_survives_next_sessions(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t); uint64_t off[5]; int64_t id;
+    for (int i = 0; i < 5; i++) ASSERT(append_row(t, "a", 1, 20, &id, &off[i], &err) == 0);
+    table_close(t); ASSERT(flip_byte(off[1] + 20) == 0);
+    char text[1024]; t = open_capture_stderr(1, &err, text, sizeof text); ASSERT(t); /* SELECT only: no append here */
+    ASSERT(count_rows(t, &err) == 1);
+    table_close(t);
+    unsigned char file[512]; size_t n; ASSERT(read_all(file, sizeof file, &n) == 0);
+    ASSERT(n == off[1] + 29 && is_meta_at(file, off[1], 2, 5)); /* ID_FLOOR 5 stands where the cut was */
+    t = table_open(test_dir, &schema, 0, &err); ASSERT(t && count_rows(t, &err) == 1);
+    for (int i = 0; i < 4; i++) { ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 6 + i); }
+    table_close(t);
+    t = table_open(test_dir, &schema, 0, &err); ASSERT(t && count_rows(t, &err) == 5);
+    ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 10);
+    table_close(t);
+}
+
+static void test_repair_of_last_record_does_not_reuse_its_id(void) {
+    uint64_t offsets[3]; DbError err = {0}; int64_t id;
+    ASSERT(populate(offsets, &err) == 0 && flip_byte(offsets[2] + 20) == 0);
+    Table *t = table_open(test_dir, &schema, 1, &err); ASSERT(t); table_close(t);
+    t = table_open(test_dir, &schema, 0, &err); ASSERT(t);
+    ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 4);
+    table_close(t);
+}
+
+static void test_repair_inside_a_statement_cuts_the_whole_statement(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
+    ASSERT(table_append_rows(t, statement_of(1, 1), 1, NULL, &err) == 0);
+    uint64_t start; ASSERT(file_size(&start) == 0);
+    ASSERT(table_append_rows(t, statement_of(4, 1), 4, NULL, &err) == 0);
+    table_close(t);
+    ASSERT(flip_byte(start + 33 + 20) == 0); /* second row of the second statement */
+    ASSERT(table_open(test_dir, &schema, 0, &err) == NULL);
+    t = table_open(test_dir, &schema, 1, &err);
+    uint64_t after; ASSERT(t && count_rows(t, &err) == 1 && file_size(&after) == 0 && after == start + 29);
+    int64_t id; ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 6);
+    table_close(t);
+}
+
+static void test_id_floor_inside_cut_range_is_carried_over(void) {
+    DbError err = {0}; Table *t = fresh(&err); uint64_t off[4]; int64_t id; ASSERT(t);
+    for (int i = 0; i < 3; i++) ASSERT(append_row(t, "a", 1, 20, &id, &off[i], &err) == 0);
+    table_close(t);
+    unsigned char floor_rec[29]; make_meta(floor_rec, 2, 40);
+    ASSERT(append_bytes(floor_rec, sizeof floor_rec) == 0);
+    ASSERT(flip_byte(off[1] + 20) == 0); /* the cut starts at record 2 and includes the floor of 40 */
+    t = table_open(test_dir, &schema, 1, &err); ASSERT(t);
+    ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 41);
+    table_close(t);
+}
+
+static void test_repair_ignores_corrupt_id_column_that_is_not_next_id(void) {
+    uint64_t offsets[3]; DbError err = {0}; int64_t id;
+    ASSERT(populate(offsets, &err) == 0);
+    FILE *f = fopen(path, "r+b"); ASSERT(f && fseek(f, (long)offsets[2] + 12, SEEK_SET) == 0);
+    unsigned char huge[8] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}; /* id column becomes INT64_MAX, header check intact */
+    ASSERT(fwrite(huge, 1, 8, f) == 8 && fclose(f) == 0);
+    Table *t = table_open(test_dir, &schema, 1, &err); ASSERT(t); table_close(t);
+    t = table_open(test_dir, &schema, 0, &err); ASSERT(t);
+    ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 3); /* last committed id 2, plus 1 */
+    table_close(t);
+}
+
 int main(void) {
     test_dir_init("table");
     snprintf(path, sizeof path, "%s/task5_table.tbl", test_dir);
+    RUN(test_commit_record_follows_each_statement);
+    RUN(test_failed_rollback_leaves_no_row_after_reopen_all_rows);
+    RUN(test_failed_rollback_leaves_no_row_after_reopen_some_rows);
+    RUN(test_big_statement_stopped_midway_is_cut_on_reopen);
+    RUN(test_statement_without_commit_at_end_is_cut_and_earlier_kept);
+    RUN(test_commit_count_mismatch_refuses_and_repair_cuts_statement);
+    RUN(test_commit_without_rows_refused);
+    RUN(test_id_floor_inside_unfinished_statement_refused);
+    RUN(test_many_statements_reopen_and_visitor_sees_ordered_rows);
+    RUN(test_open_visitor_gets_no_rows_of_unfinished_statement);
+    RUN(test_sync_always_two_syncs_per_statement_and_none_when_off);
+    RUN(test_commit_write_failure_rolls_back_statement);
+    RUN(test_repair_writes_id_floor_that_survives_next_sessions);
+    RUN(test_repair_of_last_record_does_not_reuse_its_id);
+    RUN(test_repair_inside_a_statement_cuts_the_whole_statement);
+    RUN(test_id_floor_inside_cut_range_is_carried_over);
+    RUN(test_repair_ignores_corrupt_id_column_that_is_not_next_id);
     RUN(test_repair_backs_up_cut_bytes_and_skips_their_ids);
     RUN(test_repair_backup_failure_does_not_truncate);
     RUN(test_repair_without_later_valid_records_reports_none);

@@ -178,9 +178,13 @@ int os_append(OsFile *f, const void *buf, size_t n, uint64_t *off_out) {
     uint64_t off = os_size(f); if (off == UINT64_MAX) return -1;
 #ifdef MINI_DBMS_TESTING
     if (atomic_load(&fail_append)) {
+        /* Compare-exchange the countdown; only the thread that sees 0 and clears the flag fails. */
         unsigned left = atomic_load(&fail_append_after);
-        if (left) atomic_store(&fail_append_after, left - 1);
-        else { atomic_store(&fail_append, 0); if (n > 1) (void)write_at(f, buf, n / 2, off); return -1; }
+        while (left && !atomic_compare_exchange_weak(&fail_append_after, &left, left - 1)) {}
+        if (!left && atomic_exchange(&fail_append, 0)) {
+            if (n > 1) (void)write_at(f, buf, n / 2, off);
+            return -1;
+        }
     }
 #endif
     if (write_at(f, buf, n, off)) return -1;

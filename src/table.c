@@ -12,6 +12,11 @@
 #define HEADER_SIZE 12u
 #define MAX_RECORD (1024u * 1024u)
 #define MAX_TEXT (64u * 1024u)
+/* Meta record: normal header, id 0, then [u8 kind][i64 value] (17 payload bytes). */
+#define META_PAYLOAD 17u
+#define META_SIZE (HEADER_SIZE + META_PAYLOAD)
+enum { META_COMMIT = 1, META_ID_FLOOR = 2 };
+typedef struct { int kind; int64_t value; } Meta;
 
 /* Recent INSERT lock-wait times (us), guarded by their own mutex so /stats never touches the table lock. */
 typedef struct {
@@ -98,7 +103,7 @@ void row_free(Row *row) {
 
 /* Distinguish incomplete tail, corruption and operational failures. Only
  * incomplete/corrupt records may be removed, never a read/allocation failure. */
-enum { RECORD_OK, RECORD_INCOMPLETE, RECORD_CORRUPT, RECORD_IO };
+enum { RECORD_OK, RECORD_INCOMPLETE, RECORD_CORRUPT, RECORD_IO, RECORD_META };
 
 /* Per-call buffers. Rows passed to visitors borrow this workspace; read_at
  * still returns owned rows. TEXT remains NUL-terminated in both cases. */
@@ -203,7 +208,18 @@ static int contains_complete_record(const unsigned char *tail, size_t n) {
     return 0;
 }
 
-static int read_record(BlockReader *r, uint64_t off, Row *out, uint64_t *next,
+/* A CRC-valid record whose id is 0 must be a well-formed meta record. */
+static int decode_meta(const unsigned char *p, size_t n, Meta *meta, uint64_t off, DbError *err) {
+    int64_t value = n == META_PAYLOAD ? get_i64(p + 9) : -1;
+    if (n != META_PAYLOAD || value <= 0 || (p[8] != META_COMMIT && p[8] != META_ID_FLOOR)) {
+        fail(err, off, "invalid meta record"); return RECORD_CORRUPT;
+    }
+    *meta = (Meta){.kind = p[8], .value = value};
+    return RECORD_META;
+}
+
+/* Returns RECORD_OK (row in *out) or RECORD_META (*meta); other codes are incomplete/corrupt/IO. */
+static int read_record(BlockReader *r, uint64_t off, Row *out, Meta *meta, uint64_t *next,
                        DbError *err) {
     if (off > r->size || r->size - off < HEADER_SIZE) {
         fail(err, off, "incomplete record header"); return RECORD_INCOMPLETE;
@@ -237,8 +253,9 @@ static int read_record(BlockReader *r, uint64_t off, Row *out, uint64_t *next,
     if (crc32(payload, len) != crc) {
         fail(err, off, "record CRC mismatch"); return RECORD_CORRUPT;
     }
-    int rc = decode_row(&r->table->schema, payload, len, out, off, &r->row, err);
-    if (rc == RECORD_OK) *next = off + HEADER_SIZE + len;
+    int rc = len >= 8 && get_i64(payload) == 0 ? decode_meta(payload, len, meta, off, err)
+                                                : decode_row(&r->table->schema, payload, len, out, off, &r->row, err);
+    if (rc == RECORD_OK || rc == RECORD_META) *next = off + HEADER_SIZE + len;
     return rc;
 }
 
@@ -258,8 +275,8 @@ static int valid_schema(const TableSchema *s) {
     return 1;
 }
 
-/* Bytes of the cut range that still parse as intact records (header check + CRC). */
-typedef struct { uint64_t records; int64_t min_id, max_id; } CutInfo;
+/* What the cut range still shows: intact records, and the highest id that must never be reused. */
+typedef struct { uint64_t records; int64_t min_id, max_id, id_floor; } CutInfo;
 
 /* Copy bytes [from, size) to `backup`, then sync it. The copy is removed on failure. */
 static int copy_cut_range(Table *t, const char *backup, uint64_t from, uint64_t size, DbError *err) {
@@ -278,7 +295,8 @@ static int copy_cut_range(Table *t, const char *backup, uint64_t from, uint64_t 
     return 0;
 }
 
-/* Find every record in [from, size) whose length check and payload CRC are intact. */
+/* Find every record in [from, size) whose length check and payload CRC are intact.
+ * Row ids and ID_FLOOR values both raise id_floor. */
 static int scan_cut_range(Table *t, uint64_t from, uint64_t size, CutInfo *info, DbError *err) {
     enum { WINDOW = 2 * MAX_RECORD };
     unsigned char *buf = malloc(WINDOW);
@@ -298,6 +316,10 @@ static int scan_cut_range(Table *t, uint64_t from, uint64_t size, CutInfo *info,
                     if (!info->records || id < info->min_id) info->min_id = id;
                     if (!info->records || id > info->max_id) info->max_id = id;
                     info->records++;
+                    if (id > info->id_floor) info->id_floor = id;
+                } else if (id == 0 && len == META_PAYLOAD && h[HEADER_SIZE + 8] == META_ID_FLOOR) {
+                    int64_t value = get_i64(h + HEADER_SIZE + 9);
+                    if (value > info->id_floor) info->id_floor = value;
                 }
                 p += HEADER_SIZE + len;
             } else p++;
@@ -308,9 +330,20 @@ static int scan_cut_range(Table *t, uint64_t from, uint64_t size, CutInfo *info,
     return 0;
 }
 
-/* Back up the bytes repair is about to cut, then report them. Name: <table>.tbl.repair-YYYYMMDD-HHMMSS. */
-static int back_up_before_repair(Table *t, const char *dir, uint64_t off, uint64_t size,
-                                 CutInfo *info, DbError *err) {
+/* The corrupt record itself may still have an intact header. Ids grow by 1, so its id column counts
+ * only if it equals kept_id + 1 (the one id it can have had); any other value is garbage. */
+static void note_corrupt_record_id(Table *t, uint64_t off, uint64_t size, int64_t kept_id, CutInfo *info) {
+    unsigned char h[HEADER_SIZE + 8];
+    if (size - off < sizeof h || os_read_at(t->file, h, sizeof h, off) != (int64_t)sizeof h) return;
+    if (get_u32(h + 4) != length_check(h)) return;
+    int64_t id = get_i64(h + HEADER_SIZE);
+    if (kept_id < INT64_MAX && id == kept_id + 1 && id > info->id_floor) info->id_floor = id;
+}
+
+/* Back up the bytes repair is about to cut, then report them. Name: <table>.tbl.repair-YYYYMMDD-HHMMSS.
+ * The cut starts at `off`; the corrupt record that triggered it starts at `bad_off` (>= off). */
+static int back_up_before_repair(Table *t, const char *dir, uint64_t off, uint64_t bad_off, uint64_t size,
+                                 int64_t kept_id, CutInfo *info, DbError *err) {
     char stamp[32], backup[4096];
     time_t now = time(NULL); struct tm *tm = localtime(&now);
     if (!tm || !strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", tm)) return fail(err, off, "cannot name repair backup");
@@ -324,6 +357,7 @@ static int back_up_before_repair(Table *t, const char *dir, uint64_t off, uint64
         if (attempt == 100) return fail(err, off, "cannot choose repair backup name");
     }
     if (copy_cut_range(t, backup, off, size, err) || scan_cut_range(t, off, size, info, err)) return -1;
+    note_corrupt_record_id(t, bad_off, size, kept_id, info);
     fprintf(stderr, "repair: cut %" PRIu64 " bytes at offset %" PRIu64 ", backup %s, %" PRIu64 " intact records in the cut bytes",
             size - off, off, backup, info->records);
     if (info->records) fprintf(stderr, ", ids %" PRId64 "..%" PRId64, info->min_id, info->max_id);
@@ -331,14 +365,48 @@ static int back_up_before_repair(Table *t, const char *dir, uint64_t off, uint64
     return 0;
 }
 
+/* Fill out[META_SIZE] with a meta record. */
+static void encode_meta(unsigned char *out, int kind, int64_t value) {
+    memset(out, 0, META_SIZE);
+    put_u32(out, META_PAYLOAD);
+    put_u32(out + 4, length_check(out));
+    out[HEADER_SIZE + 8] = (unsigned char)kind;
+    put_i64(out + HEADER_SIZE + 9, value);
+    put_u32(out + 8, crc32(out + HEADER_SIZE, META_PAYLOAD));
+}
+
+/* Append one meta record at the end of the file. */
+static int append_meta(Table *t, int kind, int64_t value) {
+    unsigned char record[META_SIZE];
+    encode_meta(record, kind, value);
+    return os_append(t->file, record, sizeof record, NULL);
+}
+
 Table *table_open(const char *dir, const TableSchema *schema, int repair, DbError *err) {
     return table_open_with_visitor(dir, schema, repair, NULL, NULL, err);
+}
+
+/* Rows read since the last COMMIT; they count only when a matching COMMIT follows. */
+typedef struct { int64_t id; uint64_t off; } PendingRow;
+typedef struct { PendingRow *rows; size_t n, capacity; uint64_t start; } Pending;
+
+static int pending_add(Pending *p, int64_t id, uint64_t off) {
+    if (!p->n) p->start = off;
+    if (p->n == p->capacity) {
+        size_t next = p->capacity ? p->capacity * 2 : 64;
+        PendingRow *rows = next > SIZE_MAX / sizeof *rows ? NULL : realloc(p->rows, next * sizeof *rows);
+        if (!rows) return -1;
+        p->rows = rows; p->capacity = next;
+    }
+    p->rows[p->n++] = (PendingRow){id, off};
+    return 0;
 }
 
 Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int repair,
                                TableOpenVisitor visitor, void *ctx, DbError *err) {
     clear_error(err);
     BlockReader *reader = NULL;
+    Pending pending = {0};
     if (!dir || !valid_schema(schema)) { fail(err, 0, "invalid table path or schema"); return NULL; }
     size_t dir_len = strlen(dir);
     if (dir_len > SIZE_MAX - sizeof schema->name - 6) {
@@ -360,7 +428,9 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
     if (!t->file) { fail(err, 0, "cannot open table file"); goto bad; }
     t->schema = *schema; t->next_id = 1; t->sync_always = 1;
     uint64_t size = os_size(t->file), off = 0;
-    int64_t last_id = 0;
+    /* last_id: highest id read (pending included, for ordering); settled_id: highest id that is
+     * committed or reserved by an ID_FLOOR. next_id starts one above settled_id. */
+    int64_t last_id = 0, settled_id = 0;
     CutInfo cut = {0};
     if (size == UINT64_MAX) { fail(err, 0, "cannot get table size"); goto bad; }
     if (size) {
@@ -368,37 +438,72 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
         if (!reader) { fail(err, 0, "out of memory"); goto bad; }
         reader->table = t; reader->size = size;
     }
-    while (off < size) {
-        Row row = {0}; uint64_t next = 0;
-        int rc = read_record(reader, off, &row, &next, err);
-        if (rc == RECORD_OK && row.id <= last_id) {
-            fail(err, off, "record ids are not increasing"); rc = RECORD_CORRUPT;
-        }
-        if (rc != RECORD_OK) {
-            if (rc != RECORD_INCOMPLETE && !(repair && rc == RECORD_CORRUPT)) goto bad;
-            /* Repair cuts good-looking bytes too: keep a copy and never reuse their ids. */
-            if (rc == RECORD_CORRUPT && back_up_before_repair(t, dir, off, size, &cut, err)) goto bad;
-            if (os_truncate(t->file, off) || os_sync(t->file)) {
-                fail(err, off, "cannot truncate/sync recovered table"); goto bad;
+    for (;;) {
+        Row row = {0}; Meta meta = {0}; uint64_t next = 0; int rc;
+        if (off >= size) {
+            if (!pending.n) break;
+            fail(err, off, "statement has no commit record"); rc = RECORD_INCOMPLETE;
+        } else {
+            rc = read_record(reader, off, &row, &meta, &next, err);
+            if (rc == RECORD_OK && row.id <= last_id) {
+                fail(err, off, "record ids are not increasing"); rc = RECORD_CORRUPT;
+            } else if (rc == RECORD_META && meta.kind == META_COMMIT && meta.value != (int64_t)pending.n) {
+                fail(err, off, "commit record does not match the rows before it"); rc = RECORD_CORRUPT;
+            } else if (rc == RECORD_META && meta.kind == META_ID_FLOOR && pending.n) {
+                fail(err, off, "id floor record inside an unfinished statement"); rc = RECORD_CORRUPT;
             }
-            if (rc == RECORD_INCOMPLETE) {
-                fprintf(stderr, "%" PRIu64 " bytes of incomplete tail truncated at offset %" PRIu64 "\n", size - off, off);
+        }
+        if (rc == RECORD_OK) {
+            if (pending_add(&pending, row.id, off)) { fail(err, off, "out of memory"); goto bad; }
+            last_id = row.id; off = next;
+            continue;
+        }
+        if (rc == RECORD_META) {
+            if (meta.kind == META_COMMIT) {
+                for (size_t i = 0; i < pending.n; i++) {
+                    if (visitor && visitor(pending.rows[i].id, pending.rows[i].off, ctx)) {
+                        fail(err, pending.rows[i].off, "table open visitor failed"); goto bad;
+                    }
+                }
+                t->row_count += pending.n; settled_id = last_id; pending.n = 0;
+            } else {
+                if (meta.value > settled_id) settled_id = meta.value;
+                if (meta.value > last_id) last_id = meta.value;
             }
-            break;
+            off = next;
+            continue;
         }
-        if (visitor && visitor(row.id, off, ctx)) {
-            fail(err, off, "table open visitor failed"); goto bad;
+        if (rc != RECORD_INCOMPLETE && !(repair && rc == RECORD_CORRUPT)) goto bad;
+        /* An unfinished statement is cut whole, from its first row. Repair also keeps a copy and
+         * never reuses the ids of the bytes it cuts. */
+        uint64_t cut_at = pending.n ? pending.start : off;
+        if (rc == RECORD_CORRUPT && back_up_before_repair(t, dir, cut_at, off, size, settled_id, &cut, err)) goto bad;
+        if (os_truncate(t->file, cut_at) || os_sync(t->file)) {
+            fail(err, cut_at, "cannot truncate/sync recovered table"); goto bad;
         }
-        last_id = row.id; t->row_count++; off = next;
+        if (rc == RECORD_INCOMPLETE && pending.n) {
+            fprintf(stderr, "incomplete statement: %zu records (%" PRIu64 " bytes) truncated at offset %" PRIu64 "\n",
+                    pending.n, size - cut_at, cut_at);
+        } else if (rc == RECORD_INCOMPLETE) {
+            fprintf(stderr, "%" PRIu64 " bytes of incomplete tail truncated at offset %" PRIu64 "\n", size - off, off);
+        }
+        off = cut_at;
+        if (rc == RECORD_CORRUPT && cut.id_floor > settled_id) {
+            /* Leave the cut ids burned in the file itself, so a later session cannot reuse them. */
+            if (append_meta(t, META_ID_FLOOR, cut.id_floor) || os_sync(t->file)) {
+                fail(err, cut_at, "cannot write id floor after repair"); goto bad;
+            }
+            settled_id = cut.id_floor; off += META_SIZE;
+        }
+        break;
     }
-    free(reader);
+    free(reader); free(pending.rows);
     t->end = off;
-    if (cut.records && cut.max_id > last_id) last_id = cut.max_id;
-    t->next_id = last_id == INT64_MAX ? 0 : last_id + 1;
+    t->next_id = settled_id == INT64_MAX ? 0 : settled_id + 1;
     clear_error(err);
     return t;
 bad:
-    free(reader);
+    free(reader); free(pending.rows);
     table_close(t);
     return NULL;
 }
@@ -476,7 +581,7 @@ int table_append_rows(Table *t, const Value *rows, size_t nrows, int64_t *ids_ou
         if (payload_length(t, width ? rows + r * width : NULL, start, &len, err)) { free(sizes); return -1; }
         sizes[r] = (uint32_t)(HEADER_SIZE + len);
         if (sizes[r] > largest) largest = sizes[r];
-        if (total > UINT64_MAX - sizes[r] || start > UINT64_MAX - total - sizes[r]) {
+        if (total > UINT64_MAX - sizes[r] - META_SIZE || start > UINT64_MAX - total - sizes[r] - META_SIZE) {
             free(sizes); return fail(err, start, "table size overflow");
         }
         total += sizes[r];
@@ -504,20 +609,25 @@ int table_append_rows(Table *t, const Value *rows, size_t nrows, int64_t *ids_ou
     free(buf);
     if (rc) { free(sizes); return rollback(t, start, err, "cannot append record"); }
     if (t->sync_always && os_sync(t->file)) { free(sizes); return rollback(t, start, err, "cannot sync record"); }
-    /* Success from here on: registration uses only reserved nodes and cannot fail. */
+    /* The COMMIT record makes the statement count: a reopen keeps the rows only if it is intact. */
+    if (append_meta(t, META_COMMIT, (int64_t)nrows)) { free(sizes); return rollback(t, start, err, "cannot append commit record"); }
+    if (t->sync_always && os_sync(t->file)) { free(sizes); return rollback(t, start, err, "cannot sync commit record"); }
+    /* Registration uses only reserved nodes and should not fail. If it does, undo the file; the
+     * index cannot drop entries it already took, so then the table stops accepting appends. */
     uint64_t off = start;
     for (size_t r = 0; r < nrows; r++) {
         int64_t row_id = t->next_id + (int64_t)r;
         if (t->index && bpt_insert_reserved(t->index, row_id, off)) {
-            t->write_failed = 1; free(sizes);
-            return fail(err, start, "cannot register record in index; close and reopen table");
+            free(sizes);
+            if (r) t->write_failed = 1;
+            return rollback(t, start, err, "cannot register record in index; close and reopen table");
         }
         if (ids_out) ids_out[r] = row_id;
         off += sizes[r];
     }
     free(sizes);
     if (t->index) bpt_release_reserved(t->index);
-    t->end = start + total;
+    t->end = start + total + META_SIZE;
     t->row_count += nrows; t->written += nrows;
     int64_t last = t->next_id + (int64_t)(nrows - 1);
     t->next_id = last == INT64_MAX ? 0 : last + 1;
@@ -579,8 +689,10 @@ static int scan_prefix(Table *t, RowVisitor visitor, void *ctx, DbError *err, in
             }
             last_yield = off;
         }
-        Row row = {0}; uint64_t next;
-        if (read_record(reader, off, &row, &next, err) != RECORD_OK) { rc = -1; break; }
+        Row row = {0}; Meta meta; uint64_t next;
+        int kind = read_record(reader, off, &row, &meta, &next, err);
+        if (kind == RECORD_META) { off = next; continue; } /* meta records are never rows */
+        if (kind != RECORD_OK) { rc = -1; break; }
         int stop = visitor(&row, off, ctx);
         if (stop) break;
         off = next;

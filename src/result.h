@@ -21,8 +21,9 @@ typedef struct {
 /* Results own all columns, TEXT bytes and inserted ids. Free is idempotent.
  * committed counts successful statements (including SELECT), not rows.
  * failed_index is zero-based, SIZE_MAX on success. items holds only successful
- * statements. No transaction: an I/O error within a multi-row INSERT may leave
- * earlier rows stored; the error message states that count.
+ * statements. There is no multi-statement transaction, but each INSERT is
+ * atomic: after a failed INSERT none of its rows are stored (also after a
+ * reopen), while earlier statements of the same input stay committed.
  */
 void stmt_result_free(StmtResult *result);
 void result_free(Result *result);

@@ -15,13 +15,20 @@ typedef int (*TableOpenVisitor)(int64_t id, uint64_t off, void *ctx);
  * Length excludes the 12-byte header; the entire record is at most 1 MiB.
  * TEXT is LE u32 byte length plus bytes (at most 64 KiB), INT is LE i64.
  * CRC covers the payload, including id. No string terminator is stored.
- * Open truncates incomplete tails; other corruption needs repair != 0.
+ * Meta records share the header; their id is 0 and the body is [u8 kind][i64 value]:
+ * kind 1 COMMIT (rows written by the statement before it), kind 2 ID_FLOOR (ids up to
+ * the value are never reused). Every INSERT statement is rows + COMMIT; rows count only
+ * once their COMMIT is intact. Meta records are never returned as rows.
+ * Open truncates incomplete tails, including a final statement without its COMMIT
+ * (the whole statement is removed); other corruption needs repair != 0. Repair writes an
+ * ID_FLOOR record so the ids it cut off are not handed out again.
  * Errors include the file offset; line/col are zero (not SQL positions).
  * All successful operations clear err. No internal locking: the caller
  * must serialize writes and exclude them during reads/scans/close.
  * Append synchronizes before publishing outputs/id unless sync is disabled
  * with table_set_sync (default sync always).
- * Failed append rolls back; failed rollback disables further appends.
+ * Failed append rolls back; failed rollback disables further appends (the unconfirmed
+ * bytes stay invisible, and a reopen removes the statement because it has no COMMIT).
  * Read uses only os_read_at and returns owned fields, with fields[0] = id.
  * Use an empty Row output. Free it with row_free, even after failure.
  * A visitor borrows its Row until return; nonzero stops a successful scan.
@@ -36,10 +43,10 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
 int table_append(Table *table, const Value *fields_without_id, int64_t *id_out,
                  uint64_t *off_out, DbError *err);
 /* Statement-atomic append of nrows rows (row-major, ncols - 1 fields each).
- * Reserves index nodes, writes every record, syncs once (sync always), then
- * registers all rows and publishes ids_out[0..nrows). Any failure truncates back
- * to the confirmed end, so no row of the statement remains. Same locking rule
- * as table_append. Rollback failure disables further appends until reopen.
+ * Reserves index nodes, writes every record, syncs (sync always), writes the COMMIT
+ * record, syncs again, then registers all rows and publishes ids_out[0..nrows). Any
+ * failure truncates back to the confirmed end, so no row of the statement remains.
+ * Same locking rule as table_append. Rollback failure disables further appends until reopen.
  */
 int table_append_rows(Table *table, const Value *rows, size_t nrows,
                       int64_t *ids_out, DbError *err);

@@ -65,11 +65,33 @@ static void test_lock_dir_twice_fails(void) {
     ASSERT(system(command) == 0);
     os_unlock_dir(); ASSERT(!os_lock_dir(test_dir)); os_unlock_dir();
 }
+typedef struct { OsFile *f; int failures; } Appender;
+static void *append_a_few(void *ctx) {
+    Appender *a = ctx;
+    for (int i = 0; i < 20; i++) if (os_append(a->f, "x", 1, NULL)) a->failures++;
+    return NULL;
+}
+/* os_test_fail_append_after(n) fails exactly one append, even with threads appending at once. */
+static void test_append_failure_injection_fires_exactly_once_across_threads(void) {
+    for (int round = 0; round < 50; round++) {
+        Appender a[4]; pthread_t threads[4]; char name[32];
+        for (int i = 0; i < 4; i++) {
+            snprintf(name, sizeof name, "os-inject-%d.bin", i);
+            remove(test_path(name)); a[i] = (Appender){os_open(test_path(name), 1), 0}; ASSERT(a[i].f);
+        }
+        os_test_fail_append_after(10);
+        for (int i = 0; i < 4; i++) ASSERT(pthread_create(&threads[i], NULL, append_a_few, &a[i]) == 0);
+        for (int i = 0; i < 4; i++) ASSERT(pthread_join(threads[i], NULL) == 0);
+        int total = 0; for (int i = 0; i < 4; i++) { total += a[i].failures; os_close(a[i].f); }
+        ASSERT(total == 1);
+    }
+}
 int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "--lock-child")) { int rc = os_lock_dir(argv[2]); if (!rc) os_unlock_dir(); return rc == -1 ? 0 : 1; }
     if (os_init()) return 1;
     test_dir_init("os");
     RUN(test_concurrent_pread_preserves_fd_cursor);
     RUN(test_read_at_does_not_move); RUN(test_concurrent_read_at); RUN(test_append_returns_offset); RUN(test_truncate); RUN(test_now_us_monotonic); RUN(test_lock_dir_twice_fails);
+    RUN(test_append_failure_injection_fires_exactly_once_across_threads);
     os_cleanup(); return test_finish();
 }

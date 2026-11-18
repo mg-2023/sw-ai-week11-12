@@ -40,10 +40,13 @@ size_t bpt_test_node_allocs(void) { return atomic_load(&node_allocs); }
 
 static BPTNode *node_new(int leaf) {
 #ifdef MINI_DBMS_TESTING
+    /* Compare-exchange: with several threads, exactly the armed number of calls fail. */
     size_t left = atomic_load(&fail_node_after);
-    if (left != SIZE_MAX) {
-        if (!left) { atomic_store(&fail_node_after, SIZE_MAX); return NULL; }
-        atomic_store(&fail_node_after, left - 1);
+    while (left != SIZE_MAX) {
+        if (atomic_compare_exchange_weak(&fail_node_after, &left, left ? left - 1 : SIZE_MAX)) {
+            if (!left) return NULL;
+            break;
+        }
     }
     atomic_fetch_add(&node_allocs, 1);
 #endif
@@ -87,19 +90,25 @@ int bpt_find(const BPTree *tree, int64_t key, uint64_t *value) {
     return 0;
 }
 
-/* Reserved nodes use next as a temporary allocation list, before becoming live. */
+/* Reserved nodes use next as a temporary allocation list, before becoming live.
+ * NULL when the list is empty (the caller reserved too few nodes). */
 static BPTNode *take_node(BPTNode **reserved, int leaf) {
     BPTNode *node = *reserved;
+    if (!node) return NULL;
     *reserved = node->next;
     node->next = NULL;
     node->leaf = leaf;
     return node;
 }
 
+/* Returns the new right sibling after a split, else NULL. *error is set when a split found no
+ * reserved node: a full leaf then fails before any change; a failure higher up can leave a
+ * half-linked tree, so the caller must treat the tree as unusable. */
 static BPTNode *insert_node(BPTNode *node, int64_t key, uint64_t value,
-                            BPTNode **reserved, int64_t *separator) {
+                            BPTNode **reserved, int64_t *separator, int *error) {
     size_t pos = key_position(node, key);
     if (node->leaf) {
+        if (node->n == BPT_MAX_KEYS && !*reserved) { *error = 1; return NULL; }
         memmove(node->keys + pos + 1, node->keys + pos, (node->n - pos) * sizeof *node->keys);
         memmove(node->data.values + pos + 1, node->data.values + pos,
                 (node->n - pos) * sizeof *node->data.values);
@@ -107,7 +116,7 @@ static BPTNode *insert_node(BPTNode *node, int64_t key, uint64_t value,
         node->data.values[pos] = value;
     } else {
         int64_t promoted;
-        BPTNode *right = insert_node(node->data.children[pos], key, value, reserved, &promoted);
+        BPTNode *right = insert_node(node->data.children[pos], key, value, reserved, &promoted, error);
         if (!right) return NULL;
         memmove(node->keys + pos + 1, node->keys + pos, (node->n - pos) * sizeof *node->keys);
         memmove(node->data.children + pos + 2, node->data.children + pos + 1,
@@ -119,6 +128,7 @@ static BPTNode *insert_node(BPTNode *node, int64_t key, uint64_t value,
     if (node->n <= BPT_MAX_KEYS) return NULL;
 
     BPTNode *right = take_node(reserved, node->leaf);
+    if (!right) { *error = 1; return NULL; }
     size_t mid = node->n / 2;
     if (node->leaf) {
         right->n = node->n - mid;
@@ -212,16 +222,18 @@ int bpt_reserve_insert_range(BPTree *tree, int64_t first_key, size_t n) {
 int bpt_insert_reserved(BPTree *tree, int64_t key, uint64_t value) {
     if (!tree || tree->count == SIZE_MAX) return -1;
     if (!tree->root) {
-        if (!tree->reserved) return -1;
         BPTNode *root = take_node(&tree->reserved, 1);
+        if (!root) return -1;
         root->keys[0] = key; root->data.values[0] = value; root->n = 1;
         tree->root = root; tree->height = 1; tree->count = 1;
         return 0;
     }
-    int64_t separator;
-    BPTNode *right = insert_node(tree->root, key, value, &tree->reserved, &separator);
+    int64_t separator; int error = 0;
+    BPTNode *right = insert_node(tree->root, key, value, &tree->reserved, &separator, &error);
+    if (error) return -1;
     if (right) {
         BPTNode *root = take_node(&tree->reserved, 0);
+        if (!root) return -1; /* the new sibling is lost: the tree is unusable */
         root->n = 1; root->keys[0] = separator;
         root->data.children[0] = tree->root; root->data.children[1] = right;
         tree->root = root; tree->height++;
@@ -238,15 +250,18 @@ int bpt_insert(BPTree *tree, int64_t key, uint64_t value) {
     if (bpt_reserve_insert(tree, key)) return -1;
     if (!tree->root) {
         BPTNode *root = take_node(&tree->reserved, 1);
+        if (!root) return -1;
         root->keys[0] = key; root->data.values[0] = value; root->n = 1;
         tree->root = root; tree->height = 1; tree->count = 1;
         free_reserved(tree);
         return 0;
     }
-    int64_t separator;
-    BPTNode *right = insert_node(tree->root, key, value, &tree->reserved, &separator);
+    int64_t separator; int error = 0;
+    BPTNode *right = insert_node(tree->root, key, value, &tree->reserved, &separator, &error);
+    if (error) return -1;
     if (right) {
         BPTNode *root = take_node(&tree->reserved, 0);
+        if (!root) return -1;
         root->n = 1; root->keys[0] = separator;
         root->data.children[0] = tree->root; root->data.children[1] = right;
         tree->root = root; tree->height++;
