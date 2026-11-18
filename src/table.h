@@ -48,6 +48,9 @@ int table_append(Table *table, const Value *fields_without_id, int64_t *id_out,
  * failure truncates back to the confirmed end, so no row of the statement remains.
  * Same locking rule as table_append. Rollback failure disables further appends until reopen.
  */
+/* Error message when the COMMIT record was written but the statement could be neither confirmed nor
+ * cut back: a reopen decides whether its rows exist. Kind is DB_ERROR_INTERNAL. */
+#define TABLE_OUTCOME_UNKNOWN "statement outcome unknown: commit record was written but could not be confirmed or rolled back; reopen the table to see whether the rows exist"
 int table_append_rows(Table *table, const Value *rows, size_t nrows,
                       int64_t *ids_out, DbError *err);
 int table_read_at(Table *table, uint64_t off, Row *out, DbError *err);

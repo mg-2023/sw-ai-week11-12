@@ -60,7 +60,7 @@ static int insert_rows(Table *table, const Statement *s, const int map[32], Stmt
     int rc = table_append_rows(table, fields, rows, out->inserted_ids, err);
     free(fields);
     if (rc) {
-        if (err) {
+        if (err && strncmp(err->message, "statement outcome unknown", 25) != 0) {
             char detail[sizeof err->message]; memcpy(detail, err->message, sizeof detail);
             if (err->kind == DB_ERROR_SQL) { err->line = s->line; err->col = s->col; }
             snprintf(err->message, sizeof err->message, "%.160s (no row of this statement was committed)", detail);

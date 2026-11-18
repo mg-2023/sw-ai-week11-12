@@ -40,6 +40,9 @@ int os_sock_interrupt_listener(SOCKET_T listener);
 /* Call handler on Ctrl+C / Ctrl+Break / console close (Windows) or SIGINT / SIGTERM
  * (POSIX). The handler must only set flags and call os_sock_interrupt_listener. 0 = ok. */
 int os_set_interrupt_handler(void (*handler)(void));
+/* Call once shutdown is finished. On Windows a console-close handler that returns lets the system
+ * end the process at once, so it waits (at most 4 s) for this call; Ctrl+C / Ctrl+Break do not wait. */
+void os_interrupt_done(void);
 SOCKET_T os_sock_connect_local(uint16_t port);
 int64_t os_sock_recv(SOCKET_T s, void *buf, size_t n, uint64_t deadline_us);
 int64_t os_sock_send(SOCKET_T s, const void *buf, size_t n, uint64_t deadline_us);
@@ -50,6 +53,7 @@ void os_sock_close(SOCKET_T s);
 void os_sock_close_graceful(SOCKET_T s, uint64_t deadline_us);
 #ifdef MINI_DBMS_TESTING
 void os_test_fail_sync(void);
+void os_test_fail_sync_after(unsigned n); /* the sync after n more successful ones fails */
 void os_test_fail_append(void);
 void os_test_fail_append_after(unsigned n);
 void os_test_fail_truncate(void);

@@ -296,8 +296,10 @@ static int copy_cut_range(Table *t, const char *backup, uint64_t from, uint64_t 
 }
 
 /* Find every record in [from, size) whose length check and payload CRC are intact.
- * Row ids and ID_FLOOR values both raise id_floor. */
-static int scan_cut_range(Table *t, uint64_t from, uint64_t size, CutInfo *info, DbError *err) {
+ * Row ids, ID_FLOOR values and the last id a COMMIT implies (statement start id + rows - 1)
+ * all raise id_floor. settled_id is the last id committed before `from`. */
+static int scan_cut_range(Table *t, uint64_t from, uint64_t size, int64_t settled_id, CutInfo *info, DbError *err) {
+    int64_t next_start = settled_id + 1, first_row = 0; /* start id of the statement being read */
     enum { WINDOW = 2 * MAX_RECORD };
     unsigned char *buf = malloc(WINDOW);
     if (!buf) return fail(err, from, "out of memory");
@@ -317,9 +319,20 @@ static int scan_cut_range(Table *t, uint64_t from, uint64_t size, CutInfo *info,
                     if (!info->records || id > info->max_id) info->max_id = id;
                     info->records++;
                     if (id > info->id_floor) info->id_floor = id;
+                    if (!first_row) first_row = id;
                 } else if (id == 0 && len == META_PAYLOAD && h[HEADER_SIZE + 8] == META_ID_FLOOR) {
                     int64_t value = get_i64(h + HEADER_SIZE + 9);
                     if (value > info->id_floor) info->id_floor = value;
+                    if (value > 0 && value < INT64_MAX) next_start = value + 1;
+                    first_row = 0;
+                } else if (id == 0 && len == META_PAYLOAD && h[HEADER_SIZE + 8] == META_COMMIT) {
+                    int64_t count = get_i64(h + HEADER_SIZE + 9), base = first_row ? first_row : next_start;
+                    if (count > 0 && base > 0 && count <= INT64_MAX - base) {
+                        int64_t last = base + count - 1;
+                        if (last > info->id_floor) info->id_floor = last;
+                        if (last < INT64_MAX) next_start = last + 1;
+                    }
+                    first_row = 0;
                 }
                 p += HEADER_SIZE + len;
             } else p++;
@@ -331,7 +344,8 @@ static int scan_cut_range(Table *t, uint64_t from, uint64_t size, CutInfo *info,
 }
 
 /* The corrupt record itself may still have an intact header. Ids grow by 1, so its id column counts
- * only if it equals kept_id + 1 (the one id it can have had); any other value is garbage. */
+ * only if it equals kept_id + 1, where kept_id is the last id read before it, pending rows included
+ * (the one id it can have had); any other value is garbage. */
 static void note_corrupt_record_id(Table *t, uint64_t off, uint64_t size, int64_t kept_id, CutInfo *info) {
     unsigned char h[HEADER_SIZE + 8];
     if (size - off < sizeof h || os_read_at(t->file, h, sizeof h, off) != (int64_t)sizeof h) return;
@@ -343,7 +357,7 @@ static void note_corrupt_record_id(Table *t, uint64_t off, uint64_t size, int64_
 /* Back up the bytes repair is about to cut, then report them. Name: <table>.tbl.repair-YYYYMMDD-HHMMSS.
  * The cut starts at `off`; the corrupt record that triggered it starts at `bad_off` (>= off). */
 static int back_up_before_repair(Table *t, const char *dir, uint64_t off, uint64_t bad_off, uint64_t size,
-                                 int64_t kept_id, CutInfo *info, DbError *err) {
+                                 int64_t settled_id, int64_t kept_id, CutInfo *info, DbError *err) {
     char stamp[32], backup[4096];
     time_t now = time(NULL); struct tm *tm = localtime(&now);
     if (!tm || !strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", tm)) return fail(err, off, "cannot name repair backup");
@@ -356,7 +370,7 @@ static int back_up_before_repair(Table *t, const char *dir, uint64_t off, uint64
         os_close(existing);
         if (attempt == 100) return fail(err, off, "cannot choose repair backup name");
     }
-    if (copy_cut_range(t, backup, off, size, err) || scan_cut_range(t, off, size, info, err)) return -1;
+    if (copy_cut_range(t, backup, off, size, err) || scan_cut_range(t, off, size, settled_id, info, err)) return -1;
     note_corrupt_record_id(t, bad_off, size, kept_id, info);
     fprintf(stderr, "repair: cut %" PRIu64 " bytes at offset %" PRIu64 ", backup %s, %" PRIu64 " intact records in the cut bytes",
             size - off, off, backup, info->records);
@@ -477,7 +491,7 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
         /* An unfinished statement is cut whole, from its first row. Repair also keeps a copy and
          * never reuses the ids of the bytes it cuts. */
         uint64_t cut_at = pending.n ? pending.start : off;
-        if (rc == RECORD_CORRUPT && back_up_before_repair(t, dir, cut_at, off, size, settled_id, &cut, err)) goto bad;
+        if (rc == RECORD_CORRUPT && back_up_before_repair(t, dir, cut_at, off, size, settled_id, last_id, &cut, err)) goto bad;
         if (os_truncate(t->file, cut_at) || os_sync(t->file)) {
             fail(err, cut_at, "cannot truncate/sync recovered table"); goto bad;
         }
@@ -517,11 +531,19 @@ void table_test_set_write_chunk(size_t bytes) { atomic_store(&write_chunk, bytes
 #define WRITE_CHUNK ((size_t)MAX_RECORD)
 #endif
 
-/* Cut the file back to the statement start; if that fails the table refuses appends. */
-static int rollback(Table *t, uint64_t off, DbError *err, const char *message) {
+/* Cut the file back to the statement start; if that fails the table refuses appends.
+ * With commit_written the COMMIT may already be in the file, so a failed cut leaves the outcome unknown. */
+static int rollback(Table *t, uint64_t off, DbError *err, const char *message, int commit_written) {
     if (t->index) bpt_release_reserved(t->index);
     if (os_truncate(t->file, off) || os_sync(t->file)) {
         t->write_failed = 1;
+        if (commit_written) {
+            if (err) {
+                *err = (DbError){.kind = DB_ERROR_INTERNAL};
+                snprintf(err->message, sizeof err->message, "%s", TABLE_OUTCOME_UNKNOWN);
+            }
+            return -1;
+        }
         return fail(err, off, "append rollback failed; close and reopen table");
     }
     return fail(err, off, message);
@@ -607,11 +629,11 @@ int table_append_rows(Table *t, const Value *rows, size_t nrows, int64_t *ids_ou
     }
     if (!rc && used) rc = os_append(t->file, buf, used, NULL);
     free(buf);
-    if (rc) { free(sizes); return rollback(t, start, err, "cannot append record"); }
-    if (t->sync_always && os_sync(t->file)) { free(sizes); return rollback(t, start, err, "cannot sync record"); }
+    if (rc) { free(sizes); return rollback(t, start, err, "cannot append record", 0); }
+    if (t->sync_always && os_sync(t->file)) { free(sizes); return rollback(t, start, err, "cannot sync record", 0); }
     /* The COMMIT record makes the statement count: a reopen keeps the rows only if it is intact. */
-    if (append_meta(t, META_COMMIT, (int64_t)nrows)) { free(sizes); return rollback(t, start, err, "cannot append commit record"); }
-    if (t->sync_always && os_sync(t->file)) { free(sizes); return rollback(t, start, err, "cannot sync commit record"); }
+    if (append_meta(t, META_COMMIT, (int64_t)nrows)) { free(sizes); return rollback(t, start, err, "cannot append commit record", 0); }
+    if (t->sync_always && os_sync(t->file)) { free(sizes); return rollback(t, start, err, "cannot sync commit record", 1); }
     /* Registration uses only reserved nodes and should not fail. If it does, undo the file; the
      * index cannot drop entries it already took, so then the table stops accepting appends. */
     uint64_t off = start;
@@ -620,7 +642,7 @@ int table_append_rows(Table *t, const Value *rows, size_t nrows, int64_t *ids_ou
         if (t->index && bpt_insert_reserved(t->index, row_id, off)) {
             free(sizes);
             if (r) t->write_failed = 1;
-            return rollback(t, start, err, "cannot register record in index; close and reopen table");
+            return rollback(t, start, err, "cannot register record in index; close and reopen table", 1);
         }
         if (ids_out) ids_out[r] = row_id;
         off += sizes[r];

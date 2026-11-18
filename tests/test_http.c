@@ -79,6 +79,33 @@ static Value text_value(const char *bytes, uint32_t len) {
 static char *dup_str(const char *s) { size_t n = strlen(s) + 1; char *p = malloc(n); memcpy(p, s, n); return p; }
 
 /* A result with one SELECT of columns (id, name) and the given name bytes. */
+/* Bytes after the declared body are flagged so the server can close gracefully. */
+static void test_extra_bytes_after_body_are_flagged(void) {
+    const char *raw = "POST /query HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcdef";
+    HttpRequest r = {0};
+    ASSERT(http_parse(raw, strlen(raw), &r) == 0 && r.body_len == 3 && r.extra_bytes == 3);
+    http_request_free(&r);
+    raw = "POST /query HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc";
+    ASSERT(http_parse(raw, strlen(raw), &r) == 0 && r.extra_bytes == 0);
+    http_request_free(&r);
+}
+/* A line ended by LF alone is malformed: answer 400 now instead of waiting for a CRLFCRLF that never comes. */
+static void test_bare_lf_is_400_at_once(void) {
+    HttpRequest r = {0};
+    const char *bad[] = {
+        "POST /query HTTP/1.1\nHost: x\nContent-Length: 5\n\nxxxxx",
+        "POST /query HTTP/1.1\n",
+        "POST /query HTTP/1.1\r\nHost: x\nContent-Length: 5\r\n\r\nxxxxx",
+        "POST /query HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n",
+    };
+    ASSERT(http_parse(bad[0], strlen(bad[0]), &r) == 400);
+    ASSERT(http_parse(bad[1], strlen(bad[1]), &r) == 400);
+    ASSERT(http_parse(bad[2], strlen(bad[2]), &r) == 400);
+    ASSERT(http_parse(bad[3], strlen(bad[3]), &r) == HTTP_NEED_MORE); /* CRLF only: still waiting */
+    const char *body_lf = "POST /query HTTP/1.1\r\nContent-Length: 4\r\n\r\na\nb\n"; /* LF inside the body is data */
+    ASSERT(http_parse(body_lf, strlen(body_lf), &r) == 0 && r.body_len == 4);
+    http_request_free(&r);
+}
 static void select_result(Result *out, const char *name, uint32_t name_len) {
     *out = (Result){.ok = 1, .failed_index = SIZE_MAX};
     out->items = calloc(1, sizeof *out->items); out->n = 1; out->committed = 1;
@@ -223,6 +250,7 @@ int main(void) {
     RUN(test_parse_post_query); RUN(test_parse_get_health); RUN(test_missing_content_length_400);
     RUN(test_body_too_large_413); RUN(test_partial_header_needs_more); RUN(test_partial_body_needs_more);
     RUN(test_malformed_requests_400); RUN(test_header_without_end_over_limit_400);
+    RUN(test_extra_bytes_after_body_are_flagged); RUN(test_bare_lf_is_400_at_once);
     RUN(test_json_select_shape); RUN(test_json_insert_shape); RUN(test_json_escape);
     RUN(test_json_empty_text_and_utf8_passthrough); RUN(test_error_json_has_line_col_committed);
     RUN(test_read_request_over_socket); RUN(test_read_request_timeout_408);

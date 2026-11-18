@@ -23,6 +23,13 @@ static long find_header_end(const char *buf, size_t n) {
     return -1;
 }
 
+/* 1 if buf[0..n) holds an LF that no CR precedes. */
+static int has_bare_lf(const char *buf, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (buf[i] == '\n' && (i == 0 || buf[i - 1] != '\r')) return 1;
+    return 0;
+}
+
 /* METHOD SP path SP HTTP/1.x ; 0 ok, -1 malformed. */
 static int parse_request_line(const char *line, size_t len, HttpRequest *req) {
     const char *sp1 = memchr(line, ' ', len);
@@ -56,6 +63,7 @@ static uint64_t parse_length(const char *v, size_t len) {
 
 int http_parse(const char *buf, size_t n, HttpRequest *req) {
     long end = find_header_end(buf, n);
+    if (has_bare_lf(buf, end < 0 ? (n < HTTP_MAX_HEADER ? n : HTTP_MAX_HEADER) : (size_t)end + 4)) return 400;
     if (end < 0) return n >= HTTP_MAX_HEADER ? 400 : HTTP_NEED_MORE;
     size_t header_len = (size_t)end + 4;
     const char *p = buf, *stop = buf + end;
@@ -96,6 +104,7 @@ int http_parse(const char *buf, size_t n, HttpRequest *req) {
     memcpy(tmp.body, buf + header_len, (size_t)length);
     tmp.body[length] = '\0';
     tmp.body_len = (size_t)length;
+    tmp.extra_bytes = n - header_len - (size_t)length;
     *req = tmp;
     return 0;
 }

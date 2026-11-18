@@ -289,6 +289,25 @@ def test_bad_http_400():
         assert reply.startswith(b"HTTP/1.1 408"), reply
 
 
+def test_bare_lf_gets_400_at_once():
+    with server() as s:
+        started = time.monotonic()
+        status, body = raw_request(s.port, b"POST /query HTTP/1.1\nHost: x\nContent-Length: 5\n\nxxxxx")
+        took = time.monotonic() - started
+        assert status == 400 and body["ok"] is False, (status, body)
+        assert took < 1.0, took      # not the 2 s read deadline (408)
+
+
+def test_body_longer_than_content_length_still_gets_its_answer():
+    with server() as s:
+        for extra in (10, 300 * 1024, 2 * 1024 * 1024):
+            sql = b"INSERT INTO users VALUES ('ann', 1);"
+            payload = (b"POST /query HTTP/1.1\r\nContent-Length: %d\r\n\r\n" % len(sql)) + sql + b"x" * extra
+            status, body = raw_request(s.port, payload)
+            assert status == 200 and body["ok"] is True, (extra, status, body)
+        assert http(s.port, "GET", "/health")[0] == 200
+
+
 def test_body_413():
     with server() as s:
         too_big = "SELECT * FROM users; --" + "x" * (1024 * 1024)

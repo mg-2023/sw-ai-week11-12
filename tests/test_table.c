@@ -862,7 +862,33 @@ static void test_repair_ignores_corrupt_id_column_that_is_not_next_id(void) {
     ASSERT(fwrite(huge, 1, 8, f) == 8 && fclose(f) == 0);
     Table *t = table_open(test_dir, &schema, 1, &err); ASSERT(t); table_close(t);
     t = table_open(test_dir, &schema, 0, &err); ASSERT(t);
-    ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 3); /* last committed id 2, plus 1 */
+    ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id == 4); /* garbage id column ignored; id 3 was committed (its COMMIT is in the cut), so the next is 4 */
+    table_close(t);
+}
+
+static void test_repair_keeps_ids_of_pending_rows_and_corrupt_row(void) {
+    /* ids 1 / 2,3,4: the id 4 row is corrupt, rows 2,3 are pending. Id 4 was handed out. */
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t); int64_t id;
+    ASSERT(table_append_rows(t, statement_of(1, 1), 1, NULL, &err) == 0);
+    uint64_t start; ASSERT(file_size(&start) == 0);
+    ASSERT(table_append_rows(t, statement_of(3, 1), 3, NULL, &err) == 0);
+    table_close(t);
+    ASSERT(flip_byte(start + 2 * 33 + 20) == 0);
+    t = table_open(test_dir, &schema, 1, &err); ASSERT(t && count_rows(t, &err) == 1);
+    ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id >= 5);
+    table_close(t);
+}
+
+static void test_repair_uses_commit_count_when_corrupt_row_header_is_unreadable(void) {
+    /* The id 4 row has a broken length check, so its id is unreadable; the COMMIT (3 rows from id 2) still shows 4. */
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t); int64_t id;
+    ASSERT(table_append_rows(t, statement_of(1, 1), 1, NULL, &err) == 0);
+    uint64_t start; ASSERT(file_size(&start) == 0);
+    ASSERT(table_append_rows(t, statement_of(3, 1), 3, NULL, &err) == 0);
+    table_close(t);
+    ASSERT(flip_byte(start + 2 * 33 + 5) == 0);
+    t = table_open(test_dir, &schema, 1, &err); ASSERT(t && count_rows(t, &err) == 1);
+    ASSERT(append_row(t, "n", 1, 1, &id, NULL, &err) == 0 && id >= 5);
     table_close(t);
 }
 
@@ -886,6 +912,8 @@ int main(void) {
     RUN(test_repair_inside_a_statement_cuts_the_whole_statement);
     RUN(test_id_floor_inside_cut_range_is_carried_over);
     RUN(test_repair_ignores_corrupt_id_column_that_is_not_next_id);
+    RUN(test_repair_keeps_ids_of_pending_rows_and_corrupt_row);
+    RUN(test_repair_uses_commit_count_when_corrupt_row_header_is_unreadable);
     RUN(test_repair_backs_up_cut_bytes_and_skips_their_ids);
     RUN(test_repair_backup_failure_does_not_truncate);
     RUN(test_repair_without_later_valid_records_reports_none);

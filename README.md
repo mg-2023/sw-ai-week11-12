@@ -63,9 +63,9 @@ curl.exe -s http://127.0.0.1:8100/health        # {"ok":true}
 curl.exe -s http://127.0.0.1:8100/stats
 ```
 
-상태 코드 : 200 성공, 400 SQL 오류 · 잘못된 HTTP, 408 받기 시한 (2초), 413 본문 1 MiB 초과, 500 내부 오류 (파일 I/O 등), 503 큐 가득 또는 대기 시한 (전체 5초) 초과. 응답은 항상 `Connection: close` 이며 연결 하나에 요청 하나다. `POST /query` 는 `Content-Length` 가 필요하다 (curl 이 붙인다). SELECT 결과는 메모리 16 MiB 를 넘으면 400 이다 (CLI 도 같다) : `WHERE` 나 `LIMIT` 을 쓴다. 구조 · 락 · 시한 · 종료 설명은 `docs/architecture.md` 의 Phase 3 절에 있다.
+상태 코드 : 200 성공, 400 SQL 오류 · 잘못된 HTTP (CR 없이 LF 만 쓴 줄 포함), 408 받기 시한 (2초), 413 본문 1 MiB 초과, 500 내부 오류 (파일 I/O 등, 또는 COMMIT 을 쓴 뒤 확인 · 되돌리기가 모두 실패한 INSERT 의 "statement outcome unknown" — 다시 열어 봐야 안다), 503 큐 가득 또는 대기 시한 (전체 5초) 초과. 응답은 항상 `Connection: close` 이며 연결 하나에 요청 하나다. `POST /query` 는 `Content-Length` 가 필요하다 (curl 이 붙인다). SELECT 결과는 메모리 16 MiB 를 넘으면 400 이다 (CLI 도 같다) : `WHERE` 나 `LIMIT` 을 쓴다. 구조 · 락 · 시한 · 종료 설명은 `docs/architecture.md` 의 Phase 3 절에 있다.
 
 ```powershell
 python tests/test_server.py                # 서버 테스트 (약 30초, 먼저 mingw32-make)
-python tests/measure_lock_wait.py          # 15만 행 테이블에서 INSERT 락 대기 p99 측정
+python tests/measure_lock_wait.py          # 15만 행 테이블에서 INSERT 락 대기 p99 · 끝-끝 지연 측정 (--rows 1000000 도 가능)
 ```

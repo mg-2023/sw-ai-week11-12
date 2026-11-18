@@ -150,11 +150,13 @@ int64_t os_read_at(OsFile *f, void *buf, size_t n, uint64_t off) {
 #ifdef MINI_DBMS_TESTING
 /* Atomic so Phase 3 worker threads can run with injection points armed. */
 static atomic_int fail_sync;
+static atomic_uint fail_sync_after;
 static atomic_uint fail_append_after;
 static atomic_int fail_append;
 static atomic_int fail_truncate;
 static atomic_uint sync_calls;
-void os_test_fail_sync(void) { atomic_store(&fail_sync, 1); }
+void os_test_fail_sync(void) { atomic_store(&fail_sync_after, 0); atomic_store(&fail_sync, 1); }
+void os_test_fail_sync_after(unsigned n) { atomic_store(&fail_sync_after, n); atomic_store(&fail_sync, 1); }
 void os_test_fail_append_after(unsigned n) { atomic_store(&fail_append_after, n); atomic_store(&fail_append, 1); }
 void os_test_fail_append(void) { os_test_fail_append_after(0); }
 void os_test_fail_truncate(void) { atomic_store(&fail_truncate, 1); }
@@ -170,7 +172,11 @@ int os_truncate(OsFile *f, uint64_t n) {
 int os_sync(OsFile *f) {
 #ifdef MINI_DBMS_TESTING
     atomic_fetch_add(&sync_calls, 1);
-    if (atomic_exchange(&fail_sync, 0)) return -1;
+    if (atomic_load(&fail_sync)) {
+        unsigned left = atomic_load(&fail_sync_after);
+        while (left && !atomic_compare_exchange_weak(&fail_sync_after, &left, left - 1)) {}
+        if (!left && atomic_exchange(&fail_sync, 0)) return -1;
+    }
 #endif
     return sync_file(f);
 }
@@ -277,16 +283,22 @@ int os_sock_interrupt_listener(SOCKET_T listener) {
 
 static void (*volatile interrupt_handler)(void);
 #ifdef _WIN32
+static HANDLE shutdown_done;   /* set by os_interrupt_done; a console-close handler waits for it */
+#define CLOSE_WAIT_MS 4000         /* Windows kills the process about 5 s after a close event */
 /* Console control events arrive on a new thread created by Windows. */
 static BOOL WINAPI console_ctrl(DWORD type) {
     if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT && type != CTRL_CLOSE_EVENT) return FALSE;
     if (interrupt_handler) interrupt_handler();
+    /* Once this handler returns the system ends the process, so hold it until shutdown has finished. */
+    if (type == CTRL_CLOSE_EVENT && shutdown_done) WaitForSingleObject(shutdown_done, CLOSE_WAIT_MS);
     return TRUE;
 }
 int os_set_interrupt_handler(void (*handler)(void)) {
     interrupt_handler = handler;
+    if (!shutdown_done) shutdown_done = CreateEventA(NULL, TRUE, FALSE, NULL);
     return SetConsoleCtrlHandler(console_ctrl, TRUE) ? 0 : -1;
 }
+void os_interrupt_done(void) { if (shutdown_done) SetEvent(shutdown_done); }
 #else
 #include <signal.h>
 static void on_signal(int sig) { (void)sig; if (interrupt_handler) interrupt_handler(); }
@@ -296,6 +308,7 @@ int os_set_interrupt_handler(void (*handler)(void)) {
     sa.sa_handler = on_signal;
     return sigaction(SIGINT, &sa, NULL) || sigaction(SIGTERM, &sa, NULL) ? -1 : 0;
 }
+void os_interrupt_done(void) {}
 #endif
 
 /* Connect to 127.0.0.1:port (tests and local clients). */

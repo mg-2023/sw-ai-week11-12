@@ -117,6 +117,7 @@ static void handle_connection(void *arg, int worker_id) {
             http_send(s, 200, "{\"ok\":true}", 11, os_now_us() + SEND_US);
         } else send_stats(srv, s);
     } else send_error(s, 404, "unknown path");
+    if (req.extra_bytes) drain = 1;   /* the client sent more than Content-Length: do not reset over it */
     http_request_free(&req);
 done:
     if (drain) os_sock_close_graceful(s, os_now_us() + 300000u);
@@ -134,14 +135,19 @@ static void reject_connection(void *arg, int worker_id) {
     free(conn);
 }
 
-/* Accept loop: hand each connection to the pool; when the queue is full pass it to the rejector at once. */
-static void accept_loop(Server *srv) {
+/* Accept loop: hand each connection to the pool; when the queue is full pass it to the rejector at once.
+ * Returns 1 if it stopped because accept kept failing (not because of a stop request), else 0. */
+static int accept_loop(Server *srv) {
     int errors = 0;
     while (!atomic_load(&g_stop)) {
         SOCKET_T c = os_sock_accept_wait(g_listener, ACCEPT_POLL_MS);
         if (c == (SOCKET_T)OS_SOCK_TIMEOUT) continue;
         if (c == OS_INVALID_SOCKET) {
-            if (atomic_load(&g_stop) || ++errors > 100) break;
+            if (atomic_load(&g_stop)) break;
+            if (++errors > 100) {
+                fputs("error: accept failed over 100 times in a row; stopping the server\n", stderr);
+                return 1;
+            }
             continue;
         }
         errors = 0;
@@ -153,6 +159,7 @@ static void accept_loop(Server *srv) {
             if (!conn || tp_submit(srv->rejector, conn)) { os_sock_close(c); free(conn); }
         }
     }
+    return 0;
 }
 
 /* Same shape as the CLI usage error: message on stdout, usage text on stderr, exit code 1. */
@@ -219,7 +226,7 @@ int server_main(int argc, char **argv) {
     fprintf(stderr, "mini-dbms serving %s: %ld workers, queue %ld, sync %s; Ctrl+C stops\n",
             dir, threads, queue, options.sync_always ? "always" : "none");
 
-    accept_loop(&srv);
+    int accept_failed = accept_loop(&srv);
 
     /* Stop: no new connections; queued requests still get answered; then close the files. */
     if (!atomic_exchange(&g_woken, 1)) os_sock_close(g_listener);   /* else the interrupt handler woke or closed it */
@@ -232,5 +239,6 @@ int server_main(int argc, char **argv) {
             (uint64_t)atomic_load(&srv.processed), (uint64_t)atomic_load(&srv.rejected));
     g_server = NULL;
     os_cleanup();
-    return 0;
+    os_interrupt_done();   /* lets a console-close handler return: the process may end now */
+    return accept_failed ? 1 : 0;
 }

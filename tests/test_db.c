@@ -555,6 +555,29 @@ static void test_failed_statement_with_failed_rollback_is_gone_after_reopen(void
     }
 }
 
+/* After COMMIT was written: sync fails and truncate fails -> outcome unknown, rows exist after reopen.
+ * Sync fails but truncate works -> really rolled back. Failure before COMMIT + truncate failure -> cut on reopen. */
+static void test_commit_failure_messages_match_what_a_reopen_shows(void) {
+    static const char *sql = "INSERT INTO users VALUES ('x',1),('y',2),('z',3)";
+    for (int mode = 0; mode < 3; mode++) {
+        ASSERT(fresh(1)); Result r = {0};
+        ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('ok',1)", &r) == 0); result_free(&r);
+        if (mode == 2) os_test_fail_sync(); else os_test_fail_sync_after(1); /* 2 : rows sync, 0 / 1 : COMMIT sync */
+        if (mode != 1) os_test_fail_truncate();
+        ASSERT(db_execute_sql(db, sql, &r) == -1);
+        const char *m = r.err.message;
+        if (mode == 0) {
+            ASSERT(r.err.kind == DB_ERROR_INTERNAL && strstr(m, "statement outcome unknown: commit record was written but could not be confirmed or rolled back; reopen the table to see whether the rows exist"));
+            ASSERT(!strstr(m, "no row of this statement"));
+        } else {
+            ASSERT(strstr(m, "no row of this statement was committed") && !strstr(m, "outcome unknown"));
+        }
+        result_free(&r); db_close(db); DbError err = {0};
+        db = db_open(test_dir, (DbOptions){.sync_always = 1}, &err); ASSERT(db);
+        ASSERT(users_count() == (mode == 0 ? 4 : 1));
+    }
+}
+
 /* Several statements, reopen: the rebuilt index and a full scan agree, and the COMMIT records never show as rows. */
 static void test_reopen_after_many_statements_index_matches_scan(void) {
     ASSERT(fresh(0)); Result r = {0};
@@ -655,6 +678,7 @@ int main(void) {
     RUN_DB(test_rollback_failure_append_case_keeps_reads_consistent);
     RUN_DB(test_rollback_failure_leaves_recoverable_file);
     RUN_DB(test_failed_statement_with_failed_rollback_is_gone_after_reopen);
+    RUN_DB(test_commit_failure_messages_match_what_a_reopen_shows);
     RUN_DB(test_reopen_after_many_statements_index_matches_scan);
     RUN_DB(test_index_plan_without_index_falls_back_to_scan);
     RUN_DB(test_index_pointing_at_wrong_record_is_internal_error);
