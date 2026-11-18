@@ -1,6 +1,7 @@
 #include "test.h"
 #include "db.h"
 #include "os.h"
+#include "bptree.h"
 
 #include <pthread.h>
 
@@ -101,7 +102,7 @@ static void test_empty_table_select(void) {
 static void test_missing_id_zero_rows(void) {
     ASSERT(fresh(0) && seed() == 0); Result r = {0};
     ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 99", &r) == 0);
-    ASSERT(r.items[0].nrows == 0 && r.items[0].plan == PLAN_SCAN && r.items[0].rows_examined == 3);
+    ASSERT(r.items[0].nrows == 0 && r.items[0].plan == PLAN_INDEX && r.items[0].rows_examined == 0);
     result_free(&r);
 }
 static void test_stop_at_first_error(void) {
@@ -185,7 +186,9 @@ static void test_open_failure_releases_lock(void) {
 static void test_sync_option_and_io_failure(void) {
     ASSERT(fresh(1)); Result r = {0}; os_test_fail_sync();
     ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('bad',1)", &r) == -1 && r.err.kind == DB_ERROR_INTERNAL && r.err.line == 0 && r.err.col == 0 && strstr(r.err.message, "sync")); result_free(&r);
-    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('ok',2)", &r) == 0 && r.items[0].inserted_ids[0] == 1); result_free(&r);
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('ok',2); SELECT age FROM users WHERE id = 1", &r) == 0);
+    ASSERT(r.items[0].inserted_ids[0] == 1 && r.items[1].plan == PLAN_INDEX && r.items[1].nrows == 1 && r.items[1].rows[0].i == 2);
+    result_free(&r);
     os_test_fail_append();
     ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('bad',3)", &r) == -1 && r.err.kind == DB_ERROR_INTERNAL); result_free(&r);
     os_test_fail_read();
@@ -229,8 +232,179 @@ static void test_concurrent_statements(void) {
     Result r = {0}; ASSERT(db_execute_sql(db, "SELECT id FROM users", &r) == 0 && r.items[0].nrows == 120); result_free(&r);
 }
 
+static void test_where_id_uses_index(void) {
+    ASSERT(fresh(0) && seed() == 0); Result r = {0};
+    os_test_reset_reads();
+    ASSERT(db_execute_sql(db, "SELECT name,id,age FROM users WHERE id = 2", &r) == 0);
+    StmtResult *s = &r.items[0];
+    ASSERT(s->plan == PLAN_INDEX && s->rows_examined == 1 && s->nrows == 1);
+    ASSERT(strcmp(s->rows[0].s, "bob") == 0 && s->rows[1].i == 2 && s->rows[2].i == 30);
+    ASSERT(os_test_read_calls() == 2); /* Header and payload, no scan. */
+    result_free(&r);
+}
+
+static void test_where_name_uses_scan(void) {
+    ASSERT(fresh(0) && seed() == 0); Result r = {0};
+    ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE name = 'bob'", &r) == 0);
+    ASSERT(r.items[0].plan == PLAN_SCAN && r.items[0].rows_examined == 3 && r.items[0].nrows == 1);
+    result_free(&r);
+}
+
+static void test_index_and_scan_same_row(void) {
+    ASSERT(fresh(0) && seed() == 0); Result r = {0};
+    ASSERT(db_execute_sql(db, "SELECT age,name,id,name FROM users WHERE id = 2;"
+                             "SELECT age,name,id,name FROM users WHERE name = 'bob'", &r) == 0);
+    ASSERT(r.n == 2 && r.items[0].plan == PLAN_INDEX && r.items[1].plan == PLAN_SCAN);
+    ASSERT(r.items[0].nrows == 1 && r.items[1].nrows == 1);
+    for (int i = 0; i < 4; i++) {
+        Value *a = &r.items[0].rows[i], *b = &r.items[1].rows[i];
+        ASSERT(strcmp(r.items[0].columns[i], r.items[1].columns[i]) == 0 && a->type == b->type);
+        ASSERT(a->type == TYPE_INT ? a->i == b->i : a->len == b->len && memcmp(a->s, b->s, a->len) == 0);
+    }
+    db_close(db); db = NULL;
+    ASSERT(strcmp(r.items[0].rows[1].s, "bob") == 0);
+    ASSERT(r.items[0].rows[1].s != r.items[0].rows[3].s);
+    result_free(&r);
+}
+
+static void test_index_rebuilt_after_reopen(void) {
+    ASSERT(fresh(0)); Result r = {0};
+    /* Multiple leaves, unequal TEXT lengths and exact offsets after bulk load. */
+    for (int i = 1; i <= 4200; i++) {
+        char sql[128]; snprintf(sql, sizeof sql, "INSERT INTO users VALUES ('user_%d',%d)", i, i);
+        ASSERT(db_execute_sql(db, sql, &r) == 0); result_free(&r);
+    }
+    db_close(db); db = NULL; DbError err = {0}; os_test_reset_reads();
+    db = db_open("build", (DbOptions){0}, &err); ASSERT(db);
+    ASSERT(os_test_read_calls() == 1); /* Validation supplies bulk-load pairs; no second pass. */
+    for (int i = 1; i <= 4200; i++) {
+        char sql[128], name[32]; snprintf(name, sizeof name, "user_%d", i);
+        snprintf(sql, sizeof sql, "SELECT * FROM users WHERE id = %d", i);
+        ASSERT(db_execute_sql(db, sql, &r) == 0);
+        ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].rows_examined == 1 && r.items[0].nrows == 1);
+        ASSERT(r.items[0].rows[0].i == i && strcmp(r.items[0].rows[1].s, name) == 0 && r.items[0].rows[2].i == i);
+        result_free(&r);
+    }
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('after_bulk',4201); SELECT name FROM users WHERE id = 4201", &r) == 0);
+    ASSERT(r.items[0].inserted_ids[0] == 4201 && r.items[1].plan == PLAN_INDEX);
+    ASSERT(r.items[1].nrows == 1 && strcmp(r.items[1].rows[0].s, "after_bulk") == 0); result_free(&r);
+}
+
+static void test_index_misses_and_limit_zero(void) {
+    ASSERT(fresh(0)); Result r = {0};
+    ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 1", &r) == 0);
+    ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].nrows == 0 && r.items[0].rows_examined == 0); result_free(&r);
+    ASSERT(seed() == 0);
+    const char *queries[] = {"SELECT * FROM users WHERE id = 0", "SELECT * FROM users WHERE id = -1",
+        "SELECT * FROM users WHERE id = 9223372036854775807", "SELECT * FROM users WHERE id = 2 LIMIT 0"};
+    for (size_t i = 0; i < sizeof queries / sizeof queries[0]; i++) {
+        os_test_reset_reads(); ASSERT(db_execute_sql(db, queries[i], &r) == 0);
+        ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].nrows == 0 && r.items[0].rows_examined == 0);
+        ASSERT(os_test_read_calls() == 0); result_free(&r);
+    }
+    expect_error("SELECT * FROM users WHERE id = 'bad' LIMIT 0", "type");
+}
+
+static void test_index_read_failure_is_internal(void) {
+    ASSERT(fresh(0) && seed() == 0); Result r = {0}; os_test_fail_read();
+    ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 2", &r) == -1);
+    ASSERT(r.err.kind == DB_ERROR_INTERNAL && r.err.line == 0 && r.err.col == 0); result_free(&r);
+    ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 2", &r) == 0);
+    ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].nrows == 1); result_free(&r);
+}
+
+static void test_partial_insert_keeps_index_in_step(void) {
+    ASSERT(fresh(0)); Result r = {0}; os_test_fail_append_after(1);
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('saved',1),('failed',2),('skipped',3)", &r) == -1);
+    ASSERT(r.err.kind == DB_ERROR_INTERNAL && strstr(r.err.message, "1 rows already inserted"));
+    ASSERT(db_rows_written(db) == 1); result_free(&r);
+    ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 1; SELECT * FROM users WHERE id = 2; SELECT * FROM users", &r) == 0);
+    ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].nrows == 1 && strcmp(r.items[0].rows[1].s, "saved") == 0);
+    ASSERT(r.items[1].plan == PLAN_INDEX && r.items[1].nrows == 0 && r.items[1].rows_examined == 0);
+    ASSERT(r.items[2].nrows == 1); result_free(&r);
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('retry',2); SELECT name FROM users WHERE id = 2", &r) == 0);
+    ASSERT(r.items[0].inserted_ids[0] == 2 && r.items[1].nrows == 1 && strcmp(r.items[1].rows[0].s, "retry") == 0);
+    result_free(&r);
+    db_close(db); db = NULL; DbError err = {0}; db = db_open("build", (DbOptions){0}, &err); ASSERT(db);
+    ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 2", &r) == 0);
+    ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].nrows == 1); result_free(&r);
+}
+
+static void test_index_memory_reserved_before_write(void) {
+    ASSERT(fresh(0)); Result r = {0};
+    bpt_test_fail_node_after(0); os_test_fail_append();
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('oom',1)", &r) == -1);
+    ASSERT(r.err.kind == DB_ERROR_INTERNAL && strstr(r.err.message, "index")); result_free(&r);
+    /* The append fault must still be pending: allocation failed before I/O. */
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('io',1)", &r) == -1);
+    ASSERT(strstr(r.err.message, "append") && db_rows_written(db) == 0); result_free(&r);
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('ok',1); SELECT * FROM users WHERE id = 1", &r) == 0);
+    ASSERT(r.items[0].inserted_ids[0] == 1 && r.items[1].plan == PLAN_INDEX && r.items[1].nrows == 1); result_free(&r);
+}
+
+static void test_partial_insert_on_index_split_failure(void) {
+    ASSERT(fresh(0)); Result r = {0};
+    for (int i = 0; i < 62; i++) {
+        ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('seed',1)", &r) == 0); result_free(&r);
+    }
+    bpt_test_fail_node_after(1); /* Sibling allocated, new-root allocation fails at row 64. */
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('saved',63),('failed',64),('skipped',65)", &r) == -1);
+    ASSERT(r.err.kind == DB_ERROR_INTERNAL && strstr(r.err.message, "1 rows already inserted")); result_free(&r);
+    ASSERT(db_rows_written(db) == 63);
+    ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 63; SELECT * FROM users WHERE id = 64; SELECT id FROM users", &r) == 0);
+    ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].nrows == 1 && strcmp(r.items[0].rows[1].s, "saved") == 0);
+    ASSERT(r.items[1].nrows == 0 && r.items[1].rows_examined == 0 && r.items[2].nrows == 63); result_free(&r);
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('retry',64); SELECT age FROM users WHERE id = 64", &r) == 0);
+    ASSERT(r.items[0].inserted_ids[0] == 64 && r.items[1].nrows == 1 && r.items[1].rows[0].i == 64); result_free(&r);
+}
+
+static void test_index_rebuild_failure_preserves_file_and_lock(void) {
+    ASSERT(fresh(0) && seed() == 0); db_close(db); db = NULL;
+    OsFile *file = os_open("build/users.tbl", 0); ASSERT(file); uint64_t size = os_size(file); os_close(file);
+    DbError err = {0}; bpt_test_fail_node_after(0);
+    db = db_open("build", (DbOptions){.repair = 1}, &err);
+    ASSERT(!db && err.kind == DB_ERROR_INTERNAL && err.line == 0 && err.col == 0);
+    file = os_open("build/users.tbl", 0); ASSERT(file); uint64_t after = os_size(file); os_close(file); ASSERT(after == size);
+    db = db_open("build", (DbOptions){0}, &err); ASSERT(db);
+    Result r = {0}; ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 3", &r) == 0);
+    ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].nrows == 1); result_free(&r);
+}
+
+static void test_index_rebuilt_from_recovered_prefix(void) {
+    for (int repair = 0; repair <= 1; repair++) {
+        ASSERT(fresh(0) && seed() == 0); db_close(db); db = NULL;
+        DbError err = {0};
+        if (repair) {
+            FILE *f = fopen("build/users.tbl", "r+b"); ASSERT(f);
+            ASSERT(fseek(f, -1, SEEK_END) == 0 && fputc(1, f) != EOF && fclose(f) == 0);
+            ASSERT(db_open("build", (DbOptions){0}, &err) == NULL && err.kind == DB_ERROR_INTERNAL);
+        } else {
+            OsFile *file = os_open("build/users.tbl", 0); ASSERT(file);
+            ASSERT(os_truncate(file, os_size(file) - 3) == 0); os_close(file);
+        }
+        db = db_open("build", (DbOptions){.repair = repair}, &err); ASSERT(db);
+        Result r = {0}; ASSERT(db_execute_sql(db, "SELECT * FROM users WHERE id = 2; SELECT * FROM users WHERE id = 3", &r) == 0);
+        ASSERT(r.items[0].plan == PLAN_INDEX && r.items[0].nrows == 1 && strcmp(r.items[0].rows[1].s, "bob") == 0);
+        ASSERT(r.items[1].plan == PLAN_INDEX && r.items[1].nrows == 0); result_free(&r);
+        ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('recovered',3); SELECT name FROM users WHERE id = 3", &r) == 0);
+        ASSERT(r.items[0].inserted_ids[0] == 3 && r.items[1].nrows == 1 && strcmp(r.items[1].rows[0].s, "recovered") == 0);
+        result_free(&r);
+    }
+}
+
 #define RUN_DB(fn) do { RUN(fn); cleanup(); } while (0)
 int main(void) {
+    RUN_DB(test_where_id_uses_index);
+    RUN_DB(test_where_name_uses_scan);
+    RUN_DB(test_index_and_scan_same_row);
+    RUN_DB(test_index_rebuilt_after_reopen);
+    RUN_DB(test_index_misses_and_limit_zero);
+    RUN_DB(test_index_read_failure_is_internal);
+    RUN_DB(test_partial_insert_keeps_index_in_step);
+    RUN_DB(test_index_memory_reserved_before_write);
+    RUN_DB(test_partial_insert_on_index_split_failure);
+    RUN_DB(test_index_rebuild_failure_preserves_file_and_lock);
+    RUN_DB(test_index_rebuilt_from_recovered_prefix);
     RUN_DB(test_insert_then_select);
     RUN_DB(test_insert_without_cols_skips_id);
     RUN_DB(test_insert_id_column_rejected);

@@ -133,8 +133,18 @@ static int select_rows(Table *table, const TableSchema *schema, const Statement 
         scan.where_col = schema_col_index(schema, s->where_col);
         if (scan.where_col < 0) return fail(s, err, "unknown WHERE column");
         if (schema->cols[scan.where_col].type != s->where_val.type) return fail(s, err, "WHERE value type mismatch");
+        if (scan.where_col == 0) out->plan = PLAN_INDEX;
     }
     if (s->limit == 0) return 0;
+    if (out->plan == PLAN_INDEX) {
+        uint64_t off;
+        if (!bpt_find(table_index(table), s->where_val.i, &off)) return 0;
+        Row row = {0};
+        int rc = table_read_at(table, off, &row, err);
+        if (!rc) (void)visit_row(&row, off, &scan);
+        row_free(&row);
+        return rc || scan.failed ? -1 : 0;
+    }
     if (table_scan(table, visit_row, &scan, err) || scan.failed) {
         if (err && err->kind == DB_ERROR_SQL && !err->line) { err->line = s->line; err->col = s->col; }
         return -1;

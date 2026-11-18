@@ -20,6 +20,7 @@ struct Table {
     uint64_t written;
     int write_failed;
     int sync_always;
+    BPTree *index;
 };
 
 static void clear_error(DbError *err) {
@@ -349,10 +350,19 @@ int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_o
         }
     }
     put_u32(record + 8, crc32(record + HEADER_SIZE, len));
+    /* Reserve every possible split before touching the file. The write lock
+     * keeps the key/path unchanged until the allocation-free registration. */
+    if (t->index && bpt_reserve_insert(t->index, t->next_id)) {
+        free(record);
+        return fail(err, off, "cannot reserve index memory");
+    }
     int rc = os_append(t->file, record, HEADER_SIZE + len, NULL);
     free(record);
     if (rc) return rollback(t, off, err, "cannot append record");
     if (t->sync_always && os_sync(t->file)) return rollback(t, off, err, "cannot sync record");
+    if (t->index && bpt_insert(t->index, t->next_id, off)) {
+        return rollback(t, off, err, "cannot register record in index");
+    }
     if (id_out) *id_out = t->next_id;
     if (off_out) *off_out = off;
     t->row_count++; t->written++;
@@ -408,6 +418,7 @@ int table_scan(Table *t, RowVisitor visitor, void *ctx, DbError *err) {
 
 void table_close(Table *t) {
     if (!t) return;
+    bpt_free(t->index);
     os_close(t->file);
     pthread_rwlock_destroy(&t->lock);
     free(t);
@@ -418,3 +429,5 @@ int table_write_lock(Table *t) { return pthread_rwlock_wrlock(&t->lock); }
 int table_unlock(Table *t) { return pthread_rwlock_unlock(&t->lock); }
 void table_set_sync(Table *t, int sync_always) { t->sync_always = sync_always != 0; }
 uint64_t table_rows_written(const Table *t) { return t->written; }
+void table_set_index(Table *t, BPTree *index) { bpt_free(t->index); t->index = index; }
+const BPTree *table_index(const Table *t) { return t->index; }

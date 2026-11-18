@@ -33,6 +33,30 @@ void db_close(Db *db) {
     free(db);
 }
 
+typedef struct {
+    int64_t *ids;
+    uint64_t *offsets;
+    size_t n, capacity;
+} IndexBuild;
+
+static int collect_index_row(int64_t id, uint64_t off, void *ctx) {
+    IndexBuild *build = ctx;
+    if (build->n == build->capacity) {
+        size_t max = SIZE_MAX / sizeof *build->ids;
+        if (build->capacity > max / 2) return -1;
+        size_t next = build->capacity ? build->capacity * 2 : 256;
+        if (next > max) return -1;
+        int64_t *ids = realloc(build->ids, next * sizeof *ids);
+        if (!ids) return -1;
+        build->ids = ids;
+        uint64_t *offsets = realloc(build->offsets, next * sizeof *offsets);
+        if (!offsets) return -1;
+        build->offsets = offsets; build->capacity = next;
+    }
+    build->ids[build->n] = id; build->offsets[build->n++] = off;
+    return 0;
+}
+
 Db *db_open(const char *dir, DbOptions options, DbError *err) {
     if (err) *err = (DbError){0};
     if (!dir) { fail(err, 0, 0, "missing database directory"); return NULL; }
@@ -58,8 +82,17 @@ Db *db_open(const char *dir, DbOptions options, DbError *err) {
         if (!db->tables) { fail(err, 0, 0, "out of memory"); goto bad; }
     }
     for (int i = 0; i < db->catalog.n; i++) {
-        db->tables[i] = table_open(dir, &db->catalog.tables[i], options.repair, err);
-        if (!db->tables[i]) goto bad;
+        IndexBuild build = {0};
+        db->tables[i] = table_open_with_visitor(dir, &db->catalog.tables[i], options.repair,
+                                               collect_index_row, &build, err);
+        if (!db->tables[i]) { free(build.ids); free(build.offsets); goto bad; }
+        BPTree *index = bpt_create();
+        int failed = !index || bpt_bulk_load(index, build.ids, build.offsets, build.n);
+        free(build.ids); free(build.offsets);
+        if (failed) {
+            bpt_free(index); fail(err, 0, 0, "cannot build table index"); goto bad;
+        }
+        table_set_index(db->tables[i], index);
         table_set_sync(db->tables[i], options.sync_always);
     }
     return db;

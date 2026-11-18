@@ -2,6 +2,7 @@
 #define MINI_DBMS_TABLE_H
 
 #include "catalog.h"
+#include "bptree.h"
 
 typedef struct Table Table;
 typedef struct { Value *fields; int n; int64_t id; } Row;
@@ -47,5 +48,12 @@ int table_write_lock(Table *table);
 int table_unlock(Table *table);
 void table_set_sync(Table *table, int sync_always);
 uint64_t table_rows_written(const Table *table);
+
+/* db_open attaches the index built from its open callback before publication.
+ * Transfers ownership to Table. Storage-only callers may leave it unattached.
+ * Index access and append share the caller's table read/write lock.
+ */
+void table_set_index(Table *table, BPTree *index);
+const BPTree *table_index(const Table *table);
 
 #endif

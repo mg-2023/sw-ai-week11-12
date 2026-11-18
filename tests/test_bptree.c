@@ -218,7 +218,25 @@ static void test_insert_after_bulk_load(void) {
     free(keys); free(values); bpt_free(tree);
 }
 
+static void test_reserved_insert_needs_no_allocation(void) {
+    BPTree *tree = bpt_create(), *empty = bpt_create(); ASSERT(tree && empty);
+    for (int64_t k = 0; k < 63; k++) ASSERT(bpt_insert(tree, k, value_for(k)) == 0);
+    ASSERT(bpt_reserve_insert(tree, 63) == 0 && valid(tree));
+    ASSERT(bpt_find(tree, 63, NULL) == 0);
+    bpt_test_fail_node_after(0);
+    ASSERT(bpt_insert(tree, 63, value_for(63)) == 0 && valid(tree));
+    uint64_t value = 0;
+    ASSERT(bpt_find(tree, 63, &value) == 1 && value == value_for(63));
+    ASSERT(bpt_reserve_insert(empty, 1) == -1); /* Fault not consumed by insert. */
+    ASSERT(valid(empty) && bpt_height(empty) == 0);
+    ASSERT(bpt_reserve_insert(tree, 63) == -1 && valid(tree));
+    ASSERT(bpt_reserve_insert(empty, 1) == 0);
+    bpt_free(empty); /* Unused reservation is owned and freed by the tree. */
+    bpt_free(tree);
+}
+
 int main(void) {
+    RUN(test_reserved_insert_needs_no_allocation);
     RUN(test_insert_find_sequential_100k);
     RUN(test_insert_random_100k_check);
     RUN(test_duplicate_rejected);

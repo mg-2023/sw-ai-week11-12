@@ -130,9 +130,12 @@ int64_t os_read_at(OsFile *f, void *buf, size_t n, uint64_t off) {
     return read_at(f, buf, n, off);
 }
 #ifdef MINI_DBMS_TESTING
-static int fail_sync, fail_append;
+static int fail_sync;
+static unsigned fail_append_after;
+static int fail_append;
 void os_test_fail_sync(void) { fail_sync = 1; }
-void os_test_fail_append(void) { fail_append = 1; }
+void os_test_fail_append_after(unsigned n) { fail_append = 1; fail_append_after = n; }
+void os_test_fail_append(void) { os_test_fail_append_after(0); }
 #endif
 int os_sync(OsFile *f) {
 #ifdef MINI_DBMS_TESTING
@@ -143,7 +146,10 @@ int os_sync(OsFile *f) {
 int os_append(OsFile *f, const void *buf, size_t n, uint64_t *off_out) {
     uint64_t off = os_size(f); if (off == UINT64_MAX) return -1;
 #ifdef MINI_DBMS_TESTING
-    if (fail_append) { fail_append = 0; if (n > 1) (void)write_at(f, buf, n / 2, off); return -1; }
+    if (fail_append) {
+        if (fail_append_after) fail_append_after--;
+        else { fail_append = 0; if (n > 1) (void)write_at(f, buf, n / 2, off); return -1; }
+    }
 #endif
     if (write_at(f, buf, n, off)) return -1;
     if (off_out) *off_out = off;

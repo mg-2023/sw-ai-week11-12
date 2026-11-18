@@ -21,6 +21,7 @@ void os_unlock_dir(void);
 #ifdef MINI_DBMS_TESTING
 void os_test_fail_sync(void);
 void os_test_fail_append(void);
+void os_test_fail_append_after(unsigned n);
 void os_test_fail_read(void);
 void os_test_reset_reads(void);
 unsigned os_test_read_calls(void);
