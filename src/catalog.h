@@ -8,7 +8,8 @@ typedef struct { char name[64]; Column cols[32]; int ncols; } TableSchema;
 typedef struct { TableSchema *tables; int n; } Catalog;
 
 /* One table per line: name : id INT, column TYPE, ...
- * Names are case-sensitive SQL identifiers (up to 63 bytes); types are INT/TEXT.
+ * Names are SQL identifiers (up to 63 bytes), excluding lexer keywords in any
+ * case. Lookup is case-sensitive; duplicate table names ignore case. Types: INT/TEXT.
  * Blank lines and # comments are ignored. cols[0] is always id INT.
  * Use an empty output catalog. Failure frees partial results and leaves it empty.
  * Error positions are one-based line/byte-column; success clears err.

@@ -100,3 +100,15 @@ id     | name        | age
 요청한 결정과 다르게 구현한 항목은 없다. 콜백은 기존 `table_open`을 유지하고 `table_open_with_visitor`를 추가하여 제공한다. 경고는 기존 CLI처럼 영어로 손실 범위와 행 수를 표시한다. 인덱스·bench 제품 명령·서버 등 Phase 2·3 기능은 시작하지 않았다. 새 형식 결정에 따라 기존 8바이트 헤더 파일 자동 변환은 제공하지 않는다.
 
 POSIX 분기는 직접 읽었지만 실행하지 않았다. 실제 OS 장애·전원 차단 및 메모리 고갈 상황은 실행하지 않았다. 파일 I/O 실패는 테스트 훅으로 주입하여 확인했으며 malloc 실패의 오류 종류는 코드를 직접 읽어 확인했다. Claude Code 주장만으로 통과 처리한 항목은 없다.
+
+## 2차 수정
+
+길이 검사값을 리틀 엔디언 길이 4바이트의 `CRC32/IEEE XOR 0x4D444231`로 바꿨다. 정상 헤더의 선언된 본문이 EOF를 넘을 때, 꼬리의 각 바이트 위치에서 헤더 검사값·본문 CRC가 맞는 완전한 레코드를 찾으면 손상으로 거부한다. 카탈로그 테이블·컬럼 이름은 lexer의 `lex_identifier_kind`로 검사하여 모든 키워드를 대소문자와 무관하게 거부한다. 제품 코드의 키워드 목록은 lexer 한 곳에만 있다.
+
+**직접 실행 — 실패 먼저:** 구현 전 `python tests/run_cli_tests.py`는 23통과·4실패였다. 새 검사값, paired 손상, 꼬리 안 완전한 레코드, 예약어 이름 테스트가 실패했다. 별도 C 실행은 catalog 14통과·1실패, table 19통과·3실패였다. 원본 재현 명령에서도 paired 손상의 99→33바이트 절단과 예약어 카탈로그 허용을 직접 확인했다.
+
+**직접 실행 — 최종:** `mingw32-make clean` 성공 후 `mingw32-make test`는 C 106통과·0실패(catalog 15, db 22, lexer 18, os 7, parser 22, table 22), CLI 27통과·0실패였다. 별도 `python tests/run_cli_tests.py`도 27통과·0실패였다. 단일 비트 손상·진짜 끝 잘림·0 꼬리 회귀 테스트를 유지했으며 paired 비트 32개를 첫·중간 레코드에 각각 적용해 거부와 바이트 보존을 확인했다.
+
+`python .verify/independent_verify.py --case paired_length_risk`와 `--case reserved_identifier_risk`는 각각 1그룹·1실패, 종료 코드 1이었다. 스크립트가 기존 취약 동작을 기대하는 assertion을 유지하기 때문이다. 실제 paired 실행은 `invalid record length at offset 33`으로 거부했고 파일은 99→99바이트로 내용까지 같았다. 예약어는 `error at 1:1: reserved keyword cannot be a table name`으로 로드 단계에서 거부했으며 테이블 파일이 생성되지 않았다. 스크립트는 수정하지 않았고 실행 전후 SHA256은 `22A9DAAB485AC13517C571F489876E5D84DF903136096A1FE72DF7A0984CB697`로 같았다.
+
+**직접 읽음:** `src/table.c:71`, `:179`, `:205`, `:339`, `:376`의 검사값·복구·쓰기·위치 지정 읽기와 `src/lexer.c:40`, `src/catalog.c:103`, `:118`의 공용 키워드 판정을 확인했다. 바꾼 파일은 `src/table.c/.h`, `src/lexer.c/.h`, `src/catalog.c/.h`, `tests/test_table.c`, `tests/test_catalog.c`, `tests/run_cli_tests.py`, `docs/architecture.md`, 이 기록이다. 결정과 다르게 구현한 항목은 없다. Global Constraints를 유지했고 Phase 2·3 작업과 git 커밋은 하지 않았다. **확인 못 함:** POSIX 실행과 실제 전원 차단. Claude Code 주장만으로 판정한 항목은 없다.

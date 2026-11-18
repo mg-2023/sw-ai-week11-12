@@ -100,6 +100,9 @@ void catalog_free(Catalog *catalog) {
 static int read_schema(CatalogReader *r, const Catalog *catalog, TableSchema *schema) {
     int col = r->col;
     if (identifier(r, schema->name, "expected table identifier")) return -1;
+    if (lex_identifier_kind(schema->name, strlen(schema->name)) != TK_IDENT) {
+        return fail_at(r, col, "reserved keyword cannot be a table name");
+    }
     for (int i = 0; i < catalog->n; i++) {
         if (same_table_name(catalog->tables[i].name, schema->name)) return fail_at(r, col, "duplicate table name");
     }
@@ -112,6 +115,9 @@ static int read_schema(CatalogReader *r, const Catalog *catalog, TableSchema *sc
         if (schema->ncols == 32) return fail_at(r, col, "too many columns (maximum 32)");
         Column *column = &schema->cols[schema->ncols];
         if (identifier(r, column->name, "expected column identifier")) return -1;
+        if (lex_identifier_kind(column->name, strlen(column->name)) != TK_IDENT) {
+            return fail_at(r, col, "reserved keyword cannot be a column name");
+        }
         if (schema_col_index(schema, column->name) != -1) {
             return fail_at(r, col, "duplicate column name");
         }

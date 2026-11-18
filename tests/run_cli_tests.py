@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import uuid
+import zlib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -217,7 +218,8 @@ def test_invalid_length_guards():
         table = data / "users.tbl"
         raw = table.read_bytes()
         for length in (0, 1024 * 1024 - 11, 0xffffffff):
-            damaged = (length.to_bytes(4, "little") + (length ^ 0xffffffff).to_bytes(4, "little") + raw[8:])
+            encoded = length.to_bytes(4, "little")
+            damaged = encoded + (zlib.crc32(encoded) ^ 0x4D444231).to_bytes(4, "little") + raw[8:]
             table.write_bytes(damaged)
             rc, out, err = invoke(work, ["run", "-"], b"")
             assert rc == 1 and "invalid record length" in out and not err, (rc, out, err)
@@ -237,6 +239,81 @@ def test_catalog_names():
             rc, out, err = invoke(work, ["run", "-"], b"")
             assert rc == 1 and out and not err, (catalog, rc, out, err)
             assert not list(data.glob("*.tbl"))
+
+
+def test_length_checksum_wire_format():
+    with database() as (work, data):
+        for size in (0, 1, 255, 65536):
+            assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('" + b"x" * size + b"',1);")[0] == 0
+        raw = (data / "users.tbl").read_bytes()
+        off = 0
+        while off < len(raw):
+            length = int.from_bytes(raw[off:off + 4], "little")
+            check = int.from_bytes(raw[off + 4:off + 8], "little")
+            assert check == zlib.crc32(raw[off:off + 4]) ^ 0x4D444231, (length, check)
+            assert int.from_bytes(raw[off + 8:off + 12], "little") == zlib.crc32(raw[off + 12:off + 12 + length])
+            off += 12 + length
+        assert off == len(raw)
+
+
+def test_paired_length_corruption_refuses():
+    with database() as (work, data):
+        assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('a',1),('b',2),('c',3);")[0] == 0
+        table = data / "users.tbl"
+        raw = table.read_bytes()
+        first_end = 12 + int.from_bytes(raw[:4], "little")
+        for off in (0, first_end):
+            for bit in [8] + [n for n in range(32) if n != 8]:
+                damaged = bytearray(raw)
+                damaged[off + bit // 8] ^= 1 << (bit % 8)
+                damaged[off + 4 + bit // 8] ^= 1 << (bit % 8)
+                table.write_bytes(damaged)
+                rc, out, err = invoke(work, ["run", "-"], b"")
+                assert rc == 1 and "invalid record length" in out and f"offset {off}" in out and not err, (bit, rc, out, err)
+                assert table.read_bytes() == damaged
+        rc, out, err = invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;")
+        assert rc == 0 and "(1 row," in out and not err, (rc, out, err)
+        assert table.read_bytes() == raw[:first_end]
+
+
+def test_complete_record_inside_incomplete_tail():
+    with database() as (work, data):
+        assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('a',1);")[0] == 0
+        table = data / "users.tbl"
+        prefix = table.read_bytes()
+        assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('" + b"x" * 1024 + b"',2);")[0] == 0
+        # Borrow an authentic oversized header, so this also fails on the old format.
+        header = table.read_bytes()[len(prefix):len(prefix) + 12]
+        for padding in (b"", b"x", bytes(127)):
+            tail = header + padding + prefix
+            table.write_bytes(prefix + tail)
+            rc, out, err = invoke(work, ["run", "-"], b"")
+            assert rc == 1 and "offset" in out and not err, (rc, out, err)
+            assert table.read_bytes() == prefix + tail
+        rc, out, err = invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;")
+        assert rc == 0 and "(1 row," in out and not err, (rc, out, err)
+        assert table.read_bytes() == prefix
+        # A partial candidate, bad header check, or bad payload CRC is insufficient.
+        bad_check, bad_crc = bytearray(prefix), bytearray(prefix)
+        bad_check[4] ^= 1
+        bad_crc[-1] ^= 1
+        for candidate in (prefix[:-1], bad_check, bad_crc):
+            tail = header + b"x" + candidate
+            table.write_bytes(prefix + tail)
+            rc, out, err = invoke(work, ["run", "-"], b"")
+            assert rc == 0 and err == f"{len(tail)} bytes of incomplete tail truncated at offset {len(prefix)}\n", (rc, out, err)
+            assert table.read_bytes() == prefix
+
+
+def test_catalog_reserved_identifiers():
+    for keyword in ("select", "insert", "into", "values", "from", "where", "limit"):
+        for word in (keyword, keyword.upper(), keyword.title()):
+            for catalog in (f"{word}: id INT\n", f"t: id INT, {word} TEXT\n"):
+                with database() as (work, data):
+                    (data / "catalog.txt").write_text(catalog, encoding="ascii")
+                    rc, out, err = invoke(work, ["run", "-"], b"")
+                    assert rc == 1 and "reserved" in out and not err, (catalog, rc, out, err)
+                    assert not list(data.glob("*.tbl"))
 
 
 def test_missing_data_directory():
@@ -272,6 +349,8 @@ def main():
         test_binary_stdin_control_z, test_binary_stdin_crlf,
         test_length_corruption_refuses_and_repairs, test_incomplete_tails,
         test_invalid_length_guards, test_catalog_names, test_missing_data_directory,
+        test_length_checksum_wire_format, test_paired_length_corruption_refuses,
+        test_complete_record_inside_incomplete_tail, test_catalog_reserved_identifiers,
     )]
     passed = failed = 0
     for name, test in tests:

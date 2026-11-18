@@ -68,6 +68,10 @@ static uint32_t crc32(const unsigned char *p, size_t n) {
     return ~crc;
 }
 
+static uint32_t length_check(const unsigned char *encoded_length) {
+    return crc32(encoded_length, 4) ^ 0x4D444231u;
+}
+
 void row_free(Row *row) {
     if (!row) return;
     for (int i = 0; i < row->n; i++) {
@@ -170,6 +174,20 @@ static int zero_tail(BlockReader *r, uint64_t off, DbError *err) {
     return 1;
 }
 
+/* Framing and both checksums suffice: an out-of-order id or different schema
+ * still means corruption that must require explicit repair. */
+static int contains_complete_record(const unsigned char *tail, size_t n) {
+    for (size_t pos = 1; n - pos >= HEADER_SIZE; pos++) {
+        const unsigned char *header = tail + pos;
+        uint32_t len = get_u32(header);
+        if (!len || len > MAX_RECORD - HEADER_SIZE ||
+            len > n - pos - HEADER_SIZE ||
+            get_u32(header + 4) != length_check(header)) continue;
+        if (get_u32(header + 8) == crc32(header + HEADER_SIZE, len)) return 1;
+    }
+    return 0;
+}
+
 static int read_record(BlockReader *r, uint64_t off, Row *out, uint64_t *next,
                        DbError *err) {
     if (off > r->size || r->size - off < HEADER_SIZE) {
@@ -184,10 +202,18 @@ static int read_record(BlockReader *r, uint64_t off, Row *out, uint64_t *next,
         return zeros ? RECORD_INCOMPLETE : RECORD_CORRUPT;
     }
     uint32_t len = get_u32(header), crc = get_u32(header + 8);
-    if (get_u32(header + 4) != ~len || len == 0 || len > MAX_RECORD - HEADER_SIZE) {
+    if (get_u32(header + 4) != length_check(header) || len == 0 || len > MAX_RECORD - HEADER_SIZE) {
         fail(err, off, "invalid record length"); return RECORD_CORRUPT;
     }
     if (len > r->size - off - HEADER_SIZE) {
+        /* remaining < HEADER_SIZE + len <= MAX_RECORD; the tail fits in the
+         * existing block buffer. Operational read failures never repair. */
+        size_t remaining = (size_t)(r->size - off);
+        const unsigned char *tail = block_bytes(r, off, remaining, err);
+        if (!tail) return RECORD_IO;
+        if (contains_complete_record(tail, remaining)) {
+            fail(err, off, "complete record inside incomplete payload"); return RECORD_CORRUPT;
+        }
         fail(err, off, "incomplete record payload"); return RECORD_INCOMPLETE;
     }
     const unsigned char *record = block_bytes(r, off, HEADER_SIZE + len, err);
@@ -310,7 +336,7 @@ int table_append(Table *t, const Value *fields, int64_t *id_out, uint64_t *off_o
     unsigned char *record = malloc(HEADER_SIZE + len);
     if (!record) return fail(err, off, "out of memory");
     put_u32(record, (uint32_t)len);
-    put_u32(record + 4, ~(uint32_t)len);
+    put_u32(record + 4, length_check(record));
     put_i64(record + HEADER_SIZE, t->next_id);
     size_t pos = HEADER_SIZE + 8;
     for (int i = 1; i < t->schema.ncols; i++) {
@@ -347,7 +373,7 @@ int table_read_at(Table *t, uint64_t off, Row *out, DbError *err) {
     if (off > size || size - off < HEADER_SIZE) return fail(err, off, "incomplete record header");
     if (os_read_at(t->file, header, HEADER_SIZE, off) != HEADER_SIZE) return fail(err, off, "cannot read record header");
     uint32_t len = get_u32(header);
-    if (get_u32(header + 4) != ~len || !len || len > MAX_RECORD - HEADER_SIZE) return fail(err, off, "invalid record length");
+    if (get_u32(header + 4) != length_check(header) || !len || len > MAX_RECORD - HEADER_SIZE) return fail(err, off, "invalid record length");
     if (len > size - off - HEADER_SIZE) return fail(err, off, "incomplete record payload");
     unsigned char *payload = malloc(len);
     if (!payload) return fail(err, off, "out of memory");

@@ -171,7 +171,33 @@ static void test_missing_file(void) {
     ASSERT(catalog.tables == NULL && catalog.n == 0 && err.message[0]);
 }
 
+static void test_reserved_names(void) {
+    const char *words[] = {"select", "insert", "into", "values", "from", "where", "limit"};
+    char word[16], text[128];
+    for (size_t i = 0; i < sizeof words / sizeof words[0]; i++) {
+        for (int casing = 0; casing < 3; casing++) {
+            strcpy(word, words[i]);
+            for (size_t j = 0; word[j]; j++) {
+                if (casing == 1 || (casing == 2 && j % 2 == 0)) word[j] += 'A' - 'a';
+            }
+            snprintf(text, sizeof text, "\n%s: id INT", word);
+            ASSERT(rejects_at(text, 2, 1, "reserved"));
+            snprintf(text, sizeof text, "\nt: id INT, %s TEXT", word);
+            ASSERT(rejects_at(text, 2, 12, "reserved"));
+        }
+    }
+}
+
+static void test_keyword_prefix_names(void) {
+    Catalog catalog = {0}; DbError err = {0};
+    ASSERT(load_text("select_: id INT, inserted TEXT, from1 INT, _where TEXT, INT INT, TEXT TEXT", &catalog, &err) == 0);
+    ASSERT(catalog.n == 1 && catalog.tables[0].ncols == 6);
+    catalog_free(&catalog);
+}
+
 int main(void) {
+    RUN(test_reserved_names);
+    RUN(test_keyword_prefix_names);
     RUN(test_load_default);
     RUN(test_first_col_must_be_id);
     RUN(test_unknown_type);

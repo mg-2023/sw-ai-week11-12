@@ -9,7 +9,8 @@ typedef int (*RowVisitor)(const Row *row, uint64_t off, void *ctx);
 typedef int (*TableOpenVisitor)(int64_t id, uint64_t off, void *ctx);
 
 /* The schema is copied. The directory must already exist.
- * Records: LE u32 payload length, LE u32 ~length, LE u32 CRC32/IEEE, id, fields.
+ * Records: LE u32 payload length, LE u32 (CRC32/IEEE of its four LE bytes
+ * XOR 0x4D444231), LE u32 payload CRC32/IEEE, id, fields.
  * Length excludes the 12-byte header; the entire record is at most 1 MiB.
  * TEXT is LE u32 byte length plus bytes (at most 64 KiB), INT is LE i64.
  * CRC covers the payload, including id. No string terminator is stored.

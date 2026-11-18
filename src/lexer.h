@@ -25,6 +25,10 @@ typedef struct {
 
 typedef struct { Token *items; size_t n; } TokenList;
 
+/* Classify using the lexer's sole case-insensitive keyword list.
+ * Catalog table/column names must return TK_IDENT. */
+TokenKind lex_identifier_kind(const char *start, size_t len);
+
 /* start borrows the SQL buffer; len includes quotes for string tokens.
  * sval owns decoded, NUL-terminated bytes (slen excludes the terminator).
  * Positions are one-based; columns count bytes, including one per tab.

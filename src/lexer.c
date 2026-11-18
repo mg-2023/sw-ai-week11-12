@@ -37,7 +37,7 @@ static int is_ident_start(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
-static TokenKind identifier_kind(const char *start, size_t len) {
+TokenKind lex_identifier_kind(const char *start, size_t len) {
     static const struct { const char *word; TokenKind kind; } keywords[] = {
         {"INSERT", TK_INSERT}, {"INTO", TK_INTO}, {"VALUES", TK_VALUES},
         {"SELECT", TK_SELECT}, {"FROM", TK_FROM}, {"WHERE", TK_WHERE},
@@ -145,7 +145,7 @@ int lex(const char *sql, TokenList *out, DbError *err) {
         t.col = s.col;
         if (is_ident_start(*s.p)) {
             do { advance(&s); } while (is_ident_start(*s.p) || is_digit(*s.p));
-            t.kind = identifier_kind(t.start, (size_t)(s.p - t.start));
+            t.kind = lex_identifier_kind(t.start, (size_t)(s.p - t.start));
         } else if (is_digit(*s.p) || (*s.p == '-' && is_digit(s.p[1]))) {
             if (scan_int(&s, &t, err)) goto error;
         } else if (*s.p == '\'') {
