@@ -16,7 +16,8 @@ static int report_error(const char *message, DbErrorKind kind) {
 static int usage(void) {
     report_error("invalid command or arguments", DB_ERROR_SQL);
     fputs("usage: mini-dbms run <file.sql|-> [--data DIR] "
-          "[--sync always|none] [--repair]\n", stderr);
+          "[--sync always|none] [--repair]\n"
+          "       mini-dbms bench --rows N [--data DIR] [--queries 100] [--seed 42]\n", stderr);
     return 1;
 }
 
@@ -52,7 +53,216 @@ static char *read_sql(FILE *file, const char **error) {
     return NULL;
 }
 
+/* Strict decimal parsing, bounded before multiplication; no signed wrap or
+ * acceptance of strtoull's optional sign/whitespace. */
+static int decimal(const char *text, uint64_t maximum, uint64_t *out) {
+    if (!*text) return -1;
+    uint64_t value = 0;
+    for (const char *p = text; *p; p++) {
+        if (*p < '0' || *p > '9') return -1;
+        unsigned digit = (unsigned)(*p - '0');
+        if (value > maximum / 10 || (value == maximum / 10 && digit > maximum % 10)) return -1;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return 0;
+}
+
+static int bench_error(const DbError *err) {
+    Result result = {.err = *err};
+    result_print_text(&result, stdout);
+    return 1;
+}
+
+/* SplitMix64: specified unsigned arithmetic, reproducible including seed zero. */
+static uint64_t random_next(uint64_t *state) {
+    uint64_t z = (*state += UINT64_C(0x9e3779b97f4a7c15));
+    z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return z ^ (z >> 31);
+}
+
+typedef struct {
+    double median_ms, p99_ms, max_ms;
+    size_t returned;
+    uint64_t examined;
+    Plan plan;
+} BenchStats;
+
+static int compare_times(const void *left, const void *right) {
+    uint64_t a = *(const uint64_t *)left, b = *(const uint64_t *)right;
+    return (a > b) - (a < b);
+}
+
+static void summarize(uint64_t *times, size_t n, BenchStats *stats) {
+    qsort(times, n, sizeof *times, compare_times);
+    stats->median_ms = n % 2 ? (double)times[n / 2] / 1000.0 :
+        ((double)times[n / 2 - 1] + (double)times[n / 2]) / 2000.0;
+    /* Nearest rank: ceil(0.99*n)-1, without overflowing 99*n. */
+    stats->p99_ms = (double)times[n - n / 100 - 1] / 1000.0;
+    stats->max_ms = (double)times[n - 1] / 1000.0;
+}
+
+static int bench_insert(Db *db, uint64_t rows, DbError *err) {
+    char sql[65536];
+    for (uint64_t first = 0; first < rows;) {
+        uint64_t count = rows - first < 1000 ? rows - first : 1000;
+        size_t used = (size_t)snprintf(sql, sizeof sql, "INSERT INTO users VALUES ");
+        for (uint64_t j = 1; j <= count; j++) {
+            uint64_t id = first + j;
+            int n = snprintf(sql + used, sizeof sql - used, "%s('user_%" PRIu64 "',%" PRIu64 ")",
+                             j == 1 ? "" : ",", id, id % 100);
+            if (n < 0 || (size_t)n >= sizeof sql - used - 1) {
+                err->kind = DB_ERROR_INTERNAL;
+                snprintf(err->message, sizeof err->message, "benchmark SQL buffer exhausted");
+                return -1;
+            }
+            used += (size_t)n;
+        }
+        sql[used++] = ';'; sql[used] = '\0';
+        Result result = {0};
+        int rc = db_execute_sql(db, sql, &result);
+        if (rc) *err = result.err;
+        else if (result.n != 1 || result.items[0].ninserted != count ||
+                 result.items[0].inserted_ids[0] != (int64_t)(first + 1) ||
+                 result.items[0].inserted_ids[count - 1] != (int64_t)(first + count)) {
+            err->kind = DB_ERROR_INTERNAL;
+            snprintf(err->message, sizeof err->message, "benchmark INSERT result mismatch");
+            rc = -1;
+        }
+        result_free(&result);
+        if (rc) return -1;
+        first += count;
+    }
+    return 0;
+}
+
+static int bench_queries(Db *db, uint64_t rows, size_t queries, uint64_t seed,
+                         uint64_t *times, BenchStats stats[2], DbError *err) {
+    for (size_t i = 0; i < queries; i++) {
+        uint64_t id = random_next(&seed) % rows + 1;
+        char name[32], sql[128];
+        snprintf(name, sizeof name, "user_%" PRIu64, id);
+        for (int plan = 0; plan < 2; plan++) {
+            if (plan == 0) snprintf(sql, sizeof sql, "SELECT * FROM users WHERE id = %" PRIu64 ";", id);
+            else snprintf(sql, sizeof sql, "SELECT * FROM users WHERE name = '%s';", name);
+            Result result = {0};
+            int rc = db_execute_sql(db, sql, &result);
+            if (rc) *err = result.err;
+            else {
+                StmtResult *s = result.n == 1 ? &result.items[0] : NULL;
+                if (!s || !s->is_select || s->nrows != 1 || s->ncols != 3 ||
+                    s->plan != (plan == 0 ? PLAN_INDEX : PLAN_SCAN) ||
+                    s->rows_examined != (plan == 0 ? 1 : rows) ||
+                    s->rows[0].type != TYPE_INT || s->rows[0].i != (int64_t)id ||
+                    s->rows[1].type != TYPE_TEXT || s->rows[1].len != strlen(name) ||
+                    memcmp(s->rows[1].s, name, strlen(name)) ||
+                    s->rows[2].type != TYPE_INT || s->rows[2].i != (int64_t)(id % 100)) {
+                    err->kind = DB_ERROR_INTERNAL;
+                    snprintf(err->message, sizeof err->message, "benchmark SELECT result mismatch");
+                    rc = -1;
+                } else {
+                    times[(size_t)plan * queries + i] = s->elapsed_us;
+                    stats[plan].returned = s->nrows;
+                    stats[plan].examined = s->rows_examined;
+                    stats[plan].plan = s->plan;
+                }
+            }
+            result_free(&result);
+            if (rc) return -1;
+        }
+    }
+    for (int plan = 0; plan < 2; plan++) summarize(times + (size_t)plan * queries, queries, &stats[plan]);
+    return 0;
+}
+
+static int bench_main(int argc, char **argv) {
+    const char *dir = "bench-data";
+    uint64_t rows = 0, queries = 100, seed = 42;
+    unsigned seen = 0;
+    for (int i = 2; i < argc; i++) {
+        unsigned flag;
+        uint64_t *value = NULL, maximum = UINT64_MAX;
+        if (strcmp(argv[i], "--rows") == 0) { flag = 1; value = &rows; maximum = INT64_MAX; }
+        else if (strcmp(argv[i], "--queries") == 0) { flag = 2; value = &queries; maximum = SIZE_MAX / (2 * sizeof(uint64_t)); }
+        else if (strcmp(argv[i], "--seed") == 0) { flag = 4; value = &seed; }
+        else if (strcmp(argv[i], "--data") == 0) flag = 8;
+        else return usage();
+        if ((seen & flag) || ++i >= argc) return usage();
+        seen |= flag;
+        if (value) { if (decimal(argv[i], maximum, value)) return usage(); }
+        else { dir = argv[i]; if (!*dir) return usage(); }
+    }
+    if (!rows || !queries) return usage();
+    uint64_t *times = malloc((size_t)queries * 2 * sizeof *times);
+    if (!times) return report_error("out of memory for benchmark samples", DB_ERROR_INTERNAL);
+    if (os_init()) { free(times); return report_error("cannot initialize OS layer", DB_ERROR_INTERNAL); }
+    DbError err = {.kind = DB_ERROR_INTERNAL};
+    Db *db = NULL;
+    int rc = 1;
+    /* Never reuse or truncate an existing database, even an empty directory. */
+    if (os_create_directory(dir)) {
+        snprintf(err.message, sizeof err.message, "benchmark requires a new data directory: %s", dir);
+        goto done;
+    }
+    size_t len = strlen(dir);
+    if (len > SIZE_MAX - sizeof "/catalog.txt") {
+        snprintf(err.message, sizeof err.message, "benchmark path too long"); goto done;
+    }
+    char *path = malloc(len + sizeof "/catalog.txt");
+    if (!path) { snprintf(err.message, sizeof err.message, "out of memory"); goto done; }
+    snprintf(path, len + sizeof "/catalog.txt", "%s/catalog.txt", dir);
+    FILE *catalog = fopen(path, "wb");
+    free(path);
+    if (!catalog) { snprintf(err.message, sizeof err.message, "cannot create benchmark catalog"); goto done; }
+    int failed = fputs("users : id INT, name TEXT, age INT\n", catalog) == EOF;
+    if (fclose(catalog)) failed = 1;
+    if (failed) { snprintf(err.message, sizeof err.message, "cannot write benchmark catalog"); goto done; }
+    db = db_open(dir, (DbOptions){.sync_always = 0}, &err);
+    if (!db) goto done;
+    uint64_t start = os_now_us();
+    failed = bench_insert(db, rows, &err);
+    uint64_t insert_us = os_now_us() - start;
+    fprintf(stderr, "warning: --sync none: rows written since the last synchronization may be lost on OS failure; rows written this run: %" PRIu64 "\n", db_rows_written(db));
+    if (failed) goto done;
+    db_close(db); db = NULL;
+    start = os_now_us();
+    db = db_open(dir, (DbOptions){.sync_always = 0}, &err);
+    uint64_t startup_us = os_now_us() - start;
+    if (!db) goto done;
+    BenchStats stats[4] = {0};
+    for (int pass = 0; pass < 2; pass++) {
+        if (bench_queries(db, rows, (size_t)queries, seed, times, stats + pass * 2, &err)) goto done;
+    }
+    db_close(db); db = NULL;
+    uint64_t peak = os_peak_memory_bytes();
+    if (peak == UINT64_MAX) {
+        err.kind = DB_ERROR_INTERNAL;
+        snprintf(err.message, sizeof err.message, "cannot measure peak memory"); goto done;
+    }
+    printf("rows=%" PRIu64 " queries=%" PRIu64 " seed=%" PRIu64 " batch_rows=1000 sync=none\n", rows, queries, seed);
+    puts("cache: first=warm OS cache after INSERT and reopen; repeat=same query sequence");
+    printf("insert_total_ms: %.3f\nstartup_ms: %.3f\n", (double)insert_us / 1000.0, (double)startup_us / 1000.0);
+    puts("| pass | plan | queries | rows/result | rows_examined/query | median_ms | p99_ms | max_ms |");
+    puts("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (int i = 0; i < 4; i++) {
+        printf("| %s | %s | %" PRIu64 " | %zu | %" PRIu64 " | %.3f | %.3f | %.3f |\n",
+               i < 2 ? "first" : "repeat", stats[i].plan == PLAN_INDEX ? "index" : "scan",
+               queries, stats[i].returned, stats[i].examined, stats[i].median_ms, stats[i].p99_ms, stats[i].max_ms);
+    }
+    printf("peak_memory_bytes: %" PRIu64 "\n", peak);
+    rc = 0;
+done:
+    if (rc) {
+        bench_error(&err);
+    }
+    db_close(db); os_cleanup(); free(times);
+    if (fflush(stdout) == EOF || ferror(stdout)) return 1;
+    return rc;
+}
+
 int cli_main(int argc, char **argv) {
+    if (argc >= 2 && strcmp(argv[1], "bench") == 0) return bench_main(argc, argv);
     if (argc < 3 || strcmp(argv[1], "run") != 0) return usage();
     const char *input = argv[2], *dir = "data";
     DbOptions options = {.sync_always = 1};

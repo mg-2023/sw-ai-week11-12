@@ -7,6 +7,10 @@ int os_init(void);
 void os_cleanup(void);
 int os_stdin_binary(void);
 int os_is_directory(const char *path);
+/* Create a new directory only; fails if the path already exists. */
+int os_create_directory(const char *path);
+/* Process lifetime peak resident/working-set bytes; UINT64_MAX on failure. */
+uint64_t os_peak_memory_bytes(void);
 int64_t os_pread(int fd_or_handle, void *buf, size_t n, uint64_t off);
 OsFile *os_open(const char *path, int create);
 int os_append(OsFile *, const void *, size_t, uint64_t *off_out);

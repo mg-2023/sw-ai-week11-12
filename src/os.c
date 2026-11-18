@@ -14,6 +14,7 @@ unsigned os_test_read_calls(void) { return atomic_load(&read_calls); }
 #ifdef _WIN32
 #include <winsock2.h>
 #include <windows.h>
+#include <psapi.h>
 #include <io.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -49,6 +50,12 @@ int os_stdin_binary(void) { return _setmode(_fileno(stdin), _O_BINARY) == -1 ? -
 int os_is_directory(const char *path) {
     DWORD attrs = GetFileAttributesA(path);
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+int os_create_directory(const char *path) { return CreateDirectoryA(path, NULL) ? 0 : -1; }
+uint64_t os_peak_memory_bytes(void) {
+    PROCESS_MEMORY_COUNTERS counters = {0};
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof counters)) return UINT64_MAX;
+    return (uint64_t)counters.PeakWorkingSetSize;
 }
 OsFile *os_open(const char *path, int create) {
     HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -103,6 +110,7 @@ void os_unlock_dir(void) { if (dir_lock != INVALID_HANDLE_VALUE) { CloseHandle(d
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <time.h>
 struct OsFile { int fd; };
 static int dir_lock = -1;
@@ -110,6 +118,16 @@ int os_init(void) { return 0; }
 void os_cleanup(void) {}
 int os_stdin_binary(void) { return 0; }
 int os_is_directory(const char *path) { struct stat s; return stat(path, &s) == 0 && S_ISDIR(s.st_mode); }
+int os_create_directory(const char *path) { return mkdir(path, 0700); }
+uint64_t os_peak_memory_bytes(void) {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage)) return UINT64_MAX;
+#ifdef __APPLE__
+    return (uint64_t)usage.ru_maxrss;
+#else
+    return (uint64_t)usage.ru_maxrss * 1024;
+#endif
+}
 OsFile *os_open(const char *path, int create) { int fd = open(path, O_RDWR | (create ? O_CREAT : 0), 0600); if (fd < 0) return NULL; OsFile *f = malloc(sizeof(*f)); if (!f) { close(fd); return NULL; } f->fd = fd; return f; }
 int64_t os_pread(int fd, void *buf, size_t n, uint64_t off) { ssize_t got; do { got = pread(fd, buf, n, (off_t)off); } while (got < 0 && errno == EINTR); return got; }
 static int64_t read_at(OsFile *f, void *buf, size_t n, uint64_t off) { return os_pread(f->fd, buf, n, off); }

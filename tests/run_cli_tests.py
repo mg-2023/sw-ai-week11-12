@@ -339,6 +339,74 @@ def test_large_input():
                "id\n--\n(0 rows, plan=scan, examined=0, <time> ms)\n")
 
 
+def check_benchmark(out, rows, queries, seed):
+    assert f"rows={rows} queries={queries} seed={seed} batch_rows=1000 sync=none\n" in out, out
+    assert "first=warm OS cache after INSERT and reopen; repeat=same query sequence" in out, out
+    for key in ("insert_total_ms", "startup_ms"):
+        assert re.search(rf"^{key}: [0-9]+\.[0-9]{{3}}$", out, re.M), out
+    memory = re.search(r"^peak_memory_bytes: ([0-9]+)$", out, re.M)
+    assert memory and int(memory[1]) > 0, out
+    records = re.findall(
+        r"^\| (first|repeat) \| (index|scan) \| ([0-9]+) \| ([0-9]+) \| ([0-9]+) \| "
+        r"([0-9]+\.[0-9]{3}) \| ([0-9]+\.[0-9]{3}) \| ([0-9]+\.[0-9]{3}) \|$", out, re.M)
+    assert len(records) == 4, out
+    assert {(r[0], r[1]) for r in records} == {
+        (phase, plan) for phase in ("first", "repeat") for plan in ("index", "scan")}, out
+    for _, plan, count, returned, examined, median, p99, maximum in records:
+        assert (int(count), int(returned), int(examined)) == (queries, 1, 1 if plan == "index" else rows), out
+        assert 0 <= float(median) <= float(p99) <= float(maximum), out
+
+
+def test_bench_10000():
+    with database() as (work, _):
+        rc, out, err = invoke(work, ["bench", "--rows", "10000"])
+        assert rc == 0 and err == UNSYNCED.format(10000), (rc, out, err)
+        check_benchmark(out, 10000, 100, 42)
+        expect(invoke(work, ["run", "-", "--data", work / "bench-data"],
+                      b"SELECT * FROM users WHERE id = 10000;"), 0,
+               "id    | name       | age\n------+------------+----\n10000 | user_10000 | 0\n"
+               "(1 row, plan=index, examined=1, <time> ms)\n")
+
+
+def test_bench_options_and_partial_batch():
+    with database() as (work, _):
+        for rows, queries, seed in ((1001, 3, 7), (1, 1, 0)):
+            data = work / f"bench data {rows}"
+            rc, out, err = invoke(work, ["bench", "--rows", rows, "--queries", queries,
+                                       "--seed", seed, "--data", data])
+            assert rc == 0 and err == UNSYNCED.format(rows), (rc, out, err)
+            check_benchmark(out, rows, queries, seed)
+            rc, out, err = invoke(work, ["run", "-", "--data", data],
+                                  f"SELECT id FROM users WHERE name = 'user_{rows}';".encode())
+            assert rc == 0 and f"\n{rows}\n" in out and f"examined={rows}," in out and not err, (rc, out, err)
+
+
+def test_bench_invalid_arguments():
+    cases = [["--rows", value] for value in ("0", "-1", "1x", " 1", "+1", "9223372036854775808")]
+    cases += [["--rows", "1", flag, value] for flag, value in (
+        ("--queries", "0"), ("--queries", "-1"), ("--queries", "18446744073709551615"),
+        ("--seed", "-1"), ("--seed", "18446744073709551616"), ("--data", ""))]
+    cases += [["--rows"], ["--rows", "1", "--queries"], ["--rows", "1", "--seed"],
+              ["--rows", "1", "--data"], ["--queries", "2"], ["--rows", "1", "--sync", "none"],
+              ["--rows", "1", "--rows", "2"]]
+    with database() as (work, _):
+        for args in cases:
+            rc, out, err = invoke(work, ["bench", *args])
+            assert rc == 1 and "error at 0:0:" in out and "usage:" in err, (args, rc, out, err)
+        assert not (work / "bench-data").exists(), "invalid arguments created benchmark data"
+
+
+def test_bench_preserves_existing_directory():
+    with database() as (work, data):
+        original = (data / "catalog.txt").read_bytes()
+        rc, out, err = invoke(work, ["bench", "--rows", "1", "--data", data])
+        assert rc == 1 and "internal error:" in out and not err, (rc, out, err)
+        assert (data / "catalog.txt").read_bytes() == original
+        assert not list(data.glob("*.tbl")), "bench opened an existing database"
+        rc, out, err = invoke(work, ["bench", "--rows", "1", "--data", work / "missing" / "child"])
+        assert rc == 1 and "internal error:" in out and not err, (rc, out, err)
+
+
 def main():
     tests = [(path.stem, lambda path=path: fixture(path)) for path in sorted(FIXTURES.glob("*.sql"))]
     tests += [("stdin_basic", lambda: fixture(FIXTURES / "basic_insert_select.sql", stdin=True))]
@@ -351,6 +419,8 @@ def main():
         test_invalid_length_guards, test_catalog_names, test_missing_data_directory,
         test_length_checksum_wire_format, test_paired_length_corruption_refuses,
         test_complete_record_inside_incomplete_tail, test_catalog_reserved_identifiers,
+        test_bench_10000, test_bench_options_and_partial_batch,
+        test_bench_invalid_arguments, test_bench_preserves_existing_directory,
     )]
     passed = failed = 0
     for name, test in tests:
