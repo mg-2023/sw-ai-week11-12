@@ -136,17 +136,26 @@ class CachedSQL:
         if isinstance(stmt, SelectStatement):
             return self._select(stmt, use_cache)
 
-        # 쓰기: DB 에 먼저 쓰고, 성공했을 때만 같은 락 안에서 버전을 올린다
-        with self._db_lock:
-            result = self.executor.execute(stmt)
-            if isinstance(result, InsertResult) or (isinstance(result, CreateResult) and result.created):
-                self._invalidate(result.table)
-
+        result = self.execute_uncached(stmt)
         if isinstance(result, InsertResult):
             return {"type": "insert", "statement": stmt.text, "table": result.table,
                     "count": result.count, "ids": result.ids}
         return {"type": "create", "statement": stmt.text, "table": result.table,
                 "columns": result.columns, "created": result.created}
+
+    def execute_uncached(self, stmt: Statement) -> CreateResult | InsertResult | SelectResult:
+        """쿼리 결과 캐시를 거치지 않고 DB 에서 바로 실행해 Executor 의 결과 객체를 그대로 돌려준다.
+
+        자기만의 캐시 키를 따로 쓰는 계층(예: shortener 의 short:<code>)이 DB 를 읽고 쓸 때 쓴다.
+        - SELECT: 캐시를 읽지도 쓰지도 않고, hit/miss/bypass 통계에도 넣지 않는다
+        - 쓰기: DB 에 먼저 쓰고, 성공했을 때만 같은 락 안에서 테이블 버전을 올린다
+                (그래야 /sql 로 캐시해 둔 같은 테이블의 SELECT 결과가 낡은 채로 남지 않는다)
+        """
+        with self._db_lock:
+            result = self.executor.execute(stmt)
+            if isinstance(result, InsertResult) or (isinstance(result, CreateResult) and result.created):
+                self._invalidate(result.table)
+        return result
 
     def _select(self, stmt: SelectStatement, use_cache: bool) -> dict:
         if not use_cache:   # 성능 비교용: 캐시를 읽지도 쓰지도 않음

@@ -200,3 +200,47 @@ http://127.0.0.1:8000/#sql 의 **SQL + 캐시** 탭 (`Redis` 탭은 기존 SET /
 - **시간 비교**: 서버 처리 시간과 브라우저에서 잰 시간(네트워크·JSON 포함)을 함께 표시
 - **캐시 통계**: hit률, HIT / MISS / BYPASS, 무효화 횟수
 - **캐시 키**: 테이블 버전과 캐시된 결과 목록(1초마다 TTL 갱신). INSERT 뒤 옛 결과는 `이전 버전`으로 표시되고 TTL이 끝나면 사라짐. 키별 `DEL`, 버전 키 `DEL`(새 세대로 다시 시작), `FLUSHALL`
+
+# URL 단축 서비스 (app/shortener.py)
+긴 URL을 짧은 URL로 바꿔 주는 서비스. `links` 테이블(CSV + B+ 트리)이 **원본**이고, Redis의 `short:<code>` 키는 언제 사라져도 되는 **캐시**다.
+
+```
+생성  POST /shorten ─→ INSERT INTO links (url, created_at)  (id 자동 부여)    ← 1) DB 먼저
+                      └→ SET short:<code> <url> EX ttl  (미리 채우기가 켜져 있을 때) ← 2) 방식 A
+접속  GET /r/<code> ─→ GET short:<code> ─ hit ─→ 302 Location: <url>
+                                   └ miss ─→ SELECT url FROM links WHERE id = N (B+ 트리)
+                                             └→ SET short:<code> <url> EX ttl ─→ 302    ← 방식 B
+```
+
+### 설계
+- **짧은 코드 = id의 base62 표기** (`0-9a-zA-Z`). id 125 → `21`. code에서 id를 바로 계산하므로 miss가 나도 B+ 트리로 찾음. 앞에 0이 붙은 code(`021`)는 받지 않음 (한 링크에 캐시 키가 여러 개 생기는 것을 막기 위함)
+- **SQL 캐시(테이블 버전 키)를 쓰지 않는다.** 그 방식은 INSERT마다 테이블의 캐시를 전부 버리므로, 링크를 만들 때마다 다른 링크의 캐시까지 사라짐. 링크는 바뀌지 않으므로 링크 하나당 키 하나(`short:<code>`)를 직접 GET/SET
+- **DB에 먼저 쓰고 Redis에 쓴다.** Redis SET이 실패해도 다음 클릭에서 miss로 다시 채워짐. 반대 순서면 DB에 없는 링크가 캐시에서만 동작할 수 있음
+- **미리 채우기(방식 A) + Cache-aside(방식 B).** 새 링크는 바로 공유되는 경우가 많아 첫 클릭부터 hit가 나도록 생성 때 넣고, TTL이 끝나거나 Redis가 비워지면 클릭 때 다시 채움. 미리 채우기는 끌 수 있음
+- **TTL(1시간 + 0~60초)은 메모리 관리용.** 안 쓰이는 링크는 빠지고, 자주 쓰이는 링크만 캐시에 남음
+- **302 리디렉션 + `Cache-Control: no-store`.** 301이면 브라우저가 결과를 기억해 다음 클릭부터 서버에 오지 않으므로 hit/miss와 클릭을 볼 수 없음
+- **http / https만 받는다.** `javascript:` 같은 주소로 리디렉션되는 것을 막고, 공백·제어 문자, 2048자 초과도 400
+- `links` 테이블은 첫 링크를 만들 때 생김 (`data/links.csv`, 컬럼 `id, url, created_at`)
+
+### 엔드포인트
+| 메서드 / 경로 | 설명 |
+|---|---|
+| `POST /shorten` | body: `{"url": "https://..."}` → 201, `{id, code, url, short_url, prewarmed, sql, created_at}` |
+| `GET /r/{code}` | 302 + `Location`, 응답 헤더 `X-Cache: hit / miss`. 없는 링크는 404 |
+| `GET /links/{code}` | `/r/{code}`와 같은 조회 경로를 거쳐 JSON으로 결과만 (`cache`, `elapsed_ms`) |
+| `GET /links?limit=20` | 최근 링크 목록(최신순)과 캐시 여부 / 남은 TTL |
+| `DELETE /links/{code}/cache` | `short:<code>` 키만 삭제 (TTL 만료 재현). DB의 링크는 그대로 |
+| `GET /shortener/stats` | 생성 / 미리 채움 / hit / miss / 없는 링크 횟수, hit률, 캐시된 링크 수 |
+| `PUT /shortener/settings` | body: `{"prewarm": false}` → 미리 채우기 끄기 |
+
+```bash
+curl -X POST http://127.0.0.1:8000/shorten -H "Content-Type: application/json" \
+     -d '{"url": "https://github.com/redis/redis"}'
+curl -I http://127.0.0.1:8000/r/1      # HTTP/1.1 302, location: ..., x-cache: hit
+```
+
+### 웹 페이지
+http://127.0.0.1:8000/#short 의 **URL 단축** 탭
+- 단축하기 + "생성할 때 캐시에도 넣기" 토글, 실행된 INSERT 문 표시
+- 캐시 통계 (hit률, HIT, MISS, 없는 링크, 생성, 미리 채움, 캐시된 링크 수)
+- 최근 링크 표: 링크마다 캐시 상태와 남은 TTL(1초마다 갱신), **조회**(hit/miss와 처리 시간), **캐시 삭제**

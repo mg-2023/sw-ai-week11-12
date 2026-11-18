@@ -4,16 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mini-redis-dbms</title>
+  <!-- Pretendard 웹 폰트 (가변 굵기, 페이지에 쓰인 글자가 든 조각만 내려받는 dynamic subset) -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <main id="main">
     <h1>mini-redis-dbms</h1>
-    <p class="sub">Redis 명령과 SQL(DBMS + Redis 캐시) 테스트 페이지 · API 문서는 <a href="/docs">/docs</a></p>
+    <p class="sub">Redis 명령, SQL(DBMS + Redis 캐시), URL 단축 테스트 페이지 · API 문서는 <a href="/docs">/docs</a></p>
 
     <nav class="tabs" role="tablist">
       <button type="button" class="tab" role="tab" data-tab="redis">Redis</button>
       <button type="button" class="tab" role="tab" data-tab="sql">SQL + 캐시</button>
+      <button type="button" class="tab" role="tab" data-tab="short">URL 단축</button>
     </nav>
 
     <!-- ================= Redis 탭 ================= -->
@@ -113,6 +117,55 @@
           </table>
         </div>
         <div class="result" id="cache-result"></div>
+      </section>
+    </div>
+    <!-- ================= URL 단축 탭 ================= -->
+    <div id="tab-short" class="panel" role="tabpanel" hidden>
+      <!-- POST /shorten -->
+      <section>
+        <h2>URL 단축</h2>
+        <form id="short-form">
+          <div class="row">
+            <input type="text" name="url" placeholder="https://example.com/아주/긴/주소?query=1" required
+                   autocomplete="off" spellcheck="false">
+            <button type="submit">단축</button>
+          </div>
+          <div class="row">
+            <label class="opt"><input type="checkbox" id="short-prewarm" checked>
+              생성할 때 캐시에도 넣기 (미리 채우기)</label>
+          </div>
+        </form>
+        <div id="short-created"></div>
+        <div class="result" id="short-result"></div>
+      </section>
+
+      <!-- GET /shortener/stats -->
+      <section>
+        <h2>캐시 통계</h2>
+        <div class="stats" id="short-stats"></div>
+      </section>
+
+      <!-- GET /links -->
+      <section>
+        <div class="section-head">
+          <h2>최근 링크</h2>
+          <label class="opt"><input type="checkbox" id="links-auto" checked> 1초마다 새로고침</label>
+          <button type="button" class="small ghost" id="links-refresh">새로고침</button>
+        </div>
+        <p class="note">
+          짧은 링크를 누르면 서버가 <code>302</code>로 원래 주소에 보냅니다 (응답 헤더 <code>X-Cache</code>에 hit/miss).
+          <b>조회</b>는 같은 경로(캐시 → DB)를 리디렉션 없이 실행해 결과만 보여 주고,
+          <b>캐시 삭제</b>는 <code>short:&lt;code&gt;</code> 키만 지워 TTL이 끝난 상황을 만듭니다.
+        </p>
+        <div class="table-wrap">
+          <table class="data" id="links-table">
+            <thead>
+              <tr><th>코드</th><th>id</th><th>원래 주소</th><th>캐시</th><th></th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="result" id="links-result"></div>
       </section>
     </div>
   </main>

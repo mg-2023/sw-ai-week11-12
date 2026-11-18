@@ -20,7 +20,8 @@ body {
   padding: 24px 16px;
   background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  /* 웹 폰트를 못 받으면(오프라인 등) 뒤의 시스템 글꼴로 표시 */
+  font-family: "Pretendard Variable", Pretendard, system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
 }
 main { max-width: 640px; margin: 0 auto; }
 main.wide { max-width: 1000px; }
@@ -158,3 +159,19 @@ table.data td.empty { color: var(--muted); text-align: center; }
   font-size: 13px;
 }
 .chip button { padding: 0 8px; font-size: 12px; border-radius: 999px; }
+
+/* ---------------- URL 단축 ---------------- */
+.created {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--ok);
+  border-radius: 6px;
+  font-size: 14px;
+}
+.created .short { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+.created .short a { font-size: 18px; font-weight: 600; word-break: break-all; }
+.created .meta { color: var(--muted); font-size: 13px; word-break: break-all; }
+table.data td.url { white-space: normal; word-break: break-all; min-width: 220px; }
+table.data td.actions { display: flex; gap: 4px; }
+.lookup { display: inline-flex; gap: 6px; align-items: center; }

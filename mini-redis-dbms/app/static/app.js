@@ -159,9 +159,9 @@ function formatMs(ms) {
 const CACHE_LABEL = { hit: "HIT", miss: "MISS", bypass: "BYPASS" };
 
 // ----------------------------------------------------------------------
-// 탭 전환 (주소의 #redis / #sql 로 기억 → 새로고침해도 유지)
+// 탭 전환 (주소의 #redis / #sql / #short 로 기억 → 새로고침해도 유지)
 // ----------------------------------------------------------------------
-const TABS = ["redis", "sql"];
+const TABS = ["redis", "sql", "short"];
 
 function selectTab(name) {
   if (!TABS.includes(name)) name = "redis";
@@ -171,8 +171,9 @@ function selectTab(name) {
   for (const button of document.querySelectorAll(".tabs .tab")) {
     button.setAttribute("aria-selected", String(button.dataset.tab === name));
   }
-  document.getElementById("main").classList.toggle("wide", name === "sql");
+  document.getElementById("main").classList.toggle("wide", name === "sql" || name === "short");
   if (name === "sql") refreshSqlSide();
+  if (name === "short") refreshShortSide();
 }
 
 for (const button of document.querySelectorAll(".tabs .tab")) {
@@ -393,6 +394,163 @@ document.getElementById("cache-flushall").addEventListener("click", async () => 
 // TTL 이 줄어드는 것을 보이게 1초마다 새로고침 (SQL 탭이 보이고 체크되어 있을 때만)
 setInterval(() => {
   if (document.getElementById("cache-auto").checked && sqlTabVisible()) refreshSqlSide();
+}, 1000);
+
+// ----------------------------------------------------------------------
+// URL 단축
+//   POST /shorten → links 테이블에 INSERT (+ 미리 채우기가 켜져 있으면 short:<code> SET)
+//   GET /links/{code} → 캐시 확인 → miss면 DB(B+ 트리) → 캐시에 SET
+// ----------------------------------------------------------------------
+const shortForm = document.getElementById("short-form");
+const prewarmBox = document.getElementById("short-prewarm");
+
+function shortTabVisible() {
+  return !document.getElementById("tab-short").hidden && !document.hidden;
+}
+
+shortForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submit = shortForm.querySelector("button[type=submit]");
+  submit.disabled = true;
+  try {
+    const link = await api("POST", "/shorten", { url: shortForm.url.value });
+    renderCreated(link);
+    shortForm.url.value = "";
+    show("short-result", "", true);
+  } catch (err) {
+    document.getElementById("short-created").replaceChildren();
+    show("short-result", (err.status ? `[${err.status}] ` : "") + err.message, false);
+  } finally {
+    submit.disabled = false;
+    refreshShortSide();
+  }
+});
+
+function renderCreated(link) {
+  const copy = el("button", { type: "button", class: "small ghost" }, "복사");
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(link.short_url);
+      copy.textContent = "복사됨";
+    } catch {
+      copy.textContent = "복사 실패";
+    }
+  });
+  document.getElementById("short-created").replaceChildren(
+    el("div", { class: "created" },
+      el("div", { class: "short" },
+        el("a", { href: link.short_url, target: "_blank", rel: "noopener" }, link.short_url),
+        copy,
+        el("span", { class: link.prewarmed ? "badge hit" : "badge stale" },
+          link.prewarmed ? "캐시에 미리 넣음" : "캐시에 안 넣음 (첫 클릭 때)"),
+      ),
+      el("div", { class: "meta" }, `id ${link.id} → code "${link.code}" · ${link.url}`),
+      el("div", { class: "meta mono" }, link.sql),
+    ),
+  );
+}
+
+// 미리 채우기 켜기/끄기 (서버 설정을 바꾼다)
+prewarmBox.addEventListener("change", async () => {
+  try {
+    const data = await api("PUT", "/shortener/settings", { prewarm: prewarmBox.checked });
+    prewarmBox.checked = data.prewarm;
+  } catch (err) {
+    prewarmBox.checked = !prewarmBox.checked;
+    show("short-result", `설정 실패: ${err.message}`, false);
+  }
+  refreshShortSide();
+});
+
+async function refreshShortStats() {
+  const s = await api("GET", "/shortener/stats");
+  prewarmBox.checked = s.prewarm;
+  const stat = (label, value) => el("div", { class: "stat" },
+    el("div", { class: "label" }, label), el("div", { class: "value" }, String(value)));
+  const ttlText = (s.ttl === 3600) ? "1h" : "1m";
+  document.getElementById("short-stats").replaceChildren(
+    stat("hit률", `${(s.hit_rate * 100).toFixed(1)}%`),
+    stat("HIT", s.hits),
+    stat("MISS", s.misses),
+    stat("없는 링크", s.not_found),
+    stat("생성", s.created),
+    stat("미리 채움", s.prewarmed),
+    stat("캐시된 링크", s.cached_links),
+    stat("TTL", `${ttlText}+${s.ttl_jitter}s`),
+  );
+}
+
+async function refreshLinks() {
+  const { links } = await api("GET", "/links");
+  const tbody = document.querySelector("#links-table tbody");
+  if (links.length === 0) {
+    tbody.replaceChildren(el("tr", {}, el("td", { class: "empty", colspan: "5" }, "아직 만든 링크가 없습니다")));
+    return;
+  }
+  tbody.replaceChildren(...links.map((link) => {
+    const lookup = el("button", { type: "button", class: "small" }, "조회");
+    lookup.addEventListener("click", () => lookupLink(link.code));
+    const evict = el("button", { type: "button", class: "small ghost", disabled: !link.cached }, "캐시 삭제");
+    evict.addEventListener("click", () => evictLink(link.code));
+    const cacheCell = link.cached
+      ? el("span", { class: "badge hit", title: `short:${link.code}` },
+        link.ttl === null ? "캐시됨" : `캐시됨 · ${link.ttl}s`)
+      : el("span", { class: "badge stale" }, "캐시 없음");
+    return el("tr", { title: `created_at ${link.created_at}` },
+      el("td", { class: "mono" }, el("a", { href: `/r/${link.code}`, target: "_blank", rel: "noopener" }, link.code)),
+      el("td", { class: "mono" }, String(link.id)),
+      el("td", { class: "url" }, link.url),
+      el("td", {}, cacheCell),
+      el("td", { class: "actions" }, lookup, evict),
+    );
+  }));
+}
+
+async function lookupLink(code) {
+  const result = document.getElementById("links-result");
+  const started = performance.now();
+  try {
+    const data = await api("GET", `/links/${encodeURIComponent(code)}`);
+    const clientMs = performance.now() - started;
+    result.className = "result";
+    result.replaceChildren(
+      el("span", { class: "lookup" },
+        el("span", { class: `badge ${data.cache}` }, CACHE_LABEL[data.cache] ?? data.cache),
+        `${code} → 서버 ${formatMs(data.elapsed_ms)} · 브라우저 ${formatMs(clientMs)}`),
+    );
+  } catch (err) {
+    show("links-result", `조회 실패: ${err.message}`, false);
+  }
+  refreshShortSide();
+}
+
+async function evictLink(code) {
+  try {
+    await api("DELETE", `/links/${encodeURIComponent(code)}/cache`);
+  } catch (err) {
+    show("links-result", `캐시 삭제 실패: ${err.message}`, false);
+  }
+  refreshShortSide();
+}
+
+let refreshingShort = false;
+async function refreshShortSide() {
+  if (refreshingShort) return;
+  refreshingShort = true;
+  try {
+    await Promise.all([refreshShortStats(), refreshLinks()]);
+  } catch (err) {
+    show("links-result", `새로고침 실패: ${err.message}`, false);
+  } finally {
+    refreshingShort = false;
+  }
+}
+
+document.getElementById("links-refresh").addEventListener("click", refreshShortSide);
+
+// 새 탭에서 짧은 링크를 열고 돌아오면 hit/miss 변화가 보이도록 1초마다 새로고침
+setInterval(() => {
+  if (document.getElementById("links-auto").checked && shortTabVisible()) refreshShortSide();
 }, 1000);
 
 selectTab(location.hash.slice(1));

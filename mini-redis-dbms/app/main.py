@@ -8,6 +8,8 @@ mini-redis HTTP API 서버
 계층:  웹사이트(fetch) → [이 파일: HTTP ↔ store 변환] → RedisStore → HashTable
                     └ /sql → CachedSQL ─ SELECT ─→ RedisStore (캐시)
                                        └ miss / INSERT → Executor → CSV + B+ 트리
+                    └ /shorten, /r/{code} → URLShortener ─→ RedisStore (short:<code>)
+                                                        └ miss / 생성 → CachedSQL.execute_uncached → links 테이블
 이 파일은 Redis 규칙이나 캐시 규칙을 직접 판단하지 않는다. 검증과 동작은 전부 store / sqlcache가 하고,
 여기서는 요청을 그 호출로 바꾸고 결과를 JSON으로 돌려주는 일만 한다.
 """
@@ -20,7 +22,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, StrictInt
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,6 +37,7 @@ logger = logging.getLogger("uvicorn.error")
 # 이렇게 하면 app/ 안에서 실행하든 루트에서 `app.main:app`으로 실행하든 동작한다.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from shortener import URLShortener  # noqa: E402
 from sqlcache import CachedSQL  # noqa: E402
 from sqlparser import SQLError  # noqa: E402
 from store import RedisStore  # noqa: E402
@@ -67,6 +70,14 @@ class SQLBody(BaseModel):
     use_cache: bool = True    # False면 SELECT가 캐시를 읽지도 쓰지도 않음 (성능 비교용)
 
 
+class ShortenBody(BaseModel):
+    url: str                  # http:// 또는 https:// 주소만 (검사는 shortener.normalize_url)
+
+
+class ShortenerSettingsBody(BaseModel):
+    prewarm: bool             # True: 생성할 때도 캐시에 SET (방식 A+B), False: 첫 클릭 때만 (방식 B)
+
+
 # ----------------------------------------------------------------------
 # Swagger UI(/docs) 그룹
 #   엔드포인트마다 tags=[...]를 달면 같은 태그끼리 묶여서 보인다.
@@ -77,6 +88,7 @@ TAG_TTL = "TTL"
 TAG_COUNTER = "증감"
 TAG_ADMIN = "관리"
 TAG_SQL = "SQL (DBMS + 캐시)"
+TAG_SHORT = "URL 단축"
 
 OPENAPI_TAGS = [
     {"name": TAG_BASIC, "description": "SET / GET / DEL / EXISTS"},
@@ -84,6 +96,7 @@ OPENAPI_TAGS = [
     {"name": TAG_COUNTER, "description": "INCR / DECR (원자적 증감)"},
     {"name": TAG_ADMIN, "description": "KEYS / DBSIZE / FLUSHALL"},
     {"name": TAG_SQL, "description": "CSV DBMS에 SQL 실행. SELECT 결과는 Redis에 캐시 (Cache-aside + 테이블 버전 키)"},
+    {"name": TAG_SHORT, "description": "긴 URL → 짧은 URL. links 테이블이 원본, Redis `short:<code>` 키가 캐시 (생성 시 미리 채우기 + Cache-aside)"},
 ]
 
 
@@ -93,10 +106,12 @@ OPENAPI_TAGS = [
 #   store는 앱 하나당 딱 하나. 요청마다 새로 만들면 데이터가 매번 사라진다.
 # ----------------------------------------------------------------------
 def create_app(store: RedisStore | None = None, sql: CachedSQL | None = None,
-               warm_up: bool = True) -> FastAPI:
+               warm_up: bool = True, shortener: URLShortener | None = None) -> FastAPI:
     store = store if store is not None else RedisStore()
     # SQL 캐시는 위 store를 그대로 쓴다 → /keys로 캐시 키(dbcache:...)를 직접 들여다볼 수 있다
     sql = sql if sql is not None else CachedSQL(store)
+    # URL 단축도 같은 store(캐시)와 같은 sql(DB 락)을 쓴다 → /keys로 short:<code> 키도 보인다
+    shortener = shortener if shortener is not None else URLShortener(store, sql)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -121,6 +136,7 @@ def create_app(store: RedisStore | None = None, sql: CachedSQL | None = None,
     app = FastAPI(title="mini-redis", lifespan=lifespan, openapi_tags=OPENAPI_TAGS)
     app.state.store = store
     app.state.sql = sql
+    app.state.shortener = shortener
 
     # store는 잘못된 입력에 ValueError를 던진다 (예: "value is not an integer or out of range").
     # 핸들러마다 try/except를 쓰지 않고 여기서 한 번에 400으로 바꾼다.
@@ -230,6 +246,56 @@ def create_app(store: RedisStore | None = None, sql: CachedSQL | None = None,
     def sql_cache():
         """캐시 키 목록 — 테이블별 현재 버전, 쿼리 결과 키마다 남은 TTL과 현재 버전 여부"""
         return sql.cache_entries()
+
+    # ---------------- URL 단축: links 테이블 + short:<code> 캐시 ----------------
+    @app.post("/shorten", status_code=201, tags=[TAG_SHORT])
+    def shorten(body: ShortenBody, request: Request):
+        """링크 생성 — DB에 INSERT한 뒤, 미리 채우기가 켜져 있으면 캐시에도 SET (prewarmed=true)"""
+        link = shortener.shorten(body.url)
+        link["short_url"] = f"{str(request.base_url).rstrip('/')}/r/{link['code']}"
+        return link
+
+    @app.get("/r/{code}", tags=[TAG_SHORT])
+    def follow(code: str):
+        """리디렉션 — 302 + Location. 응답 헤더 X-Cache에 hit / miss가 붙는다."""
+        url, cache = shortener.resolve(code)
+        if url is None:
+            raise HTTPException(status_code=404, detail="없는 링크입니다")
+        # 301(영구 이동)은 브라우저가 결과를 기억해서 다음 클릭부터 서버에 오지 않는다.
+        # 그러면 클릭마다 캐시가 hit인지 miss인지 볼 수 없으므로 302를 쓰고, 브라우저 캐시도 막는다.
+        return RedirectResponse(url, status_code=302,
+                                headers={"X-Cache": cache, "Cache-Control": "no-store"})
+
+    @app.get("/links", tags=[TAG_SHORT])
+    def recent_links(limit: int = 20):
+        """최근 링크 목록 (최신순) — 링크마다 캐시에 있는지(cached)와 남은 TTL"""
+        return {"links": shortener.recent(max(1, min(limit, 200)))}
+
+    @app.get("/links/{code}", tags=[TAG_SHORT])
+    def resolve_link(code: str):
+        """/r/{code}와 같은 조회 경로(캐시 → DB)를 거치되, 리디렉션 대신 결과를 JSON으로 돌려준다 (테스트 페이지용)"""
+        start = time.perf_counter()
+        url, cache = shortener.resolve(code)
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
+        if url is None:
+            raise HTTPException(status_code=404, detail="없는 링크입니다")
+        return {"code": code, "url": url, "cache": cache, "elapsed_ms": elapsed_ms}
+
+    @app.delete("/links/{code}/cache", tags=[TAG_SHORT])
+    def evict_link(code: str):
+        """캐시 키(`short:<code>`)만 지운다 — TTL이 끝난 상황을 재현. DB의 링크는 그대로"""
+        return {"deleted": shortener.evict(code)}
+
+    @app.get("/shortener/stats", tags=[TAG_SHORT])
+    def shortener_stats():
+        """생성 / 미리 채움 / hit / miss / 없는 링크 횟수, hit률, 캐시에 있는 링크 수"""
+        return shortener.stats()
+
+    @app.put("/shortener/settings", tags=[TAG_SHORT])
+    def shortener_settings(body: ShortenerSettingsBody):
+        """미리 채우기 켜기/끄기 — 끄면 첫 클릭이 항상 miss"""
+        shortener.set_prewarm(body.prewarm)
+        return {"prewarm": shortener.prewarm}
 
     # ---------------- html 라우팅 / js, css 마운트 ----------------
     @app.get("/", include_in_schema=False)   # /docs 목록에서는 숨김
