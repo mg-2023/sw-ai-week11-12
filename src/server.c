@@ -5,20 +5,32 @@
 #include "threadpool.h"
 
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define READ_US 2000000u    /* headers and body must arrive within 2 s of accept */
-#define TOTAL_US 5000000u   /* queue wait + receive must finish within 5 s of accept, else 503 */
 #define SEND_US 2000000u    /* sending the response */
 #define ACCEPT_POLL_MS 200  /* backstop so a stop flag is noticed even if the wake-up is missed */
+
+#define REJECT_CAP 256u
+typedef struct {
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    SOCKET_T queue[REJECT_CAP];
+    size_t head, count;
+    int stopping;
+} Rejector;
 
 typedef struct {
     Db *db;
     ThreadPool *pool;
-    ThreadPool *rejector;   /* one helper thread that answers 503 so the accept thread never waits on a client */
+    Rejector *rejector;
+    uint64_t total_us;
     int workers, queue_cap;
     atomic_uint_least64_t processed, rejected;
 } Server;
@@ -41,6 +53,12 @@ static void send_error(SOCKET_T s, int status, const char *message) {
     char body[256];
     int n = snprintf(body, sizeof body, "{\"ok\":false,\"error\":{\"message\":\"%s\"}}", message);
     http_send(s, status, body, (size_t)n, os_now_us() + SEND_US);
+}
+
+static void send_deadline(SOCKET_T s) {
+    const char body[] = "{\"ok\":false,\"error\":{\"statement\":0,\"line\":0,\"col\":0,"
+        "\"message\":\"deadline exceeded after 0 statements; earlier statements are committed\"},\"committed\":0}";
+    http_send(s, 503, body, sizeof body - 1, os_now_us() + SEND_US);
 }
 
 /* GET /stats: table rows, pool and counters, INSERT lock wait. Reads only atomics and the wait-sample mutex. */
@@ -68,10 +86,10 @@ static void send_stats(Server *srv, SOCKET_T s) {
 }
 
 /* POST /query: run the SQL through db_execute_sql; 200, 400 (SQL error) or 500 (internal error). */
-static void run_query(Server *srv, SOCKET_T s, const HttpRequest *req, int worker_id) {
+static void run_query(Server *srv, SOCKET_T s, const HttpRequest *req, int worker_id, uint64_t deadline_us) {
     if (strlen(req->body) != req->body_len) { send_error(s, 400, "SQL contains a NUL byte"); return; }
     Result result = {0};
-    db_execute_sql(srv->db, req->body, &result);
+    db_execute_sql(srv->db, req->body, deadline_us, &result);
     int status = result_http_status(&result);
     char *json = NULL; size_t len = 0;
     if (result_to_json(&result, worker_id, &json, &len)) {
@@ -89,26 +107,29 @@ static void run_query(Server *srv, SOCKET_T s, const HttpRequest *req, int worke
 static void handle_connection(void *arg, int worker_id) {
     Conn *conn = arg; Server *srv = g_server; SOCKET_T s = conn->sock;
     int drain = 0;   /* error reply: the request may be unread, so close gracefully */
-    if (os_now_us() > conn->accepted_us + TOTAL_US) {              /* waited in the queue past the deadline */
+    if (os_now_us() >= conn->accepted_us + srv->total_us) {              /* waited in the queue past the deadline */
         atomic_fetch_add(&srv->rejected, 1);
-        send_error(s, 503, "request waited too long in the queue");
+        send_deadline(s);
         drain = 1;
         goto done;
     }
     HttpRequest req = {0};
-    int status = http_read_request(s, &req, conn->accepted_us + READ_US);
+    uint64_t read_us = srv->total_us < READ_US ? srv->total_us : READ_US;
+    int status = http_read_request(s, &req, conn->accepted_us + read_us);
     if (status) {
-        send_error(s, status, status == 408 ? "request timed out" : status == 413 ? "request body too large" :
+        if (status == 408 && os_now_us() >= conn->accepted_us + srv->total_us) status = 503;
+        if (status == 503) send_deadline(s);
+        else send_error(s, status, status == 408 ? "request timed out" : status == 413 ? "request body too large" :
                               status == 500 ? "server error reading the request" : "malformed HTTP request");
         drain = 1;
         goto done;
     }
-    if (os_now_us() > conn->accepted_us + TOTAL_US) {              /* too late to start executing */
+    if (os_now_us() >= conn->accepted_us + srv->total_us) {              /* too late to start executing */
         atomic_fetch_add(&srv->rejected, 1);
-        send_error(s, 503, "request waited too long before it could run");
+        send_deadline(s);
         drain = 1;
     } else if (strcmp(req.path, "/query") == 0) {
-        if (strcmp(req.method, "POST") == 0) run_query(srv, s, &req, worker_id);
+        if (strcmp(req.method, "POST") == 0) run_query(srv, s, &req, worker_id, conn->accepted_us + srv->total_us);
         else send_error(s, 405, "use POST for /query");
     } else if (strcmp(req.path, "/health") == 0 || strcmp(req.path, "/stats") == 0) {
         if (strcmp(req.method, "GET") != 0) send_error(s, 405, "use GET for this path");
@@ -120,19 +141,95 @@ static void handle_connection(void *arg, int worker_id) {
     if (req.extra_bytes) drain = 1;   /* the client sent more than Content-Length: do not reset over it */
     http_request_free(&req);
 done:
-    if (drain) os_sock_close_graceful(s, os_now_us() + 300000u);
+    if (drain && !atomic_load(&g_stop)) os_sock_close_graceful(s, os_now_us() + 300000u);
     else os_sock_close(s);
     free(conn);
 }
 
-/* Answer 503 "queue full" and close gracefully (the request may still be arriving). */
-static void reject_connection(void *arg, int worker_id) {
-    (void)worker_id;
-    Conn *conn = arg;
-    char body[] = "{\"ok\":false,\"error\":{\"message\":\"server busy: request queue is full\"}}";
-    http_send(conn->sock, 503, body, sizeof body - 1, os_now_us() + 200000u);
-    os_sock_close_graceful(conn->sock, os_now_us() + 200000u);
-    free(conn);
+/* Send in FIFO order; drain every half-closed socket in one nonblocking select. */
+static void *reject_loop(void *arg) {
+    Rejector *r = arg;
+    typedef struct { SOCKET_T sock; uint64_t expires; } Drain;
+    Drain *draining = NULL; size_t n = 0, capacity = 0;
+    for (;;) {
+        pthread_mutex_lock(&r->mutex);
+        if (r->stopping || atomic_load(&g_stop)) {
+            while (r->count) {
+                os_sock_close(r->queue[r->head]); r->head = (r->head + 1) % REJECT_CAP; r->count--;
+            }
+            pthread_mutex_unlock(&r->mutex);
+            for (size_t i = 0; i < n; i++) os_sock_close(draining[i].sock);
+            free(draining);
+            return NULL;
+        }
+        SOCKET_T s = OS_INVALID_SOCKET;
+        if (r->count) {
+            s = r->queue[r->head]; r->head = (r->head + 1) % REJECT_CAP; r->count--;
+        }
+        pthread_mutex_unlock(&r->mutex);
+        if (s != OS_INVALID_SOCKET) {
+            const char body[] = "{\"ok\":false,\"error\":{\"message\":\"server busy: request queue is full\"}}";
+            http_send(s, 503, body, sizeof body - 1, os_now_us() + 200000u);
+            if (n == capacity) {
+                size_t next = capacity ? capacity * 2 : REJECT_CAP;
+                Drain *grown = next > SIZE_MAX / sizeof *grown ? NULL : realloc(draining, next * sizeof *grown);
+                if (grown) { draining = grown; capacity = next; }
+            }
+            if (n == capacity || os_sock_begin_drain(s)) os_sock_close(s);
+            else draining[n++] = (Drain){s, os_now_us() + 200000u};
+        }
+        uint64_t now = os_now_us();
+        size_t kept = 0;
+        for (size_t base = 0; base < n; base += REJECT_CAP) {
+            SOCKET_T sockets[REJECT_CAP]; unsigned char done[REJECT_CAP];
+            size_t count = n - base < REJECT_CAP ? n - base : REJECT_CAP;
+            for (size_t i = 0; i < count; i++) sockets[i] = draining[base + i].sock;
+            int bad = os_sock_drain_ready(sockets, count, done);
+            for (size_t i = 0; i < count; i++) {
+                Drain d = draining[base + i];
+                if (bad || done[i] || now >= d.expires) os_sock_close(d.sock);
+                else draining[kept++] = d;
+            }
+        }
+        n = kept;
+        pthread_mutex_lock(&r->mutex);
+        if (!r->stopping && !atomic_load(&g_stop) && !r->count) {
+            if (!n) pthread_cond_wait(&r->changed, &r->mutex);
+            else {
+                struct timespec until; clock_gettime(CLOCK_REALTIME, &until);
+                until.tv_nsec += 5000000;
+                if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
+                pthread_cond_timedwait(&r->changed, &r->mutex, &until);
+            }
+        }
+        pthread_mutex_unlock(&r->mutex);
+    }
+}
+
+static Rejector *reject_create(void) {
+    Rejector *r = calloc(1, sizeof *r);
+    if (!r) return NULL;
+    if (pthread_mutex_init(&r->mutex, NULL)) { free(r); return NULL; }
+    if (pthread_cond_init(&r->changed, NULL)) { pthread_mutex_destroy(&r->mutex); free(r); return NULL; }
+    if (pthread_create(&r->thread, NULL, reject_loop, r)) {
+        pthread_cond_destroy(&r->changed); pthread_mutex_destroy(&r->mutex); free(r); return NULL;
+    }
+    return r;
+}
+
+static int reject_submit(Rejector *r, SOCKET_T s) {
+    pthread_mutex_lock(&r->mutex);
+    int bad = r->stopping || atomic_load(&g_stop) || r->count == REJECT_CAP;
+    if (!bad) { r->queue[(r->head + r->count++) % REJECT_CAP] = s; pthread_cond_signal(&r->changed); }
+    pthread_mutex_unlock(&r->mutex);
+    return bad;
+}
+
+static void reject_destroy(Rejector *r) {
+    if (!r) return;
+    pthread_mutex_lock(&r->mutex); r->stopping = 1; pthread_cond_signal(&r->changed); pthread_mutex_unlock(&r->mutex);
+    pthread_join(r->thread, NULL);
+    pthread_cond_destroy(&r->changed); pthread_mutex_destroy(&r->mutex); free(r);
 }
 
 /* Accept loop: hand each connection to the pool; when the queue is full pass it to the rejector at once.
@@ -156,7 +253,8 @@ static int accept_loop(Server *srv) {
         if (!conn || tp_submit(srv->pool, conn)) {
             atomic_fetch_add(&srv->rejected, 1);
             /* If even the rejector is full, drop the connection (reset) rather than wait. */
-            if (!conn || tp_submit(srv->rejector, conn)) { os_sock_close(c); free(conn); }
+            if (!conn || reject_submit(srv->rejector, c)) os_sock_close(c);
+            free(conn);
         }
     }
     return 0;
@@ -165,7 +263,7 @@ static int accept_loop(Server *srv) {
 /* Same shape as the CLI usage error: message on stdout, usage text on stderr, exit code 1. */
 static int usage(void) {
     puts("error at 0:0: invalid command or arguments");
-    fputs("usage: mini-dbms serve [--port 8100] [--threads 4] [--queue 64] [--data DIR] [--sync always|none]\n", stderr);
+    fputs("usage: mini-dbms serve [--port 8100] [--threads 4] [--queue 64] [--total-timeout-ms 5000] [--data DIR] [--sync always|none]\n", stderr);
     return 1;
 }
 
@@ -183,7 +281,7 @@ static int number(const char *text, long min, long max, long *out) {
 }
 
 int server_main(int argc, char **argv) {
-    long port = 8100, threads = 4, queue = 64;
+    long port = 8100, threads = 4, queue = 64, total_ms = 5000;
     const char *dir = "data";
     DbOptions options = {.sync_always = 1};
     unsigned seen = 0;
@@ -194,6 +292,7 @@ int server_main(int argc, char **argv) {
         else if (strcmp(argv[i], "--queue") == 0) { flag = 4; value = &queue; min = 1; max = 100000; }
         else if (strcmp(argv[i], "--data") == 0) flag = 8;
         else if (strcmp(argv[i], "--sync") == 0) flag = 16;
+        else if (strcmp(argv[i], "--total-timeout-ms") == 0) { flag = 32; value = &total_ms; min = 1; max = 3600000; }
         else return usage();
         if ((seen & flag) || ++i >= argc) return usage();
         seen |= flag;
@@ -208,17 +307,17 @@ int server_main(int argc, char **argv) {
     DbError err = {0};
     Db *db = db_open(dir, options, &err);
     if (!db) { fprintf(stderr, "error: %s\n", err.message); os_cleanup(); return 1; }
-    Server srv = {.db = db, .workers = (int)threads, .queue_cap = (int)queue};
+    Server srv = {.db = db, .workers = (int)threads, .queue_cap = (int)queue, .total_us = (uint64_t)total_ms * 1000u};
     g_server = &srv;
     srv.pool = tp_create((int)threads, (int)queue, handle_connection);
-    srv.rejector = tp_create(1, 256, reject_connection);
+    srv.rejector = reject_create();
     uint16_t bound = 0;
     g_listener = os_sock_listen((uint16_t)port, 128, &bound);
     if (!srv.pool || !srv.rejector || g_listener == OS_INVALID_SOCKET || os_set_interrupt_handler(on_interrupt)) {
         fprintf(stderr, "error: cannot %s\n", !srv.pool || !srv.rejector ? "start the thread pool" :
                 g_listener == OS_INVALID_SOCKET ? "listen on that port (is it in use?)" : "install the interrupt handler");
         if (g_listener != OS_INVALID_SOCKET) os_sock_close(g_listener);
-        tp_destroy(srv.pool); tp_destroy(srv.rejector); db_close(db); os_cleanup();
+        tp_destroy(srv.pool); reject_destroy(srv.rejector); db_close(db); os_cleanup();
         return 1;
     }
     printf("listening 127.0.0.1:%u\n", (unsigned)bound);
@@ -230,10 +329,9 @@ int server_main(int argc, char **argv) {
 
     /* Stop: no new connections; queued requests still get answered; then close the files. */
     if (!atomic_exchange(&g_woken, 1)) os_sock_close(g_listener);   /* else the interrupt handler woke or closed it */
+    reject_destroy(srv.rejector);
     tp_shutdown(srv.pool);
-    tp_shutdown(srv.rejector);
     tp_destroy(srv.pool);
-    tp_destroy(srv.rejector);
     db_close(db);
     fprintf(stderr, "mini-dbms stopped: processed %" PRIu64 ", rejected %" PRIu64 "\n",
             (uint64_t)atomic_load(&srv.processed), (uint64_t)atomic_load(&srv.rejected));

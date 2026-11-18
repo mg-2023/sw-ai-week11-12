@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef enum { DB_ERROR_SQL, DB_ERROR_INTERNAL } DbErrorKind;
+typedef enum { DB_ERROR_SQL, DB_ERROR_INTERNAL, DB_ERROR_DEADLINE } DbErrorKind;
 typedef struct { int line, col; char message[256]; DbErrorKind kind; } DbError;
 
 typedef enum {

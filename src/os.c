@@ -12,6 +12,7 @@ void os_test_reset_reads(void) { atomic_store(&read_calls, 0); }
 unsigned os_test_read_calls(void) { return atomic_load(&read_calls); }
 #endif
 #ifdef _WIN32
+#define FD_SETSIZE 512
 #include <winsock2.h>
 #include <windows.h>
 #include <psapi.h>
@@ -355,6 +356,49 @@ int64_t os_sock_send(SOCKET_T s, const void *buf, size_t n, uint64_t deadline_us
     do { sent = send((int)s, buf, n, MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
     return sent < 0 ? -1 : (int64_t)sent;
 #endif
+}
+
+int os_sock_begin_drain(SOCKET_T s) {
+#ifdef _WIN32
+    u_long nonblocking = 1;
+    return shutdown(SOCK_NATIVE(s), SD_SEND) || ioctlsocket(SOCK_NATIVE(s), FIONBIO, &nonblocking) ? -1 : 0;
+#else
+    int flags = fcntl((int)s, F_GETFL, 0);
+    return shutdown((int)s, SHUT_WR) || flags < 0 || fcntl((int)s, F_SETFL, flags | O_NONBLOCK) ? -1 : 0;
+#endif
+}
+
+int os_sock_drain_ready(const SOCKET_T *sockets, size_t n, unsigned char *done) {
+    fd_set reads; FD_ZERO(&reads);
+    if (n > FD_SETSIZE) return -1;
+    int maxfd = 0;
+    for (size_t i = 0; i < n; i++) {
+        done[i] = 0;
+#ifdef _WIN32
+        FD_SET(SOCK_NATIVE(sockets[i]), &reads);
+#else
+        if (sockets[i] < 0 || sockets[i] >= FD_SETSIZE) return -1;
+        FD_SET((int)sockets[i], &reads);
+        if (sockets[i] > maxfd) maxfd = (int)sockets[i];
+#endif
+    }
+    struct timeval tv = {0};
+    if (!n) return 0;
+    int ready = select(maxfd + 1, &reads, NULL, NULL, &tv);
+    if (ready < 0) return -1;
+    char sink[16384];
+    for (size_t i = 0; ready && i < n; i++) {
+#ifdef _WIN32
+        if (!FD_ISSET(SOCK_NATIVE(sockets[i]), &reads)) continue;
+        int got = recv(SOCK_NATIVE(sockets[i]), sink, sizeof sink, 0);
+        done[i] = got == 0 || (got < 0 && WSAGetLastError() != WSAEWOULDBLOCK);
+#else
+        if (!FD_ISSET((int)sockets[i], &reads)) continue;
+        ssize_t got = recv((int)sockets[i], sink, sizeof sink, 0);
+        done[i] = got == 0 || (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+#endif
+    }
+    return 0;
 }
 
 /* Close after an error reply without letting unread request bytes reset the connection. */

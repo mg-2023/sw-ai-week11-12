@@ -42,10 +42,12 @@ python tests/run_cli_tests.py
 ## 서버 실행 (Phase 3)
 
 ```powershell
-.\build\mini-dbms.exe serve [--port 8100] [--threads 4] [--queue 64] [--data DIR] [--sync always|none]
+.\build\mini-dbms.exe serve [--port 8100] [--threads 4] [--queue 64] [--total-timeout-ms 5000] [--data DIR] [--sync always|none]
 ```
 
 `127.0.0.1` 에서만 받는다 (`--host` 옵션 없음. 같은 PC 의 다른 앱 서버가 부른다). 기본 포트 8100, 워커 4, 요청 큐 64, 데이터 폴더 `data`, `--sync always`. 한 줄 `listening 127.0.0.1:8100` 을 출력하며 `--port 0` 이면 빈 포트를 골라 그 줄에 알린다. 콘솔에서 Ctrl+C 를 누르면 새 연결을 받지 않고 큐에 남은 요청을 마친 뒤 파일을 닫고 끝난다.
+
+`--total-timeout-ms`는 연결 수락부터 큐 대기 · 받기 · SQL 실행을 포함하는 시한이다 (기본 5000ms, 범위 1..3600000). 문장 시작 전과 SELECT 탐색 블록마다 확인하며 초과하면 503과 `committed` 문장 수를 반환한다. 시작한 INSERT는 끝까지 수행하고 저장 뒤 시한 초과로 실패를 반환하지 않는다. 요청 하나의 모든 결과 합계는 16 MiB이며 넘는 문장에서 400, 앞 문장은 유지된다.
 
 ```powershell
 # SQL 은 본문으로 보낸다. INSERT 는 id 를 돌려준다
@@ -63,7 +65,7 @@ curl.exe -s http://127.0.0.1:8100/health        # {"ok":true}
 curl.exe -s http://127.0.0.1:8100/stats
 ```
 
-상태 코드 : 200 성공, 400 SQL 오류 · 잘못된 HTTP (CR 없이 LF 만 쓴 줄 포함), 408 받기 시한 (2초), 413 본문 1 MiB 초과, 500 내부 오류 (파일 I/O 등, 또는 COMMIT 을 쓴 뒤 확인 · 되돌리기가 모두 실패한 INSERT 의 "statement outcome unknown" — 다시 열어 봐야 안다), 503 큐 가득 또는 대기 시한 (전체 5초) 초과. 응답은 항상 `Connection: close` 이며 연결 하나에 요청 하나다. `POST /query` 는 `Content-Length` 가 필요하다 (curl 이 붙인다). SELECT 결과는 메모리 16 MiB 를 넘으면 400 이다 (CLI 도 같다) : `WHERE` 나 `LIMIT` 을 쓴다. 구조 · 락 · 시한 · 종료 설명은 `docs/architecture.md` 의 Phase 3 절에 있다.
+상태 코드 : 200 성공, 400 SQL 오류 · 잘못된 HTTP (CR 없이 LF 만 쓴 줄 포함), 408 받기 시한 (2초), 413 본문 1 MiB 초과, 500 내부 오류 (파일 I/O 등, 또는 COMMIT 을 쓴 뒤 확인 · 되돌리기가 모두 실패한 INSERT 의 "statement outcome unknown" — 다시 열어 봐야 안다), 503 큐 가득 또는 전체 시한 (기본 5초) 초과. 응답은 항상 `Connection: close` 이며 연결 하나에 요청 하나다. `POST /query` 는 `Content-Length` 가 필요하다 (curl 이 붙인다). 요청 전체 결과는 합계 16 MiB 를 넘으면 400 이다 (CLI 도 같다) : `WHERE` 나 `LIMIT` 을 쓴다. 구조 · 락 · 시한 · 종료 설명은 `docs/architecture.md` 의 Phase 3 절에 있다.
 
 ```powershell
 python tests/test_server.py                # 서버 테스트 (약 30초, 먼저 mingw32-make)

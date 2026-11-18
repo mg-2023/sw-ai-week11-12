@@ -130,13 +130,13 @@ static void absolute_position(int *line, int *col, int base_line, int base_col) 
     *line = *line > INT_MAX - (base_line - 1) ? INT_MAX : *line + (base_line - 1);
 }
 
-int db_execute_sql(Db *db, const char *sql, Result *out) {
+int db_execute_sql(Db *db, const char *sql, uint64_t deadline_us, Result *out) {
     if (!out) return -1;
     *out = (Result){.failed_index = SIZE_MAX};
     uint64_t start = os_now_us();
     if (!db || !sql) { fail(&out->err, 1, 1, "missing database or SQL"); goto bad; }
     const char *begin = sql; int line = 1, col = 1;
-    size_t capacity = 0;
+    size_t capacity = 0, remaining = executor_result_limit();
     while (*begin) {
         const char *end = statement_end(begin);
         size_t len = (size_t)(end - begin);
@@ -153,6 +153,10 @@ int db_execute_sql(Db *db, const char *sql, Result *out) {
         if (statements.n) {
             Statement *s = &statements.items[0];
             absolute_position(&s->line, &s->col, line, col);
+            if (deadline_us && os_now_us() >= deadline_us) {
+                out->err = (DbError){.kind = DB_ERROR_DEADLINE};
+                statements_free(&statements); goto bad;
+            }
             if (out->n == capacity) {
                 size_t max = SIZE_MAX / sizeof *out->items;
                 size_t next = capacity ? capacity * 2 : 4;
@@ -172,7 +176,8 @@ int db_execute_sql(Db *db, const char *sql, Result *out) {
                 rc = fail(&out->err, s->line, s->col, "unknown table");
                 out->err.kind = DB_ERROR_SQL; out->err.line = s->line; out->err.col = s->col;
             }
-            else rc = executor_execute(db->tables[schema - db->catalog.tables], schema, s, &out->items[out->n], &out->err);
+            else rc = executor_execute(db->tables[schema - db->catalog.tables], schema, s,
+                                       &out->items[out->n], &out->err, deadline_us, &remaining);
             statements_free(&statements);
             if (rc) goto bad;
             out->n++; out->committed = out->n;
@@ -187,6 +192,10 @@ int db_execute_sql(Db *db, const char *sql, Result *out) {
     out->elapsed_us = os_now_us() - start;
     return 0;
 bad:
+    if (out->err.kind == DB_ERROR_DEADLINE) {
+        snprintf(out->err.message, sizeof out->err.message,
+                 "deadline exceeded after %zu statements; earlier statements are committed", out->committed);
+    }
     out->failed_index = out->n;
     out->elapsed_us = os_now_us() - start;
     return -1;

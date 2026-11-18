@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
     if (!db) { fprintf(stderr, "%s\n", err.message); return 1; }
     printf("startup: %.3f ms\n", (double)startup / 1000.0);
     Result r = {0};
-    int rc = db_execute_sql(db, "SELECT * FROM users WHERE name = 'user_199999'", &r);
+    int rc = db_execute_sql(db, "SELECT * FROM users WHERE name = 'user_199999'", 0, &r);
     result_print_text(&r, stdout);
     if (!rc && (r.items[0].nrows != 1 || r.items[0].rows_examined != 200000 ||
                 r.items[0].rows[0].i != 200000)) rc = 1;

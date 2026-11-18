@@ -191,5 +191,6 @@ int result_to_json(const Result *result, int worker_id, char **out, size_t *len)
 
 int result_http_status(const Result *result) {
     if (!result || result->ok) return 200;
+    if (result->err.kind == DB_ERROR_DEADLINE) return 503;
     return result->err.kind == DB_ERROR_INTERNAL ? 500 : 400;
 }

@@ -47,6 +47,10 @@ SOCKET_T os_sock_connect_local(uint16_t port);
 int64_t os_sock_recv(SOCKET_T s, void *buf, size_t n, uint64_t deadline_us);
 int64_t os_sock_send(SOCKET_T s, const void *buf, size_t n, uint64_t deadline_us);
 void os_sock_close(SOCKET_T s);
+/* Rejector: half-close and make nonblocking; poll all draining sockets together.
+ * done[i] is set on EOF/error; no call waits for a peer. */
+int os_sock_begin_drain(SOCKET_T s);
+int os_sock_drain_ready(const SOCKET_T *sockets, size_t n, unsigned char *done);
 /* Close after an error reply: send FIN, then read and discard what the peer still sends
  * (until it closes, deadline_us, or 4 MiB), so unread request bytes do not turn the close
  * into a reset that erases our reply at the client. */

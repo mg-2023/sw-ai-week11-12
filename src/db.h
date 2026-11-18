@@ -28,6 +28,7 @@ void db_insert_lock_wait(const Db *db, uint64_t *p99_us, uint64_t *max_us, uint6
  * statement cannot be parsed. Errors carry original SQL line/byte-column.
  * Concurrent calls may share Db, but must use separate Result objects.
  */
-int db_execute_sql(Db *db, const char *sql, Result *out);
+/* deadline_us: absolute os_now_us time, 0 means no deadline (CLI/bench). */
+int db_execute_sql(Db *db, const char *sql, uint64_t deadline_us, Result *out);
 
 #endif

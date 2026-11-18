@@ -123,7 +123,7 @@ static int bench_insert(Db *db, uint64_t rows, DbError *err) {
         }
         sql[used++] = ';'; sql[used] = '\0';
         Result result = {0};
-        int rc = db_execute_sql(db, sql, &result);
+        int rc = db_execute_sql(db, sql, 0, &result);
         if (rc) *err = result.err;
         else if (result.n != 1 || result.items[0].ninserted != count ||
                  result.items[0].inserted_ids[0] != (int64_t)(first + 1) ||
@@ -151,7 +151,7 @@ static int bench_queries(Db *db, uint64_t rows, size_t queries, uint64_t seed,
             if (plan == 0) snprintf(sql, sizeof sql, "SELECT * FROM users WHERE id = %" PRIu64 ";", id);
             else snprintf(sql, sizeof sql, "SELECT * FROM users WHERE name = '%s';", name);
             Result result = {0};
-            int rc = db_execute_sql(db, sql, &result);
+            int rc = db_execute_sql(db, sql, 0, &result);
             if (rc) *err = result.err;
             else {
                 StmtResult *s = result.n == 1 ? &result.items[0] : NULL;
@@ -352,7 +352,7 @@ int cli_main(int argc, char **argv) {
         return 1;
     }
     Result result = {0};
-    int rc = db_execute_sql(db, sql, &result);
+    int rc = db_execute_sql(db, sql, 0, &result);
     if (!options.sync_always) {
         fprintf(stderr, "warning: --sync none: rows written since the last synchronization may be lost on OS failure; rows written this run: %" PRIu64 "\n", db_rows_written(db));
     }

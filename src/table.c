@@ -2,6 +2,7 @@
 #include "os.h"
 
 #include <inttypes.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -15,7 +16,7 @@
 /* Meta record: normal header, id 0, then [u8 kind][i64 value] (17 payload bytes). */
 #define META_PAYLOAD 17u
 #define META_SIZE (HEADER_SIZE + META_PAYLOAD)
-enum { META_COMMIT = 1, META_ID_FLOOR = 2 };
+enum { META_COMMIT = 1, META_ID_FLOOR = 2, META_FORMAT = 3 };
 typedef struct { int kind; int64_t value; } Meta;
 
 /* Recent INSERT lock-wait times (us), guarded by their own mutex so /stats never touches the table lock. */
@@ -30,6 +31,7 @@ struct Table {
     pthread_rwlock_t lock;
     WaitStats wait;
     OsFile *file;
+    char *floor_path;
     TableSchema schema;
     /* Confirmed end: bytes before it belong to committed rows. Scans and point
      * reads stop here, so unconfirmed bytes left by a failed rollback stay invisible. */
@@ -211,7 +213,8 @@ static int contains_complete_record(const unsigned char *tail, size_t n) {
 /* A CRC-valid record whose id is 0 must be a well-formed meta record. */
 static int decode_meta(const unsigned char *p, size_t n, Meta *meta, uint64_t off, DbError *err) {
     int64_t value = n == META_PAYLOAD ? get_i64(p + 9) : -1;
-    if (n != META_PAYLOAD || value <= 0 || (p[8] != META_COMMIT && p[8] != META_ID_FLOOR)) {
+    if (n != META_PAYLOAD || value <= 0 ||
+        (p[8] != META_COMMIT && p[8] != META_ID_FLOOR && p[8] != META_FORMAT)) {
         fail(err, off, "invalid meta record"); return RECORD_CORRUPT;
     }
     *meta = (Meta){.kind = p[8], .value = value};
@@ -396,6 +399,48 @@ static int append_meta(Table *t, int kind, int64_t value) {
     return os_append(t->file, record, sizeof record, NULL);
 }
 
+/* Canonical decimal value, CRC32 of those decimal ASCII bytes (no prefix/newline). */
+static int floor_line(char out[96], int64_t value) {
+    char decimal[32];
+    int n = snprintf(decimal, sizeof decimal, "%" PRId64, value);
+    return snprintf(out, 96, "idfloor %s %08" PRIx32 "\n", decimal,
+                    crc32((const unsigned char *)decimal, (size_t)n));
+}
+
+static int read_floor(Table *t, int64_t *value, int *present, DbError *err) {
+    errno = 0;
+    FILE *f = fopen(t->floor_path, "rb");
+    if (!f) return errno == ENOENT ? 0 : fail(err, 0, "cannot read id floor sidecar");
+    char line[96], expected[96];
+    size_t n = fread(line, 1, sizeof line - 1, f);
+    int bad = ferror(f) || fgetc(f) != EOF;
+    if (fclose(f)) bad = 1;
+    line[n] = '\0';
+    if (n < 10 || memcmp(line, "idfloor ", 8)) bad = 1;
+    uint64_t v = 0; size_t i = 8;
+    while (i < n && line[i] >= '0' && line[i] <= '9') {
+        unsigned digit = (unsigned)(line[i++] - '0');
+        if (v > ((uint64_t)INT64_MAX - digit) / 10) { bad = 1; break; }
+        v = v * 10 + digit;
+    }
+    int want = floor_line(expected, (int64_t)v);
+    if (bad || n != (size_t)want || memcmp(line, expected, n)) return fail(err, 0, "invalid id floor sidecar");
+    *value = (int64_t)v; *present = 1;
+    return 0;
+}
+
+static int write_floor(Table *t, int64_t value, DbError *err) {
+    char line[96]; int n = floor_line(line, value);
+    OsFile *f = os_open(t->floor_path, 1);
+    int bad = !f;
+    if (f) {
+        /* A previous valid sidecar is never overwritten with a smaller floor. */
+        bad = (os_size(f) != 0 && os_truncate(f, 0)) || os_append(f, line, (size_t)n, NULL) || os_sync(f);
+        os_close(f);
+    }
+    return bad ? fail(err, 0, "cannot persist id floor sidecar before repair") : 0;
+}
+
 Table *table_open(const char *dir, const TableSchema *schema, int repair, DbError *err) {
     return table_open_with_visitor(dir, schema, repair, NULL, NULL, err);
 }
@@ -438,15 +483,42 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
         free(path); free(t); fail(err, 0, "cannot initialize table lock"); return NULL;
     }
     snprintf(path, path_len, "%s/%s.tbl", dir, schema->name);
+    t->floor_path = malloc(path_len + sizeof ".idfloor");
+    if (!t->floor_path) { free(path); fail(err, 0, "out of memory"); goto bad; }
+    snprintf(t->floor_path, path_len + sizeof ".idfloor", "%s.idfloor", path);
     t->file = os_open(path, 1); free(path);
     if (!t->file) { fail(err, 0, "cannot open table file"); goto bad; }
     t->schema = *schema; t->next_id = 1; t->sync_always = 1;
     uint64_t size = os_size(t->file), off = 0;
     /* last_id: highest id read (pending included, for ordering); settled_id: highest id that is
      * committed or reserved by an ID_FLOOR. next_id starts one above settled_id. */
-    int64_t last_id = 0, settled_id = 0;
+    int64_t last_id = 0, settled_id = 0, persisted_floor = 0;
     CutInfo cut = {0};
     if (size == UINT64_MAX) { fail(err, 0, "cannot get table size"); goto bad; }
+    unsigned char format[META_SIZE], first[META_SIZE];
+    encode_meta(format, META_FORMAT, 3);
+    size_t prefix = size < META_SIZE ? (size_t)size : META_SIZE;
+    if (prefix && os_read_at(t->file, first, prefix, 0) != (int64_t)prefix) {
+        fail(err, 0, "cannot read table format"); goto bad;
+    }
+    if (prefix && memcmp(first, format, prefix)) {
+        if (err) {
+            *err = (DbError){.kind = DB_ERROR_INTERNAL};
+            snprintf(err->message, sizeof err->message,
+                     "table file %s has an older or unknown format; it was not modified", schema->name);
+        }
+        goto bad;
+    }
+    int64_t recovery_floor = 0; int has_floor = 0;
+    if (read_floor(t, &recovery_floor, &has_floor, err)) goto bad;
+    if (size < META_SIZE) {
+        if ((size && (os_truncate(t->file, 0) || os_sync(t->file))) ||
+            append_meta(t, META_FORMAT, 3) || os_sync(t->file)) {
+            fail(err, 0, "cannot initialize table format"); goto bad;
+        }
+        size = META_SIZE;
+    }
+    off = META_SIZE;
     if (size) {
         reader = calloc(1, sizeof *reader);
         if (!reader) { fail(err, 0, "out of memory"); goto bad; }
@@ -465,6 +537,8 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
                 fail(err, off, "commit record does not match the rows before it"); rc = RECORD_CORRUPT;
             } else if (rc == RECORD_META && meta.kind == META_ID_FLOOR && pending.n) {
                 fail(err, off, "id floor record inside an unfinished statement"); rc = RECORD_CORRUPT;
+            } else if (rc == RECORD_META && meta.kind == META_FORMAT) {
+                fail(err, off, "unexpected format record"); rc = RECORD_CORRUPT;
             }
         }
         if (rc == RECORD_OK) {
@@ -481,6 +555,7 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
                 }
                 t->row_count += pending.n; settled_id = last_id; pending.n = 0;
             } else {
+                if (meta.value > persisted_floor) persisted_floor = meta.value;
                 if (meta.value > settled_id) settled_id = meta.value;
                 if (meta.value > last_id) last_id = meta.value;
             }
@@ -492,6 +567,13 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
          * never reuses the ids of the bytes it cuts. */
         uint64_t cut_at = pending.n ? pending.start : off;
         if (rc == RECORD_CORRUPT && back_up_before_repair(t, dir, cut_at, off, size, settled_id, last_id, &cut, err)) goto bad;
+        if (rc == RECORD_CORRUPT) {
+            int64_t floor = cut.id_floor > settled_id ? cut.id_floor : settled_id;
+            if (!has_floor || floor > recovery_floor) {
+                if (write_floor(t, floor, err)) goto bad;
+                recovery_floor = floor; has_floor = 1;
+            }
+        }
         if (os_truncate(t->file, cut_at) || os_sync(t->file)) {
             fail(err, cut_at, "cannot truncate/sync recovered table"); goto bad;
         }
@@ -502,14 +584,25 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
             fprintf(stderr, "%" PRIu64 " bytes of incomplete tail truncated at offset %" PRIu64 "\n", size - off, off);
         }
         off = cut_at;
-        if (rc == RECORD_CORRUPT && cut.id_floor > settled_id) {
+        if (rc == RECORD_CORRUPT && recovery_floor > persisted_floor) {
             /* Leave the cut ids burned in the file itself, so a later session cannot reuse them. */
-            if (append_meta(t, META_ID_FLOOR, cut.id_floor) || os_sync(t->file)) {
+            if (append_meta(t, META_ID_FLOOR, recovery_floor) || os_sync(t->file)) {
                 fail(err, cut_at, "cannot write id floor after repair"); goto bad;
             }
-            settled_id = cut.id_floor; off += META_SIZE;
+            if (recovery_floor > settled_id) settled_id = recovery_floor;
+            persisted_floor = recovery_floor; off += META_SIZE;
         }
         break;
+    }
+    if (has_floor) {
+        if (recovery_floor > persisted_floor) {
+            if (append_meta(t, META_ID_FLOOR, recovery_floor) || os_sync(t->file)) {
+                fail(err, off, "cannot recover id floor sidecar"); goto bad;
+            }
+            if (recovery_floor > settled_id) settled_id = recovery_floor;
+            off += META_SIZE;
+        } else if (os_sync(t->file)) { fail(err, off, "cannot sync recovered id floor"); goto bad; }
+        if (remove(t->floor_path)) { fail(err, off, "cannot remove id floor sidecar"); goto bad; }
     }
     free(reader); free(pending.rows);
     t->end = off;
@@ -692,7 +785,8 @@ int table_read_at(Table *t, uint64_t off, Row *out, DbError *err) {
  * released and taken again about every SCAN_YIELD_BYTES, so a waiting writer gets in between
  * blocks. Bytes before the snapshot end never change (appends go after it), so the rows seen
  * are one consistent committed prefix. */
-static int scan_prefix(Table *t, RowVisitor visitor, void *ctx, DbError *err, int yield, int *lock_lost) {
+static int scan_prefix(Table *t, RowVisitor visitor, void *ctx, DbError *err, int yield, int *lock_lost,
+                       uint64_t deadline_us) {
     clear_error(err);
     if (lock_lost) *lock_lost = 0;
     if (!t || !visitor) return fail(err, 0, "missing table or visitor");
@@ -703,6 +797,11 @@ static int scan_prefix(Table *t, RowVisitor visitor, void *ctx, DbError *err, in
     reader->table = t; reader->size = size;
     int rc = 0;
     while (off < size) {
+        if (deadline_us && (off == 0 || off - last_yield >= SCAN_YIELD_BYTES) && os_now_us() >= deadline_us) {
+            fail(err, off, "deadline exceeded");
+            if (err) err->kind = DB_ERROR_DEADLINE;
+            rc = -1; break;
+        }
         if (yield && off - last_yield >= SCAN_YIELD_BYTES) {
             pthread_rwlock_unlock(&t->lock);
             if (pthread_rwlock_rdlock(&t->lock)) {
@@ -724,17 +823,22 @@ static int scan_prefix(Table *t, RowVisitor visitor, void *ctx, DbError *err, in
 }
 
 int table_scan(Table *t, RowVisitor visitor, void *ctx, DbError *err) {
-    return scan_prefix(t, visitor, ctx, err, 0, NULL);
+    return scan_prefix(t, visitor, ctx, err, 0, NULL, 0);
 }
 
 int table_scan_yielding(Table *t, RowVisitor visitor, void *ctx, DbError *err, int *lock_lost) {
-    return scan_prefix(t, visitor, ctx, err, 1, lock_lost);
+    return scan_prefix(t, visitor, ctx, err, 1, lock_lost, 0);
+}
+
+int table_scan_deadline(Table *t, RowVisitor visitor, void *ctx, DbError *err, int *lock_lost, uint64_t deadline_us) {
+    return scan_prefix(t, visitor, ctx, err, 1, lock_lost, deadline_us);
 }
 
 void table_close(Table *t) {
     if (!t) return;
     bpt_free(t->index);
     os_close(t->file);
+    free(t->floor_path);
     pthread_rwlock_destroy(&t->lock);
     pthread_mutex_destroy(&t->wait.mutex);
     free(t);

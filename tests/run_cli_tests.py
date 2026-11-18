@@ -164,7 +164,7 @@ def test_recovery_and_repair():
         table = data / "users.tbl"
         stored = table.read_bytes()
         starts = record_starts(stored)  # row 1, COMMIT, row 2, COMMIT, row 3, COMMIT
-        first_end, third_start = starts[2], starts[4]
+        first_end, third_start = starts[3], starts[5]  # FORMAT precedes the first row
         # A statement whose COMMIT is cut short is an unfinished statement: removed whole.
         table.write_bytes(stored[:-5])
         expect(invoke(work, ["run", "-"], b"SELECT id FROM users;"), 0,
@@ -209,7 +209,7 @@ def test_binary_stdin_crlf():
             path.write_bytes(sql)
             assert invoke(work, ["run", "-" if stdin else path], sql if stdin else None)[0] == 0
             raw = (data / "users.tbl").read_bytes()
-            assert int.from_bytes(raw[20:24], "little") == 4 and raw[24:28] == b"x\r\ny", raw
+            assert int.from_bytes(raw[49:53], "little") == 4 and raw[53:57] == b"x\r\ny", raw
             stored.append(raw)
     assert stored[0] == stored[1]
 
@@ -219,8 +219,8 @@ def test_length_corruption_refuses_and_repairs():
         insert_one_by_one(work, 3)
         table = data / "users.tbl"
         raw = table.read_bytes()
-        first_end = record_starts(raw)[2]  # start of row 2, after row 1 and its COMMIT
-        for off in (0, first_end):
+        first_end = record_starts(raw)[3]  # FORMAT, row 1 and its COMMIT precede row 2
+        for off in (29, first_end):
             damaged = bytearray(raw)
             damaged[off + 2] ^= 0x08
             table.write_bytes(damaged)
@@ -228,8 +228,8 @@ def test_length_corruption_refuses_and_repairs():
             assert rc == 1 and out.startswith("internal error:") and f"offset {off}" in out and not err, (rc, out, err)
             assert table.read_bytes() == damaged
             rc, out, err = invoke(work, ["run", "-", "--repair"], b"SELECT id FROM users;")
-            assert rc == 0 and f"({int(off != 0)} row" in out, (rc, out, err)
-            assert check_repair(work, err, damaged, off)[0] == 2 - int(off != 0), err
+            assert rc == 0 and f"({int(off != 29)} row" in out, (rc, out, err)
+            assert check_repair(work, err, damaged, off)[0] == 2 - int(off != 29), err
             assert table.read_bytes() == raw[:off] + meta(2, 3)  # the cut ids stay burned
 
 
@@ -238,8 +238,8 @@ def test_incomplete_tails():
         assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('a',1);")[0] == 0
         table = data / "users.tbl"
         raw = table.read_bytes()
-        row_end = record_starts(raw)[1]  # the row, then its COMMIT
-        for tail in [raw[:n] for n in range(1, 12)] + [bytes(40), raw[:row_end - 1], bytes(1024 * 1024 + 7)]:
+        row_end = record_starts(raw)[2]  # FORMAT, the row, then its COMMIT
+        for tail in [raw[29:29+n] for n in range(1, 12)] + [bytes(40), raw[29:row_end - 1], bytes(1024 * 1024 + 7)]:
             table.write_bytes(raw + tail)
             rc, out, err = invoke(work, ["run", "-"], b"SELECT id FROM users;")
             assert rc == 0 and "(1 row," in out, (rc, out, err)
@@ -267,13 +267,13 @@ def test_invalid_length_guards():
         raw = table.read_bytes()
         for length in (0, 1024 * 1024 - 11, 0xffffffff):
             encoded = length.to_bytes(4, "little")
-            damaged = encoded + (zlib.crc32(encoded) ^ 0x4D444231).to_bytes(4, "little") + raw[8:]
+            damaged = raw[:29] + encoded + (zlib.crc32(encoded) ^ 0x4D444231).to_bytes(4, "little") + raw[37:]
             table.write_bytes(damaged)
             rc, out, err = invoke(work, ["run", "-"], b"")
             assert rc == 1 and "invalid record length" in out and not err, (rc, out, err)
             assert table.read_bytes() == damaged
         damaged = bytearray(raw)
-        damaged[4] ^= 1
+        damaged[33] ^= 1
         table.write_bytes(damaged)
         assert invoke(work, ["run", "-"], b"")[0] == 1
         assert table.read_bytes() == damaged
@@ -294,6 +294,7 @@ def test_length_checksum_wire_format():
         for size in (0, 1, 255, 65536):
             assert invoke(work, ["run", "-"], b"INSERT INTO users VALUES ('" + b"x" * size + b"',1);")[0] == 0
         raw = (data / "users.tbl").read_bytes()
+        assert raw[:29] == meta(3, 3), "new tables begin with FORMAT(3)"
         off = 0
         while off < len(raw):
             length = int.from_bytes(raw[off:off + 4], "little")
@@ -309,8 +310,8 @@ def test_paired_length_corruption_refuses():
         insert_one_by_one(work, 3)
         table = data / "users.tbl"
         raw = table.read_bytes()
-        first_end = record_starts(raw)[2]  # start of row 2, after row 1 and its COMMIT
-        for off in (0, first_end):
+        first_end = record_starts(raw)[3]  # FORMAT, row 1 and its COMMIT precede row 2
+        for off in (29, first_end):
             for bit in [8] + [n for n in range(32) if n != 8]:
                 damaged = bytearray(raw)
                 damaged[off + bit // 8] ^= 1 << (bit % 8)
@@ -347,7 +348,7 @@ def test_complete_record_inside_incomplete_tail():
         assert kept[:len(prefix)] == prefix and len(kept) in (len(prefix), len(prefix) + 29), len(kept)
         table.write_bytes(prefix)
         # A partial candidate, bad header check, or bad payload CRC is insufficient.
-        first_row = prefix[:12 + int.from_bytes(prefix[:4], "little")]
+        first_row = prefix[29:29 + 12 + int.from_bytes(prefix[29:33], "little")]
         bad_check, bad_crc = bytearray(first_row), bytearray(first_row)
         bad_check[4] ^= 1
         bad_crc[-1] ^= 1

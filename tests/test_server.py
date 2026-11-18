@@ -381,6 +381,71 @@ def test_graceful_shutdown():
         shutil.rmtree(data, ignore_errors=True)
 
 
+def test_rejections_arrive_together_and_shutdown_does_not_drain():
+    with server("--threads", "1", "--queue", "1") as s:
+        clients = []
+        try:
+            clients.append(stalled_connection(s.port)); time.sleep(0.1)
+            clients.append(stalled_connection(s.port)); time.sleep(0.1)
+            started = time.monotonic()
+            for _ in range(40):
+                c = socket.create_connection(("127.0.0.1", s.port), timeout=2)
+                c.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+                clients.append(c)
+            for c in clients[2:]:
+                c.settimeout(max(0.001, 1 - (time.monotonic() - started)))
+                assert c.recv(4096).startswith(b"HTTP/1.1 503")
+            assert time.monotonic() - started < 1
+            started = time.monotonic()
+            s.proc.send_signal(signal.CTRL_BREAK_EVENT if IS_WINDOWS else signal.SIGINT)
+            assert s.proc.wait(timeout=2) == 0
+            assert time.monotonic() - started < 2
+        finally:
+            for c in clients: c.close()
+
+
+def test_execution_deadline_and_committed_insert():
+    with server("--sync", "none") as s:
+        fill_users(s.port, 50000)
+        data = s.data
+        assert s.stop() == 0
+        with server("--sync", "none", "--total-timeout-ms", "30", data=data) as short:
+            scan = "SELECT id FROM users WHERE name='absent';"
+            status, body = query(short.port, scan * 100)
+            assert status == 503 and not body["ok"], (status, body)
+            n = body["committed"]
+            assert 0 <= n < 100
+            assert body["error"]["message"] == f"deadline exceeded after {n} statements; earlier statements are committed"
+            status, body = query(short.port, "INSERT INTO users VALUES ('durable',1);" + scan * 100)
+            assert status == 503 and body["committed"] >= 1, (status, body)
+        with server(data=data) as again:
+            rows = ok_query(again.port, "SELECT * FROM users WHERE id=50001;")["results"][0]["rows"]
+            assert rows == [[50001, "durable", 1]], rows
+
+
+def test_request_aggregate_result_limit():
+    with server("--sync", "none") as s:
+        text = "x" * 60000
+        for _ in range(100): ok_query(s.port, f"INSERT INTO users VALUES ('{text}',1);")
+        status, body = query(s.port, "SELECT * FROM users;" * 4)
+        assert status == 400 and body["committed"] == 2, (status, body.get("committed"))
+        assert "16 MiB" in body["error"]["message"]
+        assert len(ok_query(s.port, "SELECT id FROM users;")["results"][0]["rows"]) == 100
+
+
+def test_total_deadline_includes_receive_and_queue():
+    with server("--threads", "1", "--queue", "4", "--total-timeout-ms", "50") as s:
+        busy = stalled_connection(s.port)
+        try:
+            time.sleep(0.01)
+            status, body = query(s.port, "INSERT INTO users VALUES ('late',1);")
+            assert status == 503 and body["committed"] == 0, (status, body)
+            assert body["error"]["message"] == "deadline exceeded after 0 statements; earlier statements are committed"
+        finally:
+            busy.close()
+        assert ok_query(s.port, "SELECT id FROM users;")["results"][0]["rows"] == []
+
+
 def main():
     if not EXE.exists():
         print(f"missing {EXE}; run mingw32-make all first")

@@ -79,12 +79,20 @@ void executor_test_set_result_limit(size_t bytes) { result_limit = bytes; }
 #define RESULT_LIMIT EXECUTOR_MAX_RESULT_BYTES
 #endif
 
+size_t executor_result_limit(void) { return RESULT_LIMIT; }
+
+static int charge(const Statement *s, DbError *err, size_t *remaining, size_t bytes) {
+    if (bytes > *remaining) return fail(s, err, "result exceeds the 16 MiB limit; add a WHERE condition or a smaller LIMIT");
+    *remaining -= bytes;
+    return 0;
+}
+
 typedef struct {
     const Statement *statement;
     StmtResult *out;
     int columns[32], where_col, failed;
     size_t capacity;
-    size_t bytes; /* memory the result holds so far, for RESULT_LIMIT */
+    size_t *remaining; /* shared by every statement in this request */
     DbError *err;
 } Scan;
 
@@ -113,12 +121,10 @@ static int visit_row(const Row *row, uint64_t off, void *ctx) {
         const Value *v = &row->fields[scan->columns[i]];
         if (v->type == TYPE_TEXT) row_bytes += (size_t)v->len + 1;
     }
-    if (row_bytes > RESULT_LIMIT - scan->bytes) {
+    if (charge(s, scan->err, scan->remaining, row_bytes)) {
         scan->failed = 1;
-        fail(s, scan->err, "result exceeds the 16 MiB limit; add a WHERE condition or a smaller LIMIT");
         return 1;
     }
-    scan->bytes += row_bytes;
     if (out->nrows == scan->capacity) {
         size_t max = SIZE_MAX / (size_t)out->ncols / sizeof *out->rows;
         size_t next = scan->capacity ? scan->capacity * 2 : 16;
@@ -141,10 +147,11 @@ memory_error:
 }
 
 static int select_rows(Table *table, const TableSchema *schema, const Statement *s, StmtResult *out, DbError *err,
-                       int *lost_lock) {
-    Scan scan = {.statement = s, .out = out, .err = err};
+                       int *lost_lock, uint64_t deadline_us, size_t *remaining) {
+    Scan scan = {.statement = s, .out = out, .err = err, .remaining = remaining};
     out->is_select = 1; out->plan = PLAN_SCAN;
     out->ncols = s->star ? schema->ncols : s->ncols;
+    if (charge(s, err, remaining, (size_t)out->ncols * sizeof *out->columns)) return -1;
     out->columns = calloc((size_t)out->ncols, sizeof *out->columns);
     if (!out->columns) return internal(s, err, "out of memory");
     for (int i = 0; i < out->ncols; i++) {
@@ -152,6 +159,7 @@ static int select_rows(Table *table, const TableSchema *schema, const Statement 
         if (col < 0) return fail(s, err, "unknown SELECT column");
         scan.columns[i] = col;
         const char *name = schema->cols[col].name;
+        if (charge(s, err, remaining, strlen(name) + 1)) return -1;
         out->columns[i] = malloc(strlen(name) + 1);
         if (!out->columns[i]) return internal(s, err, "out of memory");
         strcpy(out->columns[i], name);
@@ -178,7 +186,7 @@ static int select_rows(Table *table, const TableSchema *schema, const Statement 
     }
     /* A full scan can be long: it gives the read lock back between blocks so INSERT is not starved. */
     int lock_lost = 0;
-    if (table_scan_yielding(table, visit_row, &scan, err, &lock_lost) || scan.failed) {
+    if (table_scan_deadline(table, visit_row, &scan, err, &lock_lost, deadline_us) || scan.failed) {
         if (lock_lost) *lost_lock = 1;
         if (err && err->kind == DB_ERROR_SQL && !err->line) { err->line = s->line; err->col = s->col; }
         return -1;
@@ -186,14 +194,21 @@ static int select_rows(Table *table, const TableSchema *schema, const Statement 
     return 0;
 }
 
-int executor_execute(Table *table, const TableSchema *schema, const Statement *s, StmtResult *out, DbError *err) {
+int executor_execute(Table *table, const TableSchema *schema, const Statement *s, StmtResult *out, DbError *err,
+                      uint64_t deadline_us, size_t *remaining) {
     uint64_t start = os_now_us(); int map[32] = {0}, lost_lock = 0;
     *out = (StmtResult){0};
     if (err) *err = (DbError){0};
     if (s->kind == STMT_INSERT && insert_mapping(schema, s, map, err)) return -1;
+    if (charge(s, err, remaining, sizeof *out)) return -1;
+    if (s->kind == STMT_INSERT && charge(s, err, remaining, (size_t)s->nrows * sizeof *out->inserted_ids)) return -1;
     int rc = s->kind == STMT_INSERT ? table_write_lock(table) : table_read_lock(table);
     if (rc) return internal(s, err, "cannot acquire table lock");
-    rc = s->kind == STMT_INSERT ? insert_rows(table, s, map, out, err) : select_rows(table, schema, s, out, err, &lost_lock);
+    if (deadline_us && os_now_us() >= deadline_us) {
+        if (err) *err = (DbError){.kind = DB_ERROR_DEADLINE};
+        rc = -1;
+    } else rc = s->kind == STMT_INSERT ? insert_rows(table, s, map, out, err) :
+        select_rows(table, schema, s, out, err, &lost_lock, deadline_us, remaining);
     if (!lost_lock && table_unlock(table) && !rc) rc = internal(s, err, "cannot release table lock");
     out->elapsed_us = os_now_us() - start;
     if (rc) stmt_result_free(out);

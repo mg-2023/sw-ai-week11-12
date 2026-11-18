@@ -16,12 +16,13 @@ typedef int (*TableOpenVisitor)(int64_t id, uint64_t off, void *ctx);
  * TEXT is LE u32 byte length plus bytes (at most 64 KiB), INT is LE i64.
  * CRC covers the payload, including id. No string terminator is stored.
  * Meta records share the header; their id is 0 and the body is [u8 kind][i64 value]:
- * kind 1 COMMIT (rows written by the statement before it), kind 2 ID_FLOOR (ids up to
+ * kind 3 FORMAT (value 3, first record), kind 1 COMMIT (rows written by the statement before it), kind 2 ID_FLOOR (ids up to
  * the value are never reused). Every INSERT statement is rows + COMMIT; rows count only
  * once their COMMIT is intact. Meta records are never returned as rows.
  * Open truncates incomplete tails, including a final statement without its COMMIT
  * (the whole statement is removed); other corruption needs repair != 0. Repair writes an
- * ID_FLOOR record so the ids it cut off are not handed out again.
+ * durable .idfloor sidecar before truncation, then an ID_FLOOR record and removes
+ * the sidecar. A remaining sidecar is validated and replayed before opening.
  * Errors include the file offset; line/col are zero (not SQL positions).
  * All successful operations clear err. No internal locking: the caller
  * must serialize writes and exclude them during reads/scans/close.
@@ -62,6 +63,7 @@ int table_scan(Table *table, RowVisitor visitor, void *ctx, DbError *err);
  * must not unlock. *lock_lost is 0 otherwise. */
 #define SCAN_YIELD_BYTES (1024u * 1024u)
 int table_scan_yielding(Table *table, RowVisitor visitor, void *ctx, DbError *err, int *lock_lost);
+int table_scan_deadline(Table *table, RowVisitor visitor, void *ctx, DbError *err, int *lock_lost, uint64_t deadline_us);
 void row_free(Row *row);
 void table_close(Table *table);
 

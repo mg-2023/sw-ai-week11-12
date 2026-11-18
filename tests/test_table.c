@@ -171,9 +171,9 @@ static void test_text_too_long_error(void) {
     char *text = malloc(65537); ASSERT(text); memset(text, 'x', 65537);
     Table *t = fresh(&err); ASSERT(t);
     ASSERT(append_row(t, text, 65537, 1, &id, NULL, &err) == -1 && err.message[0] && id == -1);
-    ASSERT(file_size(&size) == 0 && size == 0);
+    ASSERT(file_size(&size) == 0 && size == 29);
     ASSERT(append_row(t, text, 65536, INT64_MAX, &id, NULL, &err) == 0 && id == 1);
-    Row row = {0}; ASSERT(table_read_at(t, 0, &row, &err) == 0);
+    Row row = {0}; ASSERT(table_read_at(t, 29, &row, &err) == 0);
     ASSERT(row.fields[1].len == 65536 && memcmp(row.fields[1].s, text, 65536) == 0 && row.fields[2].i == INT64_MAX);
     row_free(&row); free(text); table_close(t);
 }
@@ -182,7 +182,7 @@ static void test_empty_table_and_visitor_stop(void) {
     DbError err = {0}; Table *t = fresh(&err); Scan s = {.ok = 1};
     ASSERT(t && table_scan(t, visit, &s, &err) == 0 && s.count == 0);
     ASSERT(append_row(t, NULL, 0, 20, NULL, NULL, &err) == 0);
-    Row row = {0}; ASSERT(table_read_at(t, 0, &row, &err) == 0 && row.fields[1].len == 0);
+    Row row = {0}; ASSERT(table_read_at(t, 29, &row, &err) == 0 && row.fields[1].len == 0);
     row_free(&row); table_close(t);
     uint64_t offsets[3]; ASSERT(populate(offsets, &err) == 0);
     t = table_open(test_dir, &schema, 0, &err); s = (Scan){.ok = 1, .stop = 7};
@@ -206,7 +206,7 @@ static void test_sync_failure_rolls_back(void) {
     DbError err = {0}; uint64_t size; int64_t id = -1;
     Table *t = fresh(&err); ASSERT(t); os_test_fail_sync();
     ASSERT(append_row(t, "bad", 3, 0, &id, NULL, &err) == -1 && err.message[0] && id == -1);
-    ASSERT(file_size(&size) == 0 && size == 0);
+    ASSERT(file_size(&size) == 0 && size == 29);
     table_close(t); t = table_open(test_dir, &schema, 0, &err);
     ASSERT(t && append_row(t, "a", 1, 20, &id, NULL, &err) == 0 && id == 1);
     table_close(t);
@@ -217,6 +217,7 @@ static const unsigned char fixture[] = {
     21,0,0,0, 0x80,0x3a,0xc7,0x0b, 0x9c,0x0a,0x9c,0xc0,
     1,0,0,0,0,0,0,0, 1,0,0,0,'a', 0xfe,0xff,0xff,0xff,0xff,0xff,0xff,0xff
 };
+static const unsigned char format_v3[29] = {17,0,0,0,215,173,165,132,155,202,237,126,0,0,0,0,0,0,0,0,3,3,0,0,0,0,0,0,0};
 static int write_bytes(const unsigned char *bytes, size_t len) {
     FILE *f = fopen(path, "wb"); if (!f) return -1;
     int ok = fwrite(bytes, 1, len, f) == len;
@@ -231,34 +232,40 @@ static const unsigned char commit_one[29] = {
 };
 /* A one-row file: the given row bytes followed by their COMMIT. */
 static int write_row_and_commit(const unsigned char *row, size_t len) {
-    unsigned char bytes[sizeof fixture + sizeof commit_one];
-    memcpy(bytes, row, len); memcpy(bytes + len, commit_one, sizeof commit_one);
-    return write_bytes(bytes, len + sizeof commit_one);
+    unsigned char bytes[29 + sizeof fixture + sizeof commit_one];
+    memcpy(bytes, format_v3, 29); memcpy(bytes + 29, row, len); memcpy(bytes + 29 + len, commit_one, sizeof commit_one);
+    return write_bytes(bytes, 29 + len + sizeof commit_one);
 }
 
 static void test_wire_format(void) {
-    DbError err = {0}; unsigned char bytes[sizeof fixture + sizeof commit_one];
+    DbError err = {0}; unsigned char bytes[29 + sizeof fixture + sizeof commit_one];
     Table *t = fresh(&err); ASSERT(t && append_row(t, "a", 1, -2, NULL, NULL, &err) == 0);
     table_close(t);
     FILE *f = fopen(path, "rb"); ASSERT(f);
     ASSERT(fread(bytes, 1, sizeof bytes, f) == sizeof bytes && fgetc(f) == EOF);
-    ASSERT(fclose(f) == 0 && memcmp(bytes, fixture, sizeof fixture) == 0);
-    ASSERT(memcmp(bytes + sizeof fixture, commit_one, sizeof commit_one) == 0);
+    ASSERT(fclose(f) == 0 && memcmp(bytes, format_v3, 29) == 0 && memcmp(bytes + 29, fixture, sizeof fixture) == 0);
+    ASSERT(memcmp(bytes + 29 + sizeof fixture, commit_one, sizeof commit_one) == 0);
     ASSERT(write_row_and_commit(fixture, sizeof fixture) == 0);
     t = table_open(test_dir, &schema, 0, &err); Row row = {0};
-    ASSERT(t && table_read_at(t, 0, &row, &err) == 0 && row.id == 1 && row.fields[2].i == -2);
+    ASSERT(t && table_read_at(t, 29, &row, &err) == 0 && row.id == 1 && row.fields[2].i == -2);
     row_free(&row); table_close(t);
+}
+
+static int write_framed_bytes(const unsigned char *row, size_t len) {
+    unsigned char bytes[29 + sizeof fixture];
+    memcpy(bytes, format_v3, 29); memcpy(bytes + 29, row, len);
+    return write_bytes(bytes, 29 + len);
 }
 
 static void test_invalid_length_refuses(void) {
     DbError err = {0}; uint64_t size;
     unsigned char bad[sizeof fixture]; memcpy(bad, fixture, sizeof bad); memset(bad, 0xff, 4);
-    ASSERT(write_bytes(bad, sizeof bad) == 0);
-    ASSERT(table_open(test_dir, &schema, 0, &err) == NULL && strstr(err.message, "offset 0"));
-    ASSERT(file_size(&size) == 0 && size == sizeof bad);
+    ASSERT(write_framed_bytes(bad, sizeof bad) == 0);
+    ASSERT(table_open(test_dir, &schema, 0, &err) == NULL && strstr(err.message, "offset 29"));
+    ASSERT(file_size(&size) == 0 && size == 29 + sizeof bad);
     Table *t = table_open(test_dir, &schema, 1, &err);
-    ASSERT(t && file_size(&size) == 0 && size == 0); table_close(t);
-    memset(bad, 0, 4); ASSERT(write_bytes(bad, sizeof bad) == 0);
+    ASSERT(t && file_size(&size) == 0 && size == 29); table_close(t);
+    memset(bad, 0, 4); ASSERT(write_framed_bytes(bad, sizeof bad) == 0);
     ASSERT(table_open(test_dir, &schema, 0, &err) == NULL);
 }
 
@@ -267,7 +274,7 @@ static void test_bad_inputs_and_read_offsets(void) {
     ASSERT(t); Value wrong[] = {{.type = TYPE_INT}, {.type = TYPE_INT}};
     ASSERT(table_append(t, wrong, NULL, NULL, &err) == -1 && err.message[0]);
     ASSERT(append_row(t, NULL, 1, 0, NULL, NULL, &err) == -1);
-    ASSERT(file_size(&size) == 0 && size == 0);
+    ASSERT(file_size(&size) == 0 && size == 29);
     ASSERT(append_row(t, "a", 1, 20, NULL, NULL, &err) == 0 && err.message[0] == '\0');
     ASSERT(table_read_at(t, UINT64_MAX, &row, &err) == -1 && row.fields == NULL);
     ASSERT(file_size(&size) == 0 && table_read_at(t, size, &row, &err) == -1);
@@ -281,11 +288,11 @@ static void test_crc_valid_malformed_fields(void) {
     const unsigned char crc[] = {0x52, 0x66, 0x56, 0x7d};
     memcpy(bad + 8, crc, sizeof crc); bad[20] = 2;
     DbError err = {0}; uint64_t size;
-    ASSERT(write_bytes(bad, sizeof bad) == 0);
+    ASSERT(write_framed_bytes(bad, sizeof bad) == 0);
     ASSERT(table_open(test_dir, &schema, 0, &err) == NULL && strstr(err.message, "fields"));
-    ASSERT(file_size(&size) == 0 && size == sizeof bad);
+    ASSERT(file_size(&size) == 0 && size == 29 + sizeof bad);
     Table *t = table_open(test_dir, &schema, 1, &err);
-    ASSERT(t && file_size(&size) == 0 && size == 29); /* only the ID_FLOOR record for the cut id 1 */
+    ASSERT(t && file_size(&size) == 0 && size == 58); /* FORMAT plus the ID_FLOOR record for the cut id 1 */
     table_close(t);
 }
 
@@ -297,10 +304,10 @@ static void test_id_exhaustion_after_reopen(void) {
     DbError err = {0}; uint64_t size; int64_t id = -1; Row row = {0};
     ASSERT(write_row_and_commit(max_id, sizeof max_id) == 0);
     Table *t = table_open(test_dir, &schema, 0, &err);
-    ASSERT(t && table_read_at(t, 0, &row, &err) == 0 && row.id == INT64_MAX);
+    ASSERT(t && table_read_at(t, 29, &row, &err) == 0 && row.id == INT64_MAX);
     row_free(&row);
     ASSERT(append_row(t, "a", 1, 20, &id, NULL, &err) == -1 && id == -1 && strstr(err.message, "id"));
-    ASSERT(file_size(&size) == 0 && size == sizeof max_id + sizeof commit_one); table_close(t);
+    ASSERT(file_size(&size) == 0 && size == 29 + sizeof max_id + sizeof commit_one); table_close(t);
 }
 
 static void test_record_size_limit(void) {
@@ -313,7 +320,7 @@ static void test_record_size_limit(void) {
     test_dir_clear(); DbError err = {0}; uint64_t size;
     Table *t = table_open(test_dir, &wide, 0, &err); ASSERT(t);
     ASSERT(table_append(t, fields, NULL, NULL, &err) == -1 && err.message[0]);
-    ASSERT(file_size(&size) == 0 && size == 0);
+    ASSERT(file_size(&size) == 0 && size == 29);
     table_close(t); free(text);
 }
 
@@ -329,12 +336,12 @@ static void test_record_exact_size_boundary(void) {
     test_dir_clear(); DbError err = {0}; uint64_t size; int64_t id = -1;
     Table *t = table_open(test_dir, &wide, 0, &err); ASSERT(t);
     ASSERT(table_append(t, fields, &id, NULL, &err) == 0 && id == 1);
-    ASSERT(file_size(&size) == 0 && size == 1024 * 1024 + 29); /* record + COMMIT */
+    ASSERT(file_size(&size) == 0 && size == 29 + 1024 * 1024 + 29); /* record + COMMIT */
     fields[15].len++;
     ASSERT(table_append(t, fields, &id, NULL, &err) == -1 && id == 1);
-    ASSERT(file_size(&size) == 0 && size == 1024 * 1024 + 29); /* record + COMMIT */
+    ASSERT(file_size(&size) == 0 && size == 29 + 1024 * 1024 + 29); /* record + COMMIT */
     table_close(t); t = table_open(test_dir, &wide, 0, &err); Row row = {0};
-    ASSERT(t && table_read_at(t, 0, &row, &err) == 0 && row.n == 17 && row.fields[16].len == 65452);
+    ASSERT(t && table_read_at(t, 29, &row, &err) == 0 && row.n == 17 && row.fields[16].len == 65452);
     for (int i = 1; i < row.n; i++) ASSERT(memcmp(row.fields[i].s, text, row.fields[i].len) == 0);
     row_free(&row); table_close(t); free(text);
 }
@@ -343,7 +350,7 @@ typedef struct { int count, ok; } WideCheck;
 static int check_wide_row(const Row *row, uint64_t off, void *ctx) {
     WideCheck *c = ctx;
     int index = c->count++;
-    if (row->id != index + 1 || (index == 0 ? off != 0 : off != 81u + (uint64_t)(index - 1) * 524369u)) c->ok = 0;
+    if (row->id != index + 1 || (index == 0 ? off != 29 : off != 29u + 81u + (uint64_t)(index - 1) * 524369u)) c->ok = 0;
     for (int i = 1; i < 9; i++) {
         uint32_t len = index == 0 ? 0 : 65536;
         if (row->fields[i].len != len || row->fields[i].s[len] != '\0') c->ok = 0;
@@ -414,7 +421,7 @@ static int check_block_row(const Row *row, uint64_t off, void *ctx) {
     return 0;
 }
 static void *scan_blocks(void *ctx) {
-    Table *t = ctx; BlockCheck c = {.ok = 1}; DbError err = {0};
+    Table *t = ctx; BlockCheck c = {.ok = 1, .end = 29}; DbError err = {0};
     int rc = table_scan(t, check_block_row, &c, &err);
     return rc == 0 && c.ok && c.count == 40000 ? NULL : t;
 }
@@ -423,7 +430,7 @@ static void test_block_scan_open_callback_and_concurrency(void) {
     table_set_sync(t, 0);
     for (int i = 0; i < 40000; i++) ASSERT(append_row(t, "a", 1, 20, NULL, NULL, &err) == 0);
     table_close(t);
-    BlockCheck c = {.ok = 1}; os_test_reset_reads();
+    BlockCheck c = {.ok = 1, .end = 29}; os_test_reset_reads();
     t = table_open_with_visitor(test_dir, &schema, 0, check_open_id, &c, &err);
     ASSERT(t && c.ok && c.count == 40000 && os_test_read_calls() <= 4);
     os_test_reset_reads();
@@ -651,13 +658,13 @@ static int write_unfinished_statement(Table *t, size_t nrows, DbError *err) {
 static void test_commit_record_follows_each_statement(void) {
     DbError err = {0}; Table *t = fresh(&err); ASSERT(t);
     uint64_t off; int64_t id;
-    ASSERT(append_row(t, "a", 1, 20, &id, &off, &err) == 0 && off == 0);
+    ASSERT(append_row(t, "a", 1, 20, &id, &off, &err) == 0 && off == 29);
     ASSERT(table_append_rows(t, statement_of(3, 1), 3, NULL, &err) == 0);
     table_close(t);
     unsigned char file[512]; size_t n; ASSERT(read_all(file, sizeof file, &n) == 0);
     /* row (33 bytes) + COMMIT(1) + 3 rows (33 each) + COMMIT(3) */
-    ASSERT(n == 33 + 29 + 3 * 33 + 29);
-    ASSERT(memcmp(file + 33, commit_one, 29) == 0 && is_meta_at(file, 33, 1, 1) && is_meta_at(file, 33 + 29 + 99, 1, 3));
+    ASSERT(n == 29 + 33 + 29 + 3 * 33 + 29);
+    ASSERT(memcmp(file + 29 + 33, commit_one, 29) == 0 && is_meta_at(file, 29 + 33, 1, 1) && is_meta_at(file, 29 + 33 + 29 + 99, 1, 3));
     t = table_open(test_dir, &schema, 0, &err);
     ASSERT(t && count_rows(t, &err) == 4 && table_row_count(t) == 4);
     ASSERT(append_row(t, "z", 1, 1, &id, NULL, &err) == 0 && id == 5);
@@ -788,7 +795,7 @@ static void test_sync_always_two_syncs_per_statement_and_none_when_off(void) {
     ASSERT(table_append_rows(t, statement_of(10, 1), 10, NULL, &err) == 0 && os_test_sync_calls() == 0);
     table_close(t);
     static unsigned char file[1 << 16]; size_t n; ASSERT(read_all(file, sizeof file, &n) == 0);
-    ASSERT(n == 1000 * 33 + 29 + 10 * 33 + 29 && is_meta_at(file, n - 29, 1, 10)); /* COMMIT is written even with sync off */
+    ASSERT(n == 29 + 1000 * 33 + 29 + 10 * 33 + 29 && is_meta_at(file, n - 29, 1, 10)); /* COMMIT is written even with sync off */
 }
 
 static void test_commit_write_failure_rolls_back_statement(void) {
@@ -892,9 +899,106 @@ static void test_repair_uses_commit_count_when_corrupt_row_header_is_unreadable(
     table_close(t);
 }
 
+static void test_format_marker_and_partial_creation(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t); table_close(t);
+    unsigned char b[128]; size_t n;
+    ASSERT(read_all(b, sizeof b, &n) == 0 && n == 29 && is_meta_at(b, 0, 3, 3));
+    for (size_t cut = 1; cut < 29; cut++) {
+        ASSERT(write_bytes(b, cut) == 0);
+        t = table_open(test_dir, &schema, 0, &err); ASSERT(t); table_close(t);
+        unsigned char actual[128]; size_t got;
+        ASSERT(read_all(actual, sizeof actual, &got) == 0 && got == 29 && memcmp(actual, b, 29) == 0);
+    }
+}
+
+static void test_legacy_file_refused_unchanged(void) {
+    unsigned char old[3 * sizeof fixture];
+    for (int i = 0; i < 3; i++) {
+        unsigned char *r = old + i * sizeof fixture;
+        memcpy(r, fixture, sizeof fixture); r[12] = (unsigned char)(i + 1);
+        test_put32(r + 8, test_crc32(r + 12, sizeof fixture - 12));
+    }
+    for (int repair = 0; repair < 2; repair++) {
+        ASSERT(write_bytes(old, sizeof old) == 0);
+        DbError err = {0}; Table *t = table_open(test_dir, &schema, repair, &err);
+        if (t) table_close(t);
+        ASSERT(!t && err.kind == DB_ERROR_INTERNAL && strstr(err.message, "older or unknown format; it was not modified"));
+        unsigned char actual[256]; size_t n;
+        ASSERT(read_all(actual, sizeof actual, &n) == 0 && n == sizeof old && memcmp(actual, old, n) == 0);
+    }
+}
+
+static void test_repair_interruption_preserves_id_floor(void) {
+    for (int stage = 0; stage < 4; stage++) {
+        DbError err = {0}; Table *t = fresh(&err); ASSERT(t); uint64_t offsets[5];
+        for (int i = 0; i < 5; i++) ASSERT(append_row(t, "a", 1, 1, NULL, &offsets[i], &err) == 0);
+        table_close(t); ASSERT(flip_byte(offsets[1] + 24) == 0);
+        if (stage == 0) os_test_fail_truncate();       /* after durable sidecar */
+        if (stage == 1) os_test_fail_sync_after(2);    /* after truncate */
+        if (stage == 2) os_test_fail_append_after(2);  /* half ID_FLOOR */
+        if (stage == 3) os_test_fail_sync_after(3);    /* full ID_FLOOR, before sidecar removal */
+        t = table_open(test_dir, &schema, 1, &err);
+        if (t) table_close(t);
+        ASSERT(!t);
+        /* If truncation itself failed, the original corruption still needs repair. */
+        t = table_open(test_dir, &schema, stage == 0, &err); ASSERT(t);
+        int64_t id; ASSERT(append_row(t, "new", 3, 1, &id, NULL, &err) == 0 && id >= 6);
+        table_close(t);
+        t = table_open(test_dir, &schema, 0, &err); ASSERT(t);
+        ASSERT(append_row(t, "new", 3, 1, &id, NULL, &err) == 0 && id >= 7);
+        table_close(t);
+    }
+}
+
+static void test_idfloor_validation_and_replay_failures(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t); table_close(t);
+    char sidecar[300]; snprintf(sidecar, sizeof sidecar, "%s.idfloor", path);
+    const char *invalid[] = {"", "idfloor 9 00000000\n", "idfloor -1 00000000\n",
+        "idfloor 9223372036854775808 00000000\n", "idfloor 9 8d076785\nextra", "idfloor 9 8d076785"};
+    for (size_t i = 0; i < sizeof invalid / sizeof *invalid; i++) {
+        FILE *f = fopen(sidecar, "wb"); ASSERT(f);
+        ASSERT(fputs(invalid[i], f) >= 0 && fclose(f) == 0);
+        uint64_t before, after; ASSERT(file_size(&before) == 0);
+        ASSERT(table_open(test_dir, &schema, 1, &err) == NULL && strstr(err.message, "sidecar"));
+        ASSERT(file_size(&after) == 0 && after == before);
+    }
+    char line[96]; const unsigned char value[] = "40";
+    snprintf(line, sizeof line, "idfloor 40 %08x\n", (unsigned)test_crc32(value, 2));
+    FILE *f = fopen(sidecar, "wb"); ASSERT(f && fputs(line, f) >= 0 && fclose(f) == 0);
+    os_test_fail_append();
+    ASSERT(table_open(test_dir, &schema, 0, &err) == NULL);
+    f = fopen(sidecar, "rb"); ASSERT(f); fclose(f); /* journal survives failed replay */
+    t = table_open(test_dir, &schema, 0, &err); ASSERT(t);
+    int64_t id; ASSERT(append_row(t, "a", 1, 1, &id, NULL, &err) == 0 && id == 41);
+    table_close(t); ASSERT(fopen(sidecar, "rb") == NULL);
+}
+
+typedef struct { uint64_t deadline; int visited; } DeadlineScan;
+static int wait_past_deadline(const Row *row, uint64_t off, void *ctx) {
+    (void)row; (void)off;
+    DeadlineScan *s = ctx; s->visited++;
+    while (os_now_us() <= s->deadline) {}
+    return 0;
+}
+static void test_scan_checks_deadline_between_blocks(void) {
+    DbError err = {0}; Table *t = fresh(&err); ASSERT(t); table_set_sync(t, 0);
+    ASSERT(table_append_rows(t, statement_of(40, 65536), 40, NULL, &err) == 0);
+    ASSERT(table_read_lock(t) == 0);
+    DeadlineScan s = {.deadline = os_now_us() + 10000}; int lost = 0;
+    int rc = table_scan_deadline(t, wait_past_deadline, &s, &err, &lost, s.deadline);
+    ASSERT(!lost && table_unlock(t) == 0);
+    ASSERT(rc == -1 && err.kind == DB_ERROR_DEADLINE && s.visited > 0 && s.visited < 40);
+    table_close(t);
+}
+
 int main(void) {
     test_dir_init("table");
     snprintf(path, sizeof path, "%s/task5_table.tbl", test_dir);
+    RUN(test_format_marker_and_partial_creation);
+    RUN(test_legacy_file_refused_unchanged);
+    RUN(test_repair_interruption_preserves_id_floor);
+    RUN(test_idfloor_validation_and_replay_failures);
+    RUN(test_scan_checks_deadline_between_blocks);
     RUN(test_commit_record_follows_each_statement);
     RUN(test_failed_rollback_leaves_no_row_after_reopen_all_rows);
     RUN(test_failed_rollback_leaves_no_row_after_reopen_some_rows);

@@ -31,7 +31,7 @@ void result_print_text(const Result *result, FILE *file);
 /* JSON body for POST /query (design 2.10). *out is malloc'd, NUL-terminated;
  * the caller frees it. 0 = ok, -1 = out of memory. */
 int result_to_json(const Result *result, int worker_id, char **out, size_t *len);
-/* 200 when ok, 400 for a SQL error, 500 for an internal error. */
+/* 200 when ok, 400 SQL error, 503 deadline, 500 internal error. */
 int result_http_status(const Result *result);
 
 #endif
