@@ -1,0 +1,4 @@
+{
+  "words": { "id": "int", "word": "text", "first": "text", "last": "text", "finisher": "int", "removed": "int" },
+  "games": { "id": "int", "player": "text", "level": "text", "turns": "int", "result": "text", "reason": "text", "score": "int" }
+}
