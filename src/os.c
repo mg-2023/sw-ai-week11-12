@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <errno.h>
+#include <string.h>
 #ifdef MINI_DBMS_TESTING
 #include <stdatomic.h>
 static atomic_uint read_calls;
@@ -53,6 +54,9 @@ int os_is_directory(const char *path) {
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 int os_create_directory(const char *path) { return CreateDirectoryA(path, NULL) ? 0 : -1; }
+int os_replace_sync(const char *src, const char *dst) {
+    return MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 0 : -1;
+}
 uint64_t os_peak_memory_bytes(void) {
     PROCESS_MEMORY_COUNTERS counters = {0};
     if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof counters)) return UINT64_MAX;
@@ -120,6 +124,22 @@ void os_cleanup(void) {}
 int os_stdin_binary(void) { return 0; }
 int os_is_directory(const char *path) { struct stat s; return stat(path, &s) == 0 && S_ISDIR(s.st_mode); }
 int os_create_directory(const char *path) { return mkdir(path, 0700); }
+int os_replace_sync(const char *src, const char *dst) {
+    /* Open the destination's parent before rename; any failure prevents table truncation. */
+    char *parent = malloc(strlen(dst) + 1);
+    if (!parent) return -1;
+    strcpy(parent, dst);
+    char *slash = strrchr(parent, '/');
+    if (slash) { if (slash == parent) slash[1] = '\0'; else *slash = '\0'; }
+    else strcpy(parent, ".");
+    int fd = open(parent, O_RDONLY);
+    free(parent);
+    if (fd < 0) return -1;
+    int rc = rename(src, dst);
+    if (!rc) rc = fsync(fd);
+    if (close(fd)) rc = -1;
+    return rc;
+}
 uint64_t os_peak_memory_bytes(void) {
     struct rusage usage;
     if (getrusage(RUSAGE_SELF, &usage)) return UINT64_MAX;

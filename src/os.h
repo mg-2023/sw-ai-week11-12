@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 typedef struct OsFile OsFile;
+/* Replace dst atomically with a closed, already synced src, then persist the directory entry. */
+int os_replace_sync(const char *src, const char *dst);
 int os_init(void);
 void os_cleanup(void);
 int os_stdin_binary(void);

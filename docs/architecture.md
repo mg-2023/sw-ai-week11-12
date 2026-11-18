@@ -21,7 +21,8 @@ executor는 스키마·컬럼·타입·값 개수를 확인하고 INSERT 또는 
 - 레코드: `[u32 payload 길이][u32 길이 검사값][u32 payload CRC32/IEEE][i64 id][필드들]`. 모든 정수는 리틀 엔디언이며 길이는 12바이트 헤더를 제외한다. 길이 검사값은 길이를 인코딩한 리틀 엔디언 4바이트의 `CRC32/IEEE XOR 0x4D444231`이다. payload CRC 범위는 id부터 payload 끝까지다. 기존 8바이트 헤더 및 `~길이` 검사값을 쓰던 12바이트 헤더 파일의 자동 변환은 제공하지 않는다.
 - INT 필드: `[i64]`. TEXT 필드: `[u32 바이트 길이][바이트]`. 종결 NUL은 저장하지 않는다. TEXT는 최대 64 KiB, 헤더를 포함한 레코드는 최대 1 MiB다.
 - 메타 레코드: 일반 레코드와 같은 헤더(길이 · 길이 검사값 · CRC)에 id 칸이 0이고 본문이 `[u8 종류][i64 값]`인 29바이트 레코드다 (일반 id 는 양수라 구별된다). 종류 1 = COMMIT (값 = 바로 앞 문장이 쓴 행 수), 종류 2 = ID_FLOOR (값 이하의 id 는 다시 쓰지 않는다), 종류 3 = FORMAT (값 = 3). 메타 레코드는 결과 · 탐색 · 위치 지정 읽기 · 인덱스 · 행 수에 일반 행으로 나오지 않는다. 종류나 길이가 틀리거나 값이 0 이하면 손상이다. FORMAT은 파일 맨 앞에 한 번만 온다.
-- 새 파일과 0바이트 파일에는 먼저 FORMAT(3)을 쓰고 동기화한다 (`--sync none`도 이 초기 동기화는 수행). 비어 있지 않은 파일의 첫 레코드가 정확한 FORMAT(3)이 아니면 일반 열기와 `--repair` 모두 `table file <이름> has an older or unknown format; it was not modified` 내부 오류로 거부하며 바이트를 바꾸지 않는다. FORMAT의 올바른 접두부만 쓰인 끝 잘림은 0바이트로 자르고 동기화한 뒤 FORMAT을 다시 쓴다. 자동 변환 기능은 없다.
+- 새 파일과 0바이트 파일에는 먼저 FORMAT(3)을 쓰고 동기화한다 (`--sync none`도 이 초기 동기화는 수행). 파일 전체가 0x00으로 채워져 있으면 길이와 관계없이 끝 잘림으로 처리해 0바이트로 자르고 동기화한 뒤 FORMAT을 새로 쓴다. 표준 오류에는 `N bytes of incomplete tail truncated at offset 0`을 남긴다. FORMAT의 올바른 접두부만 쓰인 끝 잘림도 0바이트로 자르고 동기화한 뒤 FORMAT을 다시 쓴다.
+- 첫 레코드가 메타 레코드 모양(id 0)인데 FORMAT과 다르거나 헤더 검사값·CRC가 틀리면 `corrupt format record at offset 0`으로 거부한다. id 칸까지 손상된 FORMAT도 정상 일반 행으로 해석되지 않으면 같은 손상 메시지를 쓴다. 첫 레코드가 헤더·CRC·필드 검사를 통과한 정상 일반 행인 옛 형식일 때만 `table file <이름> has an older or unknown format; it was not modified`로 거부한다. 둘 다 일반 열기와 `--repair`에서 파일을 바꾸지 않는다. FORMAT 손상은 `--repair`로 복구할 수 없으며 수동 바이트 수정으로 복구하는 절차도 지원하지 않는다. 정상 백업에서 복원하거나 원본 데이터로 새 테이블을 만들어야 한다. 자동 변환 기능은 없다.
 - id는 양수이며 파일 순서대로 증가한다. 시작 때 다음 id = max(확정된 마지막 id, 본 ID_FLOOR 값들의 최댓값) + 1 이다. int64 범위를 소진하면 추가를 거부한다.
 
 INSERT 한 문장은 쓰기 락 안에서 다음 순서로 실행한다 (계획의 "행마다 추가 · 동기화"에서 문장 단위 원자성으로 바꾼 설계 결정, 2026-11-18).
@@ -65,8 +66,9 @@ CLI는 실행 후 표준 오류에 마지막 동기화 뒤 쓴 행은 OS 장애 
 
 - 자르기 전에 잘라 낼 바이트 전체를 같은 폴더의 `<table>.tbl.repair-<YYYYMMDD-HHMMSS>` 로 복사하고 동기화한다. 같은 초에 이름이 겹치면 `-2`, `-3` … 을 붙인다. 복사가 실패하면 자르지 않고 내부 오류로 시작을 거부하며 반쯤 쓴 백업은 지운다.
 - 잘라 낸 구간 (보류 중이던 문장의 시작부터 파일 끝까지) 을 바이트마다 훑어 헤더 검사값과 payload CRC 가 모두 맞는 레코드를 찾는다. 구간에서 본 모든 것의 최댓값 F 를 구한다 : 정상 레코드의 id (보류 행 포함 : 이미 클라이언트에게 준 id 일 수 있다), 구간 안 ID_FLOOR 값, 구간 안 COMMIT 으로 짐작되는 마지막 id (그 문장의 첫 id + COMMIT 행 수 − 1. 첫 id 는 문장의 정상 행 중 가장 앞 id, 없으면 직전 확정 id + 1), 그리고 손상 레코드 자신의 id 칸. 손상 레코드의 id 칸은 헤더 검사값이 맞고 값이 정확히 "그 직전까지 읽은 마지막 id (보류 행 포함) + 1" 일 때만 쓴다. id 는 1씩 늘므로 그 레코드가 원래 가졌을 id 는 그 값뿐이고, 다른 값은 깨진 쓰레기로 보아 무시한다. (옛 규칙은 기준을 "확정된 마지막 id" 로 잡아, 보류 행 2 · 3 뒤의 손상 행 4 를 무시하고 id 4 를 다시 주었다.)
-- 순서는 반드시 (1) 잘라 낼 바이트 백업 · 동기화 → (2) 기존 확정 하한과 F 중 큰 값을 `<table>.tbl.idfloor`에 쓰기 · 동기화 → (3) 테이블 자르기 · 동기화 → (4) ID_FLOOR 메타 레코드 쓰기 · 동기화 → (5) `.idfloor` 삭제다. 기존 파일에 같은 값 이상의 ID_FLOOR가 남아 있으면 중복 쓰기를 생략한다. 다음 id는 저장된 모든 하한보다 크다. 어느 단계가 실패해도 시작을 거부하며, 자르기 이후 실패에는 sidecar가 남아 이미 응답한 id를 보호한다.
+- 순서는 반드시 (1) 잘라 낼 바이트 백업 · 동기화 → (2) 기존 확정 하한과 F 중 큰 값을 `<table>.tbl.idfloor.tmp`에 쓰기 · 동기화 · 닫기 → `.idfloor`로 원자적 교체 → (3) 테이블 자르기 · 동기화 → (4) ID_FLOOR 메타 레코드 쓰기 · 동기화 → (5) `.idfloor` 삭제다. 원자적 교체는 Windows에서 `MoveFileEx`의 `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`, POSIX에서 `rename` 후 대상 부모 디렉터리 `fsync`를 쓴다 (`os_replace_sync`). 기존 파일에 같은 값 이상의 ID_FLOOR가 남아 있으면 중복 쓰기를 생략한다. 다음 id는 저장된 모든 하한보다 크다. 어느 단계가 실패해도 시작을 거부한다. 이름 바꾸기 전 실패는 `.tmp`만 남기며 테이블은 아직 자르지 않았다. 이름 바꾸기 후 실패에는 완전한 `.idfloor`가 남아 자르기 전·후 모두 하한을 보호한다.
 - `.idfloor` 형식은 ASCII 한 줄 `idfloor <10진 값> <8자리 소문자 CRC32 16진값>\n`이다. CRC32/IEEE 대상은 값의 정규 십진 ASCII 바이트뿐이며 공백 · 접두어 · 개행은 제외한다. 값은 0..INT64_MAX이며 앞의 0, 부호, 여분 바이트, 잘못된 CRC, 미완성 줄은 거부한다. 열 때 파일이 있으면 하한을 보존하고, 테이블에 같은 값 이상의 ID_FLOOR가 없으면 추가 · 동기화한 뒤 sidecar를 삭제한다. 이미 있더라도 테이블 동기화를 확인한 뒤 지운다. 재처리가 실패하면 시작을 거부하고 sidecar를 남긴다. 자르기 자체가 실패해 원래 손상이 남아 있으면 다시 `--repair`가 필요하다.
+- 열 때 남은 `.idfloor.tmp`는 삭제하고 무시한다. 이름 바꾸기 전에는 테이블을 자르지 않으므로 임시 파일의 하한은 필요 없다. 기존 `.idfloor`도 있으면 그것은 계속 검증·반영한다. `.idfloor` 자체가 깨졌으면 일반 열기와 `--repair` 모두 거부하며 `id floor sidecar <경로> is corrupt; inspect it, then delete it to open the table (deleting may allow reuse of ids up to the floor)`로 안내한다. 파일과 repair 백업을 확인한 뒤 운영자가 sidecar를 삭제할 수 있으나, 삭제하면 해당 하한까지의 id가 재사용될 수 있다.
 - 표준 오류에 자른 위치 · 바이트 수 · 백업 파일 이름 · 잘라 낸 구간에서 찾은 정상 레코드 수와 id 범위를 한 줄로 남긴다 (`repair: cut N bytes at offset X, backup PATH, K intact records in the cut bytes, ids A..B`). 손상된 레코드 자체의 id 칸은 이 보고 범위에는 들지 않는다. 위 조건을 만족할 때만 ID_FLOOR 에 반영되므로 id 칸이 깨져도 id 가 크게 건너뛰지 않는다.
 
 #### 복구 규칙의 알려진 한계 (2026-11-18 독립 재검증)
@@ -83,7 +85,7 @@ CLI는 실행 후 표준 오류에 마지막 동기화 뒤 쓴 행은 OS 장애 
 - 한계 1 : 실제 전원 차단 · 커널 중단은 시험하지 않았다. 위 주장은 실패 주입(`os_test_fail_*`)으로 만든 파일 모양에 대한 것이다. 실제 장치가 쓰기 순서를 보장하는지 (행 쓰기가 COMMIT 쓰기보다 먼저 디스크에 닿는지) 는 첫 번째 동기화에 기댄다. `--sync none` 에서는 순서 보장이 없어 COMMIT 은 있는데 앞 행 일부가 비는 모양이 가능하며, 이는 COMMIT 값(행 수) 과 CRC 검사에서 손상으로 드러나 시작을 거부한다 (조용히 틀린 행을 보이지는 않는다).
 - 한계 2 : COMMIT 을 쓴 뒤 그 동기화가 실패하고 되돌리기(truncate)까지 실패하면 결과가 불확정이다. COMMIT 이 파일에 남아 다시 열면 그 문장의 행이 모두 보일 수 있다. 이때 응답은 "커밋 안 됨" 이 아니라 `statement outcome unknown: commit record was written but could not be confirmed or rolled back; reopen the table to see whether the rows exist` (내부 오류, HTTP 500, 서버 JSON 도 같은 문구) 이고 테이블은 다시 열 때까지 추가를 거부한다. 구분 : (a) COMMIT 을 쓰기 전 실패 + truncate 실패 → 다시 열면 보류 행이 잘리므로 `no row of this statement was committed` 가 맞다. (b) COMMIT 뒤 실패여도 truncate 와 동기화가 성공했으면 정말 되돌린 것이므로 `no row of this statement was committed` 가 맞다. (c) COMMIT 뒤 실패 + 되돌리기 실패 → 불확정. 셋 다 `test_commit_failure_messages_match_what_a_reopen_shows` 가 메시지와 다시 연 뒤 행 수를 확인한다.
 - 한계 3 : 기존 형식 (COMMIT 없는 파일) 의 변환은 없다. COMMIT 이 없는 옛 파일은 끝의 보류 행이 "끝나지 않은 문장" 으로 잘리므로 열기 전에 새로 만들어야 한다.
-- 한계 4 : repair 가 ID_FLOOR 를 쓰기 전에 죽으면 (백업은 남아 있음) 잘라 낸 구간의 id 하한 정보가 없어진다. 다음 repair 는 이미 잘린 파일만 보므로 하한을 다시 알 수 없고, 백업 파일에서 직접 확인해야 한다.
+- repair가 ID_FLOOR를 쓰기 전에 중단돼도, 자르기 전에 원자적으로 만든 `.idfloor`가 다음 열기에서 하한을 복원한다. 실제 전원 차단 내구성은 파일·이름 변경·디렉터리 동기화에 대한 OS와 저장장치의 보장에 따른다.
 
 폴더 잠금 파일 `.mini-dbms.lock`으로 다른 프로세스가 같은 데이터 폴더를 동시에 여는 것을 막는다. 없는 데이터 폴더는 잠금을 시도하기 전에 `data directory not found: …`로 보고한다. 종료 때 핸들과 잠금을 해제하며 잠금 파일 자체는 남을 수 있다. 현재 OS 계층은 프로세스당 하나의 열린 데이터베이스만 지원한다.
 
@@ -165,7 +167,7 @@ CLI 테스트는 1만 행 기본 실행, 사용자 지정 폴더·조회 수·se
 | 500 | `DbError.kind == DB_ERROR_INTERNAL` (파일 I/O · 메모리 · 락 · 저장 데이터 손상 · 응답 만들기 실패 · INSERT 결과 불확정) |
 | 503 | 큐 가득, 또는 큐 대기 · 받기 · SQL 실행 중 전체 시한 초과 |
 
-오류 본문은 `{ok:false, error:{statement, line, col, message}, committed:n}` (SQL 실행 결과) 또는 `{ok:false, error:{message}}` (HTTP 단계) 이다. 여러 문장 요청은 첫 오류에서 멈추고 `committed` 가 앞서 성공한 문장 수다.
+오류 본문은 `{ok:false, error:{statement, line, col, message}, committed:n}` (SQL 실행 결과) 또는 `{ok:false, error:{message}}` (HTTP 단계) 이다. 여러 문장 요청은 첫 오류에서 멈추고 `committed`가 앞서 성공한 문장 수다. SQL 실행 시한 초과(503)에는 `results` 배열도 넣어 완료된 모든 문장의 결과와 INSERT의 `inserted_ids`를 돌려준다. `error.statement`는 실패한 문장의 0부터 시작하는 번호이며 `line`, `col`은 그 문장 시작의 1부터 시작하는 줄·칸이다. 취소된 SELECT의 부분 결과는 포함하지 않는다.
 
 ### 시한
 
@@ -233,9 +235,9 @@ CLI 테스트는 1만 행 기본 실행, 사용자 지정 폴더·조회 수·se
 
 ### 요청 전체 결과 상한
 
-`EXECUTOR_MAX_RESULT_BYTES` = 16 MiB를 `db_execute_sql` 호출 한 번의 모든 문장에 합산한다. 행의 `열 수 × sizeof(Value)`와 TEXT 바이트 (+1), 열 이름 · 포인터, 문장 결과 구조체, INSERT의 반환 id 배열을 센다. 넘는 문장에서 `result exceeds the 16 MiB limit; ...` SQL 오류 (400)가 나고, 그 문장의 부분 결과를 해제하며 앞 문장은 committed로 남는다. INSERT 반환 배열은 쓰기 전에 예산을 검사하므로 결과 한도 오류를 낸 INSERT가 저장되는 일은 없다. CLI와 서버가 같은 규칙을 쓴다. 이는 보유 결과의 논리적 크기이며 realloc의 여유 용량 · 할당기 오버헤드 · 탐색 버퍼를 포함한 프로세스 전체 메모리 한도는 아니다.
+`EXECUTOR_MAX_RESULT_BYTES` = 16 MiB를 `db_execute_sql` 호출 한 번의 **모든 SELECT가 반환하는 행 데이터**에 합산한다. 행의 `열 수 × sizeof(Value)`와 TEXT 바이트(+1)만 센다. 열 이름·포인터, 문장 결과 구조체, INSERT의 반환 id 배열은 제외한다. INSERT만 많은 요청은 이 상한으로 실패하지 않으며, 빈 SELECT도 예산을 쓰지 않는다. 넘는 SELECT에서만 `result exceeds the 16 MiB limit; add a WHERE condition or a smaller LIMIT` SQL 오류(HTTP 400, CLI 종료 코드 1)가 나고, 그 SELECT의 부분 결과를 해제하며 앞 문장은 committed로 남는다. CLI와 서버가 같은 규칙을 쓴다. CLI는 기존처럼 요청의 결과를 모아 출력한 뒤 해제하며 출력 형식은 같다. 이는 SELECT 행 데이터의 논리적 크기이며 전체 결과 메타데이터·INSERT id·realloc의 여유 용량·할당기 오버헤드·탐색 버퍼를 포함한 프로세스 전체 메모리 한도는 아니다.
 
-JSON은 TEXT 한 바이트가 `\u00XX`로 최대 6바이트, INT 한 값이 부호 포함 최대 20자리이며 구분자도 Value 공간으로 감당된다. 열 이름 · 문장별 고정 JSON은 예산에 포함한 이름과 포인터 · StmtResult 공간의 6배 안에 든다. 따라서 본문 크기는 보수적으로 `6 × 16 MiB + 4096 = 100,667,392 bytes` (96 MiB + 최상위 고정 부분 4 KiB) 이하다. 별도 JSON 상한은 두지 않는다.
+JSON은 TEXT 한 바이트가 `\u00XX`로 최대 6바이트, INT 한 값이 부호 포함 최대 20자리로 늘 수 있다. SELECT 행 데이터 외에도 문장별 JSON·열 이름·INSERT id가 있으므로 전체 JSON 크기를 16 MiB 예산의 고정 배수로 제한할 수 없다. 별도 JSON 상한은 두지 않는다. HTTP 요청의 SQL 본문은 기존처럼 1 MiB 상한을 따르며 CLI 파일 입력은 더 클 수 있다.
 
 ### 종료
 

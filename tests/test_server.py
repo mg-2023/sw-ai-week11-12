@@ -416,8 +416,12 @@ def test_execution_deadline_and_committed_insert():
             n = body["committed"]
             assert 0 <= n < 100
             assert body["error"]["message"] == f"deadline exceeded after {n} statements; earlier statements are committed"
-            status, body = query(short.port, "INSERT INTO users VALUES ('durable',1);" + scan * 100)
+            status, body = query(short.port, "INSERT INTO users VALUES ('durable',1);\n  " + (scan + "\n  ") * 100)
             assert status == 503 and body["committed"] >= 1, (status, body)
+            assert len(body["results"]) == body["committed"], body
+            assert body["results"][0]["inserted_ids"] == [50001], body
+            assert body["error"]["statement"] == body["committed"], body
+            assert body["error"]["line"] == body["committed"] + 1 and body["error"]["col"] == 3, body
         with server(data=data) as again:
             rows = ok_query(again.port, "SELECT * FROM users WHERE id=50001;")["results"][0]["rows"]
             assert rows == [[50001, "durable", 1]], rows
@@ -440,6 +444,7 @@ def test_total_deadline_includes_receive_and_queue():
             time.sleep(0.01)
             status, body = query(s.port, "INSERT INTO users VALUES ('late',1);")
             assert status == 503 and body["committed"] == 0, (status, body)
+            assert body["results"] == [], body
             assert body["error"]["message"] == "deadline exceeded after 0 statements; earlier statements are committed"
         finally:
             busy.close()

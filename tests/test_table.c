@@ -959,7 +959,9 @@ static void test_idfloor_validation_and_replay_failures(void) {
         FILE *f = fopen(sidecar, "wb"); ASSERT(f);
         ASSERT(fputs(invalid[i], f) >= 0 && fclose(f) == 0);
         uint64_t before, after; ASSERT(file_size(&before) == 0);
-        ASSERT(table_open(test_dir, &schema, 1, &err) == NULL && strstr(err.message, "sidecar"));
+        ASSERT(table_open(test_dir, &schema, 1, &err) == NULL);
+        ASSERT(strstr(err.message, sidecar) && strstr(err.message, "is corrupt; inspect it, then delete it to open the table"));
+        ASSERT(strstr(err.message, "deleting may allow reuse of ids up to the floor"));
         ASSERT(file_size(&after) == 0 && after == before);
     }
     char line[96]; const unsigned char value[] = "40";
@@ -971,6 +973,83 @@ static void test_idfloor_validation_and_replay_failures(void) {
     t = table_open(test_dir, &schema, 0, &err); ASSERT(t);
     int64_t id; ASSERT(append_row(t, "a", 1, 1, &id, NULL, &err) == 0 && id == 41);
     table_close(t); ASSERT(fopen(sidecar, "rb") == NULL);
+}
+
+static void test_partial_idfloor_temp_is_discarded_before_truncation(void) {
+    for (int sync_failure = 0; sync_failure < 2; sync_failure++) {
+        DbError err = {0}; uint64_t offsets[3];
+        ASSERT(populate(offsets, &err) == 0);
+        unsigned char original[512], actual[512]; size_t n, got;
+        ASSERT(read_all(original, sizeof original, &n) == 0);
+        ASSERT(flip_byte(offsets[1] + 24) == 0);
+        if (sync_failure) os_test_fail_sync_after(1); /* backup synced; temp sync fails */
+        else os_test_fail_append_after(1);          /* backup written; temp half written */
+        Table *t = table_open(test_dir, &schema, 1, &err);
+        if (t) table_close(t);
+        ASSERT(!t);
+        char sidecar[300], temp[300];
+        snprintf(sidecar, sizeof sidecar, "%s.idfloor", path);
+        snprintf(temp, sizeof temp, "%s.idfloor.tmp", path);
+        FILE *f = fopen(sidecar, "rb"); if (f) fclose(f);
+        ASSERT(!f);
+        f = fopen(temp, "rb"); ASSERT(f); fclose(f);
+        ASSERT(read_all(actual, sizeof actual, &got) == 0 && got == n);
+        original[offsets[1] + 24] ^= 1;
+        ASSERT(memcmp(actual, original, n) == 0); /* table has not been truncated */
+        /* Restore the independently saved table: a leftover temp must reserve no ids. */
+        original[offsets[1] + 24] ^= 1;
+        ASSERT(write_bytes(original, n) == 0);
+        t = table_open(test_dir, &schema, 0, &err); ASSERT(t);
+        f = fopen(temp, "rb"); if (f) fclose(f);
+        ASSERT(!f);
+        int64_t id;
+        ASSERT(append_row(t, "next", 4, 1, &id, NULL, &err) == 0 && id == 4);
+        table_close(t);
+        /* Repeat on the actual corrupt table: the next repair must work without manual sidecar cleanup. */
+        original[offsets[1] + 24] ^= 1;
+        ASSERT(write_bytes(original, n) == 0);
+        os_test_fail_append_after(1);
+        t = table_open(test_dir, &schema, 1, &err); if (t) table_close(t);
+        ASSERT(!t);
+        t = table_open(test_dir, &schema, 1, &err); ASSERT(t);
+        ASSERT(append_row(t, "next", 4, 1, &id, NULL, &err) == 0 && id == 4);
+        table_close(t);
+        t = table_open(test_dir, &schema, 0, &err); ASSERT(t);
+        ASSERT(append_row(t, "again", 5, 1, &id, NULL, &err) == 0 && id == 5);
+        table_close(t);
+    }
+}
+
+static void test_zero_filled_new_file(void) {
+    const size_t sizes[] = {10, 40, 1024 * 1024 + 7};
+    for (size_t i = 0; i < sizeof sizes / sizeof *sizes; i++) {
+        for (int repair = 0; repair < 2; repair++) {
+            test_dir_clear();
+            unsigned char *zeros = calloc(sizes[i], 1); ASSERT(zeros);
+            int rc = write_bytes(zeros, sizes[i]); free(zeros); ASSERT(rc == 0);
+            DbError err = {0}; char report[512];
+            Table *t = open_capture_stderr(repair, &err, report, sizeof report);
+            ASSERT(t); table_close(t);
+            ASSERT(strstr(report, "incomplete tail truncated at offset 0"));
+            unsigned char b[128]; size_t n;
+            ASSERT(read_all(b, sizeof b, &n) == 0 && n == 29 && memcmp(b, format_v3, 29) == 0);
+        }
+    }
+}
+
+static void test_corrupt_format_record_refused_unchanged(void) {
+    const size_t offsets[] = {0, 4, 8, 12, 19, 20, 21, 28};
+    for (size_t i = 0; i < sizeof offsets / sizeof *offsets; i++) {
+        for (int repair = 0; repair < 2; repair++) {
+            unsigned char broken[29], actual[128]; size_t n;
+            memcpy(broken, format_v3, sizeof broken); broken[offsets[i]] ^= 1;
+            ASSERT(write_bytes(broken, sizeof broken) == 0);
+            DbError err = {0}; Table *t = table_open(test_dir, &schema, repair, &err);
+            if (t) table_close(t);
+            ASSERT(!t && strcmp(err.message, "corrupt format record at offset 0") == 0);
+            ASSERT(read_all(actual, sizeof actual, &n) == 0 && n == sizeof broken && memcmp(actual, broken, n) == 0);
+        }
+    }
 }
 
 typedef struct { uint64_t deadline; int visited; } DeadlineScan;
@@ -994,6 +1073,9 @@ static void test_scan_checks_deadline_between_blocks(void) {
 int main(void) {
     test_dir_init("table");
     snprintf(path, sizeof path, "%s/task5_table.tbl", test_dir);
+    RUN(test_partial_idfloor_temp_is_discarded_before_truncation);
+    RUN(test_zero_filled_new_file);
+    RUN(test_corrupt_format_record_refused_unchanged);
     RUN(test_format_marker_and_partial_creation);
     RUN(test_legacy_file_refused_unchanged);
     RUN(test_repair_interruption_preserves_id_floor);

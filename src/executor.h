@@ -4,9 +4,9 @@
 #include "result.h"
 #include "table.h"
 
-/* One request's aggregate retained results: cells, TEXT, names, statement
- * metadata and inserted ids. The shared remaining budget is charged before
- * copying results or starting an INSERT. CLI and server share the rule. */
+/* One request's aggregate SELECT row data: cells and TEXT (including NUL).
+ * Names, statement metadata and INSERT ids are excluded. CLI and server
+ * share the budget, charged before copying each SELECT row. */
 #define EXECUTOR_MAX_RESULT_BYTES ((size_t)16 * 1024 * 1024)
 size_t executor_result_limit(void);
 #ifdef MINI_DBMS_TESTING

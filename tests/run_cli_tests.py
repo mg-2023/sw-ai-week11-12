@@ -42,10 +42,10 @@ def database():
         shutil.rmtree(work)
 
 
-def invoke(work, args, sql=None):
+def invoke(work, args, sql=None, timeout=15):
     proc = subprocess.run(
         [str(EXE), *map(str, args)], cwd=work, input=sql,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
     )
     return proc.returncode, normalize(proc.stdout.decode("utf-8")), proc.stderr.decode("utf-8").replace("\r\n", "\n")
 
@@ -489,6 +489,37 @@ def test_bench_preserves_existing_directory():
         assert rc == 1 and "internal error:" in out and not err, (rc, out, err)
 
 
+def test_200000_single_row_inserts():
+    with database() as (work, data):
+        sql = work / "bulk.sql"
+        sql.write_bytes(b"INSERT INTO users VALUES ('bulk',1);\n" * 200000)
+        rc, out, err = invoke(work, ["run", sql, "--sync", "none"], timeout=120)
+        assert rc == 0 and out.count("row inserted, ids=") == 200000, (rc, out[-300:], err)
+        rc, out, err = invoke(work, ["run", "-"], b"SELECT id FROM users;")
+        assert rc == 0 and "(200000 rows, plan=scan, examined=200000," in out, (rc, out[-300:], err)
+
+
+def test_cli_aggregate_select_limit():
+    with database() as (work, data):
+        text = "x" * 60000
+        sql = (f"INSERT INTO users VALUES ('{text}',1);" * 100).encode()
+        assert invoke(work, ["run", "-", "--sync", "none"], sql)[0] == 0
+        rc, out, err = invoke(work, ["run", "-"], b"SELECT * FROM users;" * 4)
+        assert rc == 1 and "16 MiB" in out and "(2 statements committed before error)" in out, (rc, out[-300:], err)
+
+
+def test_corrupt_idfloor_remedy_with_long_path():
+    with database() as (work, data):
+        nested = data / ("a" * 80)
+        nested.mkdir()
+        shutil.copyfile(data / "catalog.txt", nested / "catalog.txt")
+        sidecar = nested / "users.tbl.idfloor"
+        sidecar.write_bytes(b"idfloor 5")
+        rc, out, err = invoke(work, ["run", "-", "--data", nested], b"")
+        expected = f"id floor sidecar {nested}/users.tbl.idfloor is corrupt; inspect it, then delete it to open the table (deleting may allow reuse of ids up to the floor)"
+        assert rc == 1 and expected in out, (rc, out, err)
+
+
 def main():
     tests = [(path.stem, lambda path=path: fixture(path)) for path in sorted(FIXTURES.glob("*.sql"))]
     tests += [("stdin_basic", lambda: fixture(FIXTURES / "basic_insert_select.sql", stdin=True))]
@@ -503,6 +534,8 @@ def main():
         test_complete_record_inside_incomplete_tail, test_catalog_reserved_identifiers,
         test_bench_10000, test_bench_query_only, test_bench_options_and_partial_batch,
         test_bench_invalid_arguments, test_bench_preserves_existing_directory,
+        test_200000_single_row_inserts, test_cli_aggregate_select_limit,
+        test_corrupt_idfloor_remedy_with_long_path,
     )]
     passed = failed = 0
     for name, test in tests:

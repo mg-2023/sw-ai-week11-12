@@ -5,7 +5,8 @@
 #include <stdint.h>
 
 typedef enum { DB_ERROR_SQL, DB_ERROR_INTERNAL, DB_ERROR_DEADLINE } DbErrorKind;
-typedef struct { int line, col; char message[256]; DbErrorKind kind; } DbError;
+/* A filesystem diagnostic can include a 4096-byte path plus recovery advice. */
+typedef struct { int line, col; char message[4352]; DbErrorKind kind; } DbError;
 
 typedef enum {
     TK_IDENT, TK_INT, TK_STRING, TK_COMMA, TK_LPAREN, TK_RPAREN, TK_STAR,

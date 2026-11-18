@@ -181,6 +181,11 @@ int result_to_json(const Result *result, int worker_id, char **out, size_t *len)
         jb_str(&b, ",\"col\":"); jb_i64(&b, result->err.col);
         jb_str(&b, ",\"message\":"); jb_string(&b, result->err.message, strlen(result->err.message));
         jb_str(&b, "},\"committed\":"); jb_u64(&b, result->committed);
+        if (result->err.kind == DB_ERROR_DEADLINE) {
+            jb_str(&b, ",\"results\":[");
+            for (size_t i = 0; i < result->n; i++) { if (i) jb_put(&b, ",", 1); json_statement(&b, &result->items[i]); }
+            jb_str(&b, "]");
+        }
         jb_str(&b, "}");
     }
     if (b.failed) { free(b.p); return -1; }

@@ -32,6 +32,7 @@ struct Table {
     WaitStats wait;
     OsFile *file;
     char *floor_path;
+    char *floor_tmp_path;
     TableSchema schema;
     /* Confirmed end: bytes before it belong to committed rows. Scans and point
      * reads stop here, so unconfirmed bytes left by a failed rollback stay invisible. */
@@ -424,20 +425,29 @@ static int read_floor(Table *t, int64_t *value, int *present, DbError *err) {
         v = v * 10 + digit;
     }
     int want = floor_line(expected, (int64_t)v);
-    if (bad || n != (size_t)want || memcmp(line, expected, n)) return fail(err, 0, "invalid id floor sidecar");
+    if (bad || n != (size_t)want || memcmp(line, expected, n)) {
+        if (err) {
+            *err = (DbError){.kind = DB_ERROR_INTERNAL};
+            snprintf(err->message, sizeof err->message,
+                     "id floor sidecar %s is corrupt; inspect it, then delete it to open the table (deleting may allow reuse of ids up to the floor)",
+                     t->floor_path);
+        }
+        return -1;
+    }
     *value = (int64_t)v; *present = 1;
     return 0;
 }
 
 static int write_floor(Table *t, int64_t value, DbError *err) {
     char line[96]; int n = floor_line(line, value);
-    OsFile *f = os_open(t->floor_path, 1);
+    OsFile *f = os_open(t->floor_tmp_path, 1);
     int bad = !f;
     if (f) {
-        /* A previous valid sidecar is never overwritten with a smaller floor. */
+        /* Do not expose a partial sidecar, or replace the old one until synced. */
         bad = (os_size(f) != 0 && os_truncate(f, 0)) || os_append(f, line, (size_t)n, NULL) || os_sync(f);
         os_close(f);
     }
+    if (!bad) bad = os_replace_sync(t->floor_tmp_path, t->floor_path);
     return bad ? fail(err, 0, "cannot persist id floor sidecar before repair") : 0;
 }
 
@@ -484,8 +494,13 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
     }
     snprintf(path, path_len, "%s/%s.tbl", dir, schema->name);
     t->floor_path = malloc(path_len + sizeof ".idfloor");
-    if (!t->floor_path) { free(path); fail(err, 0, "out of memory"); goto bad; }
+    t->floor_tmp_path = malloc(path_len + sizeof ".idfloor.tmp");
+    if (!t->floor_path || !t->floor_tmp_path) { free(path); fail(err, 0, "out of memory"); goto bad; }
     snprintf(t->floor_path, path_len + sizeof ".idfloor", "%s.idfloor", path);
+    snprintf(t->floor_tmp_path, path_len + sizeof ".idfloor.tmp", "%s.idfloor.tmp", path);
+    if (remove(t->floor_tmp_path) && errno != ENOENT) {
+        free(path); fail(err, 0, "cannot remove temporary id floor sidecar"); goto bad;
+    }
     t->file = os_open(path, 1); free(path);
     if (!t->file) { fail(err, 0, "cannot open table file"); goto bad; }
     t->schema = *schema; t->next_id = 1; t->sync_always = 1;
@@ -501,7 +516,28 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
     if (prefix && os_read_at(t->file, first, prefix, 0) != (int64_t)prefix) {
         fail(err, 0, "cannot read table format"); goto bad;
     }
+    int zero_filled = 0;
+    if (prefix && all_zero(first, prefix)) {
+        reader = calloc(1, sizeof *reader);
+        if (!reader) { fail(err, 0, "out of memory"); goto bad; }
+        reader->table = t; reader->size = size;
+        int zeros = zero_tail(reader, 0, err);
+        free(reader); reader = NULL;
+        if (zeros < 0) goto bad;
+        if (zeros) {
+            zero_filled = 1; prefix = 0;
+        }
+    }
     if (prefix && memcmp(first, format, prefix)) {
+        /* Only a fully valid ordinary row proves this is a legacy file. In
+         * particular, a damaged FORMAT id must not masquerade as an old row. */
+        reader = calloc(1, sizeof *reader);
+        if (!reader) { fail(err, 0, "out of memory"); goto bad; }
+        reader->table = t; reader->size = size;
+        Row row = {0}; Meta meta = {0}; uint64_t next = 0;
+        int rc = read_record(reader, 0, &row, &meta, &next, err);
+        if (rc == RECORD_IO) goto bad;
+        if (rc != RECORD_OK) { fail(err, 0, "corrupt format record"); goto bad; }
         if (err) {
             *err = (DbError){.kind = DB_ERROR_INTERNAL};
             snprintf(err->message, sizeof err->message,
@@ -511,11 +547,12 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
     }
     int64_t recovery_floor = 0; int has_floor = 0;
     if (read_floor(t, &recovery_floor, &has_floor, err)) goto bad;
-    if (size < META_SIZE) {
+    if (size < META_SIZE || zero_filled) {
         if ((size && (os_truncate(t->file, 0) || os_sync(t->file))) ||
             append_meta(t, META_FORMAT, 3) || os_sync(t->file)) {
             fail(err, 0, "cannot initialize table format"); goto bad;
         }
+        if (zero_filled) fprintf(stderr, "%" PRIu64 " bytes of incomplete tail truncated at offset 0\n", size);
         size = META_SIZE;
     }
     off = META_SIZE;
@@ -839,6 +876,7 @@ void table_close(Table *t) {
     bpt_free(t->index);
     os_close(t->file);
     free(t->floor_path);
+    free(t->floor_tmp_path);
     pthread_rwlock_destroy(&t->lock);
     pthread_mutex_destroy(&t->wait.mutex);
     free(t);

@@ -57,7 +57,7 @@ static void send_error(SOCKET_T s, int status, const char *message) {
 
 static void send_deadline(SOCKET_T s) {
     const char body[] = "{\"ok\":false,\"error\":{\"statement\":0,\"line\":0,\"col\":0,"
-        "\"message\":\"deadline exceeded after 0 statements; earlier statements are committed\"},\"committed\":0}";
+        "\"message\":\"deadline exceeded after 0 statements; earlier statements are committed\"},\"committed\":0,\"results\":[]}";
     http_send(s, 503, body, sizeof body - 1, os_now_us() + SEND_US);
 }
 
@@ -126,7 +126,10 @@ static void handle_connection(void *arg, int worker_id) {
     }
     if (os_now_us() >= conn->accepted_us + srv->total_us) {              /* too late to start executing */
         atomic_fetch_add(&srv->rejected, 1);
-        send_deadline(s);
+        /* A complete SQL body can identify the failed statement's start even when no statement ran. */
+        if (strcmp(req.path, "/query") == 0 && strcmp(req.method, "POST") == 0)
+            run_query(srv, s, &req, worker_id, conn->accepted_us + srv->total_us);
+        else send_deadline(s);
         drain = 1;
     } else if (strcmp(req.path, "/query") == 0) {
         if (strcmp(req.method, "POST") == 0) run_query(srv, s, &req, worker_id, conn->accepted_us + srv->total_us);

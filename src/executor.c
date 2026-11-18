@@ -92,7 +92,7 @@ typedef struct {
     StmtResult *out;
     int columns[32], where_col, failed;
     size_t capacity;
-    size_t *remaining; /* shared by every statement in this request */
+    size_t *remaining; /* SELECT row data, shared across this request */
     DbError *err;
 } Scan;
 
@@ -151,7 +151,6 @@ static int select_rows(Table *table, const TableSchema *schema, const Statement 
     Scan scan = {.statement = s, .out = out, .err = err, .remaining = remaining};
     out->is_select = 1; out->plan = PLAN_SCAN;
     out->ncols = s->star ? schema->ncols : s->ncols;
-    if (charge(s, err, remaining, (size_t)out->ncols * sizeof *out->columns)) return -1;
     out->columns = calloc((size_t)out->ncols, sizeof *out->columns);
     if (!out->columns) return internal(s, err, "out of memory");
     for (int i = 0; i < out->ncols; i++) {
@@ -159,7 +158,6 @@ static int select_rows(Table *table, const TableSchema *schema, const Statement 
         if (col < 0) return fail(s, err, "unknown SELECT column");
         scan.columns[i] = col;
         const char *name = schema->cols[col].name;
-        if (charge(s, err, remaining, strlen(name) + 1)) return -1;
         out->columns[i] = malloc(strlen(name) + 1);
         if (!out->columns[i]) return internal(s, err, "out of memory");
         strcpy(out->columns[i], name);
@@ -200,8 +198,6 @@ int executor_execute(Table *table, const TableSchema *schema, const Statement *s
     *out = (StmtResult){0};
     if (err) *err = (DbError){0};
     if (s->kind == STMT_INSERT && insert_mapping(schema, s, map, err)) return -1;
-    if (charge(s, err, remaining, sizeof *out)) return -1;
-    if (s->kind == STMT_INSERT && charge(s, err, remaining, (size_t)s->nrows * sizeof *out->inserted_ids)) return -1;
     int rc = s->kind == STMT_INSERT ? table_write_lock(table) : table_read_lock(table);
     if (rc) return internal(s, err, "cannot acquire table lock");
     if (deadline_us && os_now_us() >= deadline_us) {

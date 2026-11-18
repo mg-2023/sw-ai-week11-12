@@ -181,7 +181,7 @@ static void test_open_failure_releases_lock(void) {
     ASSERT(fresh(0)); db_close(db); db = NULL;
     /* Fail on the last table, after earlier tables have already been opened. */
     FILE *f = fopen(test_path("moves.tbl"), "wb"); ASSERT(f); ASSERT(fwrite("bad data data", 1, 13, f) == 13); fclose(f);
-    ASSERT(db_open(test_dir, (DbOptions){0}, &err) == NULL && strstr(err.message, "older or unknown format"));
+    ASSERT(db_open(test_dir, (DbOptions){0}, &err) == NULL && strstr(err.message, "corrupt format record at offset 0"));
     ASSERT(db_open(test_dir, (DbOptions){.repair = 1}, &err) == NULL);
     ASSERT(remove(test_path("moves.tbl")) == 0);
     db = db_open(test_dir, (DbOptions){0}, &err); ASSERT(db);
@@ -639,7 +639,7 @@ static void test_select_result_limit_is_sql_error(void) {
     ASSERT(fresh(0)); Result r = {0};
     ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('aaaaaaaaaaaaaaaaaaaa',1),('bbbbbbbbbbbbbbbbbbbb',2),('cccccccccccccccccccc',3)", 0, &r) == 0);
     result_free(&r);
-    size_t overhead = sizeof(StmtResult) + 3 * sizeof(char *) + 12;
+    size_t overhead = 0; /* Only SELECT row cells and TEXT count. */
     executor_test_set_result_limit(overhead + 2 * (3 * sizeof(Value) + 21) + 10);   /* room for two rows, not three */
     int rc = db_execute_sql(db, "SELECT * FROM users", 0, &r);
     executor_test_set_result_limit(EXECUTOR_MAX_RESULT_BYTES);
@@ -672,35 +672,36 @@ static void test_deadline_expired_before_statement(void) {
     ASSERT(fresh(0)); Result r = {0};
     ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('late',1)", os_now_us() - 1, &r) == -1);
     ASSERT(r.err.kind == DB_ERROR_DEADLINE && result_http_status(&r) == 503 && r.committed == 0);
+    ASSERT(r.err.line == 1 && r.err.col == 1 && r.failed_index == 0);
     ASSERT(strcmp(r.err.message, "deadline exceeded after 0 statements; earlier statements are committed") == 0);
     result_free(&r); ASSERT(users_count() == 0);
 }
 
-static void test_request_budget_includes_prior_results_and_ids(void) {
+static void test_request_budget_counts_only_select_rows(void) {
     ASSERT(fresh(0) && seed() == 0); Result r = {0};
     const char *select = "SELECT * FROM users;";
     ASSERT(db_execute_sql(db, select, 0, &r) == 0);
     result_free(&r);
-    /* Exactly enough for one SELECT result and an INSERT result, but no second SELECT. */
-    size_t select_bytes = sizeof(StmtResult) + 3 * sizeof(char *) + 12 + 9 * sizeof(Value) + 6 + 4 + 6;
-    executor_test_set_result_limit(select_bytes + sizeof(StmtResult) + sizeof(int64_t));
+    /* Exactly one SELECT's row data; INSERT metadata and ids consume nothing. */
+    size_t select_bytes = 9 * sizeof(Value) + 6 + 4 + 6;
+    executor_test_set_result_limit(select_bytes);
     int rc = db_execute_sql(db, "SELECT * FROM users; INSERT INTO users VALUES ('kept',1); SELECT * FROM users;", 0, &r);
     executor_test_set_result_limit(EXECUTOR_MAX_RESULT_BYTES);
     ASSERT(rc == -1 && r.err.kind == DB_ERROR_SQL && r.committed == 2 && r.n == 2 && r.failed_index == 2);
     ASSERT(r.items[0].nrows == 3 && r.items[1].inserted_ids[0] == 4);
     result_free(&r); ASSERT(users_count() == 4);
-    executor_test_set_result_limit(sizeof(StmtResult));
-    rc = db_execute_sql(db, "INSERT INTO users VALUES ('must not persist',1)", 0, &r);
+    executor_test_set_result_limit(0);
+    rc = db_execute_sql(db, "INSERT INTO users VALUES ('persist',1); SELECT * FROM users LIMIT 0; SELECT * FROM users WHERE id=999", 0, &r);
     executor_test_set_result_limit(EXECUTOR_MAX_RESULT_BYTES);
-    ASSERT(rc == -1 && r.committed == 0 && r.err.kind == DB_ERROR_SQL);
-    result_free(&r); ASSERT(users_count() == 4);
+    ASSERT(rc == 0 && r.committed == 3 && r.items[0].inserted_ids[0] == 5);
+    result_free(&r); ASSERT(users_count() == 5);
 }
 
 #define RUN_DB(fn) do { RUN(fn); cleanup(); } while (0)
 int main(void) {
     test_dir_init("db");
     RUN_DB(test_deadline_expired_before_statement);
-    RUN_DB(test_request_budget_includes_prior_results_and_ids);
+    RUN_DB(test_request_budget_counts_only_select_rows);
     RUN_DB(test_multirow_insert_fails_at_second_append);
     RUN_DB(test_multirow_insert_fails_at_third_append);
     RUN_DB(test_multirow_insert_sync_failure_rolls_back_all);

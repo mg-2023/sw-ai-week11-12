@@ -154,7 +154,7 @@ int db_execute_sql(Db *db, const char *sql, uint64_t deadline_us, Result *out) {
             Statement *s = &statements.items[0];
             absolute_position(&s->line, &s->col, line, col);
             if (deadline_us && os_now_us() >= deadline_us) {
-                out->err = (DbError){.kind = DB_ERROR_DEADLINE};
+                out->err = (DbError){.kind = DB_ERROR_DEADLINE, .line = s->line, .col = s->col};
                 statements_free(&statements); goto bad;
             }
             if (out->n == capacity) {
@@ -178,6 +178,9 @@ int db_execute_sql(Db *db, const char *sql, uint64_t deadline_us, Result *out) {
             }
             else rc = executor_execute(db->tables[schema - db->catalog.tables], schema, s,
                                        &out->items[out->n], &out->err, deadline_us, &remaining);
+            if (rc && out->err.kind == DB_ERROR_DEADLINE) {
+                out->err.line = s->line; out->err.col = s->col;
+            }
             statements_free(&statements);
             if (rc) goto bad;
             out->n++; out->committed = out->n;
