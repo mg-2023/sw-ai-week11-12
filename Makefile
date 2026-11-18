@@ -8,7 +8,7 @@ LIBSRC = $(filter-out src/main.c src/cli.c,$(wildcard src/*.c))
 HEADERS = $(wildcard src/*.h) tests/test.h
 TEST_BINS = $(patsubst tests/%.c,build/%.exe,$(wildcard tests/test_*.c))
 
-.PHONY: all test clean
+.PHONY: all test test-server clean
 all: build/mini-dbms.exe
 
 build:
@@ -25,6 +25,9 @@ test: $(TEST_BINS) $(if $(wildcard src/main.c),build/mini-dbms.exe)
 ifneq ($(wildcard tests/run_cli_tests.py),)
 	python tests/run_cli_tests.py
 endif
+
+test-server: build/mini-dbms.exe
+	python tests/test_server.py
 
 clean:
 	python -c "import shutil; shutil.rmtree('build', ignore_errors=True)"

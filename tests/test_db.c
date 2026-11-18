@@ -556,6 +556,39 @@ static void test_index_pointing_at_wrong_record_is_internal_error(void) {
     table_close(t);
 }
 
+/* A result over the byte limit is a SQL error (400 over HTTP); smaller LIMITs still work. */
+static void test_select_result_limit_is_sql_error(void) {
+    ASSERT(fresh(0)); Result r = {0};
+    ASSERT(db_execute_sql(db, "INSERT INTO users VALUES ('aaaaaaaaaaaaaaaaaaaa',1),('bbbbbbbbbbbbbbbbbbbb',2),('cccccccccccccccccccc',3)", &r) == 0);
+    result_free(&r);
+    executor_test_set_result_limit(2 * (3 * sizeof(Value) + 21) + 10);   /* room for two rows, not three */
+    int rc = db_execute_sql(db, "SELECT * FROM users", &r);
+    executor_test_set_result_limit(EXECUTOR_MAX_RESULT_BYTES);
+    ASSERT(rc == -1 && !r.ok && r.err.kind == DB_ERROR_SQL);
+    ASSERT(strstr(r.err.message, "16 MiB") != NULL && r.committed == 0 && r.failed_index == 0);
+    result_free(&r);
+    executor_test_set_result_limit(2 * (3 * sizeof(Value) + 21) + 10);
+    rc = db_execute_sql(db, "SELECT * FROM users LIMIT 2", &r);
+    executor_test_set_result_limit(EXECUTOR_MAX_RESULT_BYTES);
+    ASSERT(rc == 0 && r.items[0].nrows == 2);
+    result_free(&r);
+    ASSERT(db_execute_sql(db, "SELECT * FROM users", &r) == 0 && r.items[0].nrows == 3);
+    result_free(&r);
+}
+
+/* The accessors /stats uses: table names, row counts and INSERT lock-wait samples. */
+static void test_stats_accessors(void) {
+    ASSERT(fresh(0));
+    uint64_t p99 = 1, max = 1, samples = 1;
+    db_insert_lock_wait(db, &p99, &max, &samples);
+    ASSERT(p99 == 0 && max == 0 && samples == 0);
+    ASSERT(seed() == 0);
+    ASSERT(db_table_count(db) == 3 && strcmp(db_table_name(db, 0), "users") == 0);
+    ASSERT(db_table_rows_at(db, 0) == 3 && db_table_rows_at(db, 1) == 0);
+    db_insert_lock_wait(db, &p99, &max, &samples);
+    ASSERT(samples == 1 && p99 <= max);
+}
+
 #define RUN_DB(fn) do { RUN(fn); cleanup(); } while (0)
 int main(void) {
     test_dir_init("db");
@@ -604,5 +637,7 @@ int main(void) {
     RUN_DB(test_sync_option_and_io_failure);
     RUN_DB(test_empty_input_and_error_print);
     RUN_DB(test_concurrent_statements);
+    RUN_DB(test_select_result_limit_is_sql_error);
+    RUN_DB(test_stats_accessors);
     return test_finish();
 }

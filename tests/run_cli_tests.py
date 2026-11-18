@@ -116,7 +116,9 @@ def test_input_errors():
 
 
 def test_invalid_arguments():
-    cases = [[], ["run"], ["bench"], ["serve"], ["run", "-", "extra"],
+    cases = [[], ["run"], ["bench"], ["serve", "--unknown"], ["serve", "--port"],
+             ["serve", "--port", "70000"], ["serve", "--threads", "0"], ["serve", "--sync", "sometimes"],
+             ["run", "-", "extra"],
              ["run", "-", "--data"], ["run", "-", "--sync"],
              ["run", "-", "--sync", "sometimes"], ["run", "-", "--unknown"],
              ["run", "-", "--data", ""], ["run", "-", "--repair", "yes"]]

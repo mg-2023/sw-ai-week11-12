@@ -30,10 +30,24 @@ typedef intptr_t SOCKET_T;
 #define OS_SOCK_TIMEOUT ((int64_t)-2)
 SOCKET_T os_sock_listen(uint16_t port, int backlog, uint16_t *port_out);  /* 127.0.0.1 only, port 0 = any */
 SOCKET_T os_sock_accept(SOCKET_T listener);
+/* Accept, waiting at most wait_ms: the client, OS_SOCK_TIMEOUT (cast) on timeout,
+ * OS_INVALID_SOCKET on error or a closed listener. */
+SOCKET_T os_sock_accept_wait(SOCKET_T listener, int wait_ms);
+/* Wake a thread blocked in accept from another thread or an interrupt handler.
+ * Returns 1 if the listener was closed (the caller must not close it again),
+ * 0 if it was only shut down (the caller still closes it). */
+int os_sock_interrupt_listener(SOCKET_T listener);
+/* Call handler on Ctrl+C / Ctrl+Break / console close (Windows) or SIGINT / SIGTERM
+ * (POSIX). The handler must only set flags and call os_sock_interrupt_listener. 0 = ok. */
+int os_set_interrupt_handler(void (*handler)(void));
 SOCKET_T os_sock_connect_local(uint16_t port);
 int64_t os_sock_recv(SOCKET_T s, void *buf, size_t n, uint64_t deadline_us);
 int64_t os_sock_send(SOCKET_T s, const void *buf, size_t n, uint64_t deadline_us);
 void os_sock_close(SOCKET_T s);
+/* Close after an error reply: send FIN, then read and discard what the peer still sends
+ * (until it closes, deadline_us, or 4 MiB), so unread request bytes do not turn the close
+ * into a reset that erases our reply at the client. */
+void os_sock_close_graceful(SOCKET_T s, uint64_t deadline_us);
 #ifdef MINI_DBMS_TESTING
 void os_test_fail_sync(void);
 void os_test_fail_append(void);

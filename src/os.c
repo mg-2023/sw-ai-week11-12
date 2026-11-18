@@ -252,6 +252,48 @@ SOCKET_T os_sock_accept(SOCKET_T listener) {
 #endif
 }
 
+/* Accept with a timeout, so a stop flag is noticed even if the listener is not closed. */
+SOCKET_T os_sock_accept_wait(SOCKET_T listener, int wait_ms) {
+    int ready = sock_wait(listener, 0, os_now_us() + (uint64_t)wait_ms * 1000u);
+    if (ready < 0) return OS_INVALID_SOCKET;
+    if (ready == 0) return (SOCKET_T)OS_SOCK_TIMEOUT;
+    return os_sock_accept(listener);
+}
+
+/* Windows wakes a blocked accept by closing the socket; POSIX close() would not, so shut it down. */
+int os_sock_interrupt_listener(SOCKET_T listener) {
+#ifdef _WIN32
+    closesocket(SOCK_NATIVE(listener));
+    return 1;
+#else
+    shutdown((int)listener, SHUT_RDWR);
+    return 0;
+#endif
+}
+
+static void (*volatile interrupt_handler)(void);
+#ifdef _WIN32
+/* Console control events arrive on a new thread created by Windows. */
+static BOOL WINAPI console_ctrl(DWORD type) {
+    if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT && type != CTRL_CLOSE_EVENT) return FALSE;
+    if (interrupt_handler) interrupt_handler();
+    return TRUE;
+}
+int os_set_interrupt_handler(void (*handler)(void)) {
+    interrupt_handler = handler;
+    return SetConsoleCtrlHandler(console_ctrl, TRUE) ? 0 : -1;
+}
+#else
+#include <signal.h>
+static void on_signal(int sig) { (void)sig; if (interrupt_handler) interrupt_handler(); }
+int os_set_interrupt_handler(void (*handler)(void)) {
+    interrupt_handler = handler;
+    struct sigaction sa = {0};
+    sa.sa_handler = on_signal;
+    return sigaction(SIGINT, &sa, NULL) || sigaction(SIGTERM, &sa, NULL) ? -1 : 0;
+}
+#endif
+
 /* Connect to 127.0.0.1:port (tests and local clients). */
 SOCKET_T os_sock_connect_local(uint16_t port) {
     struct sockaddr_in addr = {0};
@@ -296,6 +338,23 @@ int64_t os_sock_send(SOCKET_T s, const void *buf, size_t n, uint64_t deadline_us
     do { sent = send((int)s, buf, n, MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
     return sent < 0 ? -1 : (int64_t)sent;
 #endif
+}
+
+/* Close after an error reply without letting unread request bytes reset the connection. */
+void os_sock_close_graceful(SOCKET_T s, uint64_t deadline_us) {
+    if (s == OS_INVALID_SOCKET) return;
+#ifdef _WIN32
+    shutdown(SOCK_NATIVE(s), SD_SEND);
+#else
+    shutdown((int)s, SHUT_WR);
+#endif
+    char sink[16384]; size_t total = 0;
+    while (total < (size_t)4 << 20) {
+        int64_t got = os_sock_recv(s, sink, sizeof sink, deadline_us);
+        if (got <= 0) break;
+        total += (size_t)got;
+    }
+    os_sock_close(s);
 }
 
 /* Close a socket; OS_INVALID_SOCKET is ignored. */

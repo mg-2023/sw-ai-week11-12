@@ -18,7 +18,8 @@ static int usage(void) {
     fputs("usage: mini-dbms run <file.sql|-> [--data DIR] "
           "[--sync always|none] [--repair]\n"
           "       mini-dbms bench --rows N [--data DIR] [--queries 100] [--seed 42]\n"
-          "       mini-dbms bench --query-only --data DIR [--queries 100] [--seed 42]\n", stderr);
+          "       mini-dbms bench --query-only --data DIR [--queries 100] [--seed 42]\n"
+          "       mini-dbms serve [--port 8100] [--threads 4] [--queue 64] [--data DIR] [--sync always|none]\n", stderr);
     return 1;
 }
 

@@ -197,6 +197,25 @@ uint64_t db_table_row_count(const Db *db, const char *table) {
     return schema ? table_row_count(db->tables[schema - db->catalog.tables]) : UINT64_MAX;
 }
 
+int db_table_count(const Db *db) { return db->catalog.n; }
+const char *db_table_name(const Db *db, int index) { return db->catalog.tables[index].name; }
+uint64_t db_table_rows_at(const Db *db, int index) { return table_row_count(db->tables[index]); }
+
+void db_insert_lock_wait(const Db *db, uint64_t *p99_us, uint64_t *max_us, uint64_t *samples) {
+    *p99_us = *max_us = *samples = 0;
+    uint32_t *all = malloc(TABLE_WAIT_SAMPLES * sizeof *all * (size_t)(db->catalog.n ? db->catalog.n : 1));
+    if (!all) return;
+    size_t n = 0;
+    for (int i = 0; i < db->catalog.n; i++) {
+        uint64_t max, total;
+        n += table_write_wait_samples(db->tables[i], all + n, &max, &total);
+        if (max > *max_us) *max_us = max;
+        *samples += total;
+    }
+    *p99_us = wait_p99(all, n);
+    free(all);
+}
+
 uint64_t db_rows_written(const Db *db) {
     uint64_t count = 0;
     for (int i = 0; i < db->catalog.n; i++) count += table_rows_written(db->tables[i]);

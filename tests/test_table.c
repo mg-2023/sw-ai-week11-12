@@ -4,6 +4,7 @@
 #include "os.h"
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <io.h>
 #include <fcntl.h>
 
@@ -517,6 +518,59 @@ static void test_append_rows_batch_and_single_sync(void) {
     table_close(t);
 }
 
+typedef struct { Table *t; atomic_int writer_done; int rows, writer_done_at_yield, past_yield; } Yield;
+
+/* Writer thread: waits for the table write lock, appends one row, unlocks. */
+static void *yield_writer(void *p) {
+    Yield *y = p; DbError err = {0}; int64_t id;
+    int ok = table_write_lock(y->t) == 0;
+    if (ok) {
+        ok = append_row(y->t, "zz", 2, 1, &id, NULL, &err) == 0;
+        table_unlock(y->t);
+    }
+    atomic_store(&y->writer_done, ok ? 1 : -1);
+    return NULL;
+}
+
+/* Counts rows; the first row at or past the yield point records whether the writer already got in. */
+static int yield_visit(const Row *row, uint64_t off, void *ctx) {
+    Yield *y = ctx; (void)row;
+    y->rows++;
+    if (!y->past_yield && off >= SCAN_YIELD_BYTES) {
+        y->past_yield = 1;
+        y->writer_done_at_yield = atomic_load(&y->writer_done) == 1;
+    }
+    return 0;
+}
+
+/* A long scan gives the read lock back between blocks: a waiting writer gets in mid-scan, and the scan still sees only the rows committed when it started. */
+static void test_scan_yielding_lets_writer_in_and_keeps_snapshot(void) {
+    DbError err = {0};
+    Table *t = fresh(&err);
+    ASSERT(t);
+    table_set_sync(t, 0);
+    enum { N = 30000 };
+    for (int i = 0; i < N; i++) {
+        char name[32]; int64_t id;
+        int len = snprintf(name, sizeof name, "user_%d", i);
+        ASSERT(append_row(t, name, (uint32_t)len, i, &id, NULL, &err) == 0);
+    }
+    Yield y = {.t = t};
+    ASSERT(table_read_lock(t) == 0);
+    pthread_t th;
+    ASSERT(pthread_create(&th, NULL, yield_writer, &y) == 0);
+    for (uint64_t until = os_now_us() + 30000; os_now_us() < until;) {}   /* let the writer block on the lock */
+    int lock_lost = 1;
+    int rc = table_scan_yielding(t, yield_visit, &y, &err, &lock_lost);
+    ASSERT(rc == 0 && lock_lost == 0);
+    table_unlock(t);
+    pthread_join(th, NULL);
+    ASSERT(y.rows == N);                       /* snapshot: the row appended mid-scan is not seen */
+    ASSERT(y.past_yield && y.writer_done_at_yield);
+    ASSERT(atomic_load(&y.writer_done) == 1 && table_row_count(t) == N + 1);
+    table_close(t);
+}
+
 int main(void) {
     test_dir_init("table");
     snprintf(path, sizeof path, "%s/task5_table.tbl", test_dir);
@@ -547,6 +601,7 @@ int main(void) {
     RUN(test_record_size_limit);
     RUN(test_record_exact_size_boundary);
     RUN(test_concurrent_read_at);
+    RUN(test_scan_yielding_lets_writer_in_and_keeps_snapshot);
     test_dir_clear();
     return test_finish();
 }

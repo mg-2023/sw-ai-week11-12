@@ -3,6 +3,7 @@
 
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,16 +13,25 @@
 #define MAX_RECORD (1024u * 1024u)
 #define MAX_TEXT (64u * 1024u)
 
+/* Recent INSERT lock-wait times (us), guarded by their own mutex so /stats never touches the table lock. */
+typedef struct {
+    pthread_mutex_t mutex;
+    uint32_t samples[TABLE_WAIT_SAMPLES];
+    size_t next, count;
+    uint64_t max, total;
+} WaitStats;
+
 struct Table {
     pthread_rwlock_t lock;
+    WaitStats wait;
     OsFile *file;
     TableSchema schema;
     /* Confirmed end: bytes before it belong to committed rows. Scans and point
      * reads stop here, so unconfirmed bytes left by a failed rollback stay invisible. */
     uint64_t end;
     int64_t next_id; /* 0 means the int64 id space is exhausted. */
-    uint64_t row_count;
-    uint64_t written;
+    _Atomic uint64_t row_count; /* written under the write lock, read lock-free by /stats */
+    _Atomic uint64_t written;
     int write_failed;
     int sync_always;
     BPTree *index;
@@ -341,6 +351,10 @@ Table *table_open_with_visitor(const char *dir, const TableSchema *schema, int r
     if (pthread_rwlock_init(&t->lock, NULL) != 0) {
         free(path); free(t); fail(err, 0, "cannot initialize table lock"); return NULL;
     }
+    if (pthread_mutex_init(&t->wait.mutex, NULL) != 0) {
+        pthread_rwlock_destroy(&t->lock);
+        free(path); free(t); fail(err, 0, "cannot initialize table lock"); return NULL;
+    }
     snprintf(path, path_len, "%s/%s.tbl", dir, schema->name);
     t->file = os_open(path, 1); free(path);
     if (!t->file) { fail(err, 0, "cannot open table file"); goto bad; }
@@ -542,16 +556,29 @@ int table_read_at(Table *t, uint64_t off, Row *out, DbError *err) {
     return rc == RECORD_OK ? 0 : -1;
 }
 
-int table_scan(Table *t, RowVisitor visitor, void *ctx, DbError *err) {
+/* Scan the confirmed prefix [0, end at start). With yield set, the caller's read lock is
+ * released and taken again about every SCAN_YIELD_BYTES, so a waiting writer gets in between
+ * blocks. Bytes before the snapshot end never change (appends go after it), so the rows seen
+ * are one consistent committed prefix. */
+static int scan_prefix(Table *t, RowVisitor visitor, void *ctx, DbError *err, int yield, int *lock_lost) {
     clear_error(err);
+    if (lock_lost) *lock_lost = 0;
     if (!t || !visitor) return fail(err, 0, "missing table or visitor");
-    uint64_t size = t->end, off = 0;
+    uint64_t size = t->end, off = 0, last_yield = 0;
     if (!size) return 0;
     BlockReader *reader = calloc(1, sizeof *reader);
     if (!reader) return fail(err, 0, "out of memory");
     reader->table = t; reader->size = size;
     int rc = 0;
     while (off < size) {
+        if (yield && off - last_yield >= SCAN_YIELD_BYTES) {
+            pthread_rwlock_unlock(&t->lock);
+            if (pthread_rwlock_rdlock(&t->lock)) {
+                if (lock_lost) *lock_lost = 1;
+                rc = fail(err, off, "cannot reacquire table read lock"); break;
+            }
+            last_yield = off;
+        }
         Row row = {0}; uint64_t next;
         if (read_record(reader, off, &row, &next, err) != RECORD_OK) { rc = -1; break; }
         int stop = visitor(&row, off, ctx);
@@ -562,19 +589,65 @@ int table_scan(Table *t, RowVisitor visitor, void *ctx, DbError *err) {
     return rc;
 }
 
+int table_scan(Table *t, RowVisitor visitor, void *ctx, DbError *err) {
+    return scan_prefix(t, visitor, ctx, err, 0, NULL);
+}
+
+int table_scan_yielding(Table *t, RowVisitor visitor, void *ctx, DbError *err, int *lock_lost) {
+    return scan_prefix(t, visitor, ctx, err, 1, lock_lost);
+}
+
 void table_close(Table *t) {
     if (!t) return;
     bpt_free(t->index);
     os_close(t->file);
     pthread_rwlock_destroy(&t->lock);
+    pthread_mutex_destroy(&t->wait.mutex);
     free(t);
 }
 
 int table_read_lock(Table *t) { return pthread_rwlock_rdlock(&t->lock); }
-int table_write_lock(Table *t) { return pthread_rwlock_wrlock(&t->lock); }
+/* Take the write lock and record how long the caller waited for it. */
+int table_write_lock(Table *t) {
+    uint64_t start = os_now_us();
+    int rc = pthread_rwlock_wrlock(&t->lock);
+    if (rc) return rc;
+    uint64_t waited = os_now_us() - start;
+    pthread_mutex_lock(&t->wait.mutex);
+    t->wait.samples[t->wait.next] = waited > UINT32_MAX ? UINT32_MAX : (uint32_t)waited;
+    t->wait.next = (t->wait.next + 1) % TABLE_WAIT_SAMPLES;
+    if (t->wait.count < TABLE_WAIT_SAMPLES) t->wait.count++;
+    if (waited > t->wait.max) t->wait.max = waited;
+    t->wait.total++;
+    pthread_mutex_unlock(&t->wait.mutex);
+    return 0;
+}
 int table_unlock(Table *t) { return pthread_rwlock_unlock(&t->lock); }
 void table_set_sync(Table *t, int sync_always) { t->sync_always = sync_always != 0; }
-uint64_t table_rows_written(const Table *t) { return t->written; }
-uint64_t table_row_count(const Table *t) { return t->row_count; }
+uint64_t table_rows_written(const Table *t) { return atomic_load(&t->written); }
+uint64_t table_row_count(const Table *t) { return atomic_load(&t->row_count); }
+
+/* qsort order for wait samples. */
+static int compare_u32(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* Copy the recent write-lock waits into out; *max and *total cover all time. */
+size_t table_write_wait_samples(Table *t, uint32_t *out, uint64_t *max, uint64_t *total) {
+    pthread_mutex_lock(&t->wait.mutex);
+    size_t n = t->wait.count;
+    memcpy(out, t->wait.samples, n * sizeof *out);
+    *max = t->wait.max; *total = t->wait.total;
+    pthread_mutex_unlock(&t->wait.mutex);
+    return n;
+}
+
+/* Nearest-rank p99 of samples[0..n) (sorts in place); 0 when empty. */
+uint64_t wait_p99(uint32_t *samples, size_t n) {
+    if (!n) return 0;
+    qsort(samples, n, sizeof *samples, compare_u32);
+    return samples[n - n / 100 - 1];
+}
 void table_set_index(Table *t, BPTree *index) { bpt_free(t->index); t->index = index; }
 const BPTree *table_index(const Table *t) { return t->index; }

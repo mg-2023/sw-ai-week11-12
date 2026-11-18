@@ -17,6 +17,13 @@ void db_close(Db *db);
 uint64_t db_rows_written(const Db *db);
 /* Rows currently stored in a table, or UINT64_MAX for an unknown table name. */
 uint64_t db_table_row_count(const Db *db, const char *table);
+/* Table list for /stats. Names and row counts are safe to read while requests run. */
+int db_table_count(const Db *db);
+const char *db_table_name(const Db *db, int index);
+uint64_t db_table_rows_at(const Db *db, int index);
+/* INSERT write-lock wait over all tables: p99 of the recent samples, the all-time
+ * maximum and the number of waits recorded (all in us). Takes no table lock. */
+void db_insert_lock_wait(const Db *db, uint64_t *p99_us, uint64_t *max_us, uint64_t *samples);
 /* Use an empty output. Statements execute in order, including when a later
  * statement cannot be parsed. Errors carry original SQL line/byte-column.
  * Concurrent calls may share Db, but must use separate Result objects.

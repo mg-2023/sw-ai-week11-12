@@ -113,3 +113,85 @@ SplitMix64와 seed로 재현 가능한 무작위 id를 선택한다. 각 id에 �
 첫 조회 묶음도 INSERT와 재열기 직후여서 OS 캐시가 따뜻하다. 이를 출력에 명시하고 반복 묶음과 구분한다. 캐시를 비우는 기능은 없으므로 설계 2.9의 캐시가 비어 있는 첫 실행은 확인하지 못했다. `peak_memory_bytes`는 삽입부터 조회까지 프로세스 전체 수명의 최대 상주 메모리이며 인덱스만의 메모리가 아니다. Windows는 `K32GetProcessMemoryInfo`의 `PeakWorkingSetSize`, POSIX는 `getrusage`를 쓰고 플랫폼 분기는 `os.c`에만 둔다. 실제 측정 환경과 출력은 `docs/benchmark.md`에 기록한다.
 
 CLI 테스트는 1만 행 기본 실행, 사용자 지정 폴더·조회 수·seed, 1000행 미만의 마지막 배치, 한 행·한 조회·seed 0, 숫자 범위·누락·중복 옵션 거부, 기존 폴더 보존을 직접 확인한다. 출력된 네 통계 행과 시간·메모리 형식을 검사하고, 별도 CLI 실행으로 저장된 마지막 행과 재구축된 인덱스를 확인한다.
+
+## Phase 3 — API 서버 (스레드 풀 · HTTP)
+
+### 요청 흐름
+
+`main.c` 가 첫 인자가 `serve` 이면 `server_main`(`server.c`)을, 아니면 `cli_main` 을 부른다. 서버도 SQL 은 `db_execute_sql` 하나로만 실행한다.
+
+1. 메인 스레드가 accept 루프를 돈다 (`127.0.0.1` 만 listen, 기본 포트 8100). 연결을 받으면 받은 시각을 적고 스레드 풀 큐에 넣는다. 연결당 요청 하나, 응답은 `Connection: close`.
+2. 워커(기본 4)가 연결을 하나 맡아 `http_read_request` → 라우트 → `db_execute_sql` → `result_to_json` → `http_send` 순서로 처리하고 닫는다.
+3. 큐가 가득 차 `tp_submit` 이 -1 이면 accept 스레드는 기다리지 않고 그 연결을 거절 전담 스레드 1개(`rejector`, 큐 256)에 넘긴다. 이 스레드가 503 을 보내고 닫는다. 거절 전담 큐도 가득 차면 연결을 그냥 끊는다. 이유 : 클라이언트가 아직 요청을 보내는 중일 수 있어, 응답 뒤 읽지 않은 요청이 남은 채 닫으면 TCP 리셋이 응답을 지운다. 그래서 오류 응답 뒤에는 `os_sock_close_graceful` (FIN 을 보내고 상대가 보낸 것을 최대 4 MiB · 시한까지 버린 뒤 닫기)을 쓰고, 그 기다림을 accept 스레드가 하지 않게 했다.
+
+| 라우트 | 동작 |
+|---|---|
+| `POST /query` | 본문 = SQL (`Content-Length` 필수). 200 `{ok:true, results, elapsed_us, worker}` |
+| `GET /health` | 200 `{"ok":true}` |
+| `GET /stats` | 테이블별 행 수, `workers`, `busy`, `queued`, `queue_capacity`, `processed`, `rejected`, `insert_lock_wait_us {p99, max, samples}` |
+
+### 상태 코드
+
+| 코드 | 언제 |
+|---|---|
+| 200 | 모든 문장 성공 |
+| 400 | SQL 오류 (`DbError.kind == DB_ERROR_SQL` : 문법 · 이름 · 타입 · 결과 16 MiB 초과), 잘못된 HTTP (요청줄 · 헤더 · `Content-Length` 없음 · `Transfer-Encoding`), 본문에 NUL |
+| 404 · 405 | 모르는 경로 · 경로에 맞지 않는 메서드 |
+| 408 | 받기 시한 (2초) 안에 요청이 다 오지 않음 |
+| 413 | 본문이 1 MiB 를 넘음 (헤더의 `Content-Length` 만 보고도 거절) |
+| 500 | `DbError.kind == DB_ERROR_INTERNAL` (파일 I/O · 메모리 · 락 · 저장 데이터 손상 · 응답 만들기 실패) |
+| 503 | 큐 가득, 또는 큐에서 기다린 시간이 전체 시한을 넘김 |
+
+오류 본문은 `{ok:false, error:{statement, line, col, message}, committed:n}` (SQL 실행 결과) 또는 `{ok:false, error:{message}}` (HTTP 단계) 이다. 여러 문장 요청은 첫 오류에서 멈추고 `committed` 가 앞서 성공한 문장 수다.
+
+### 시한
+
+받은 시각(accept) 기준이다.
+
+- 요청 받기 : accept 로부터 2초. 느린 클라이언트는 워커 하나를 최대 2초 붙잡고 408 로 끝난다. 큐에서 늦게 꺼내져 이미 2초가 지났어도, 그때 소켓에 도착해 있는 데이터는 읽는다.
+- 전체 : accept 로부터 5초. 큐에서 꺼냈을 때, 그리고 요청을 다 읽은 직후 이 시한이 지났으면 실행하지 않고 503 을 보낸다. 이미 시작한 SQL 은 취소하지 않는다. 그래서 SQL 이 끝난 뒤의 시한은 보지 않는다 (INSERT 가 저장됐는데 503 을 주는 모순을 피함).
+- 보내기 : 2초 (`http_send` 한 번).
+
+### 락 규칙과 교착 없음
+
+- 테이블마다 `pthread_rwlock` 하나. SELECT = 읽기 락, INSERT = 쓰기 락. 한 문장은 테이블 하나만 잡고, 여러 문장은 앞 문장이 락을 풀어야 다음 문장이 락을 잡는다. 한 스레드가 락을 둘 이상 동시에 들지 않으므로 락 사이 순환 대기가 생길 수 없다.
+- 락 안쪽에서 잡는 다른 락은 두 개뿐이다 : 쓰기 락 → 쓰기 대기 시간 기록용 mutex (`WaitStats`), 인덱스 · 파일은 락 없이 쓰기 락이 보호한다. `/stats` 는 이 mutex 와 atomic 만 읽고 테이블 락은 잡지 않는다. 그래서 `/stats` 가 긴 탐색이나 INSERT 뒤에 막히지 않고, 락 순서가 항상 "테이블 락 → 기록 mutex" 한 방향이라 순환이 없다.
+- 읽기는 위치 지정 읽기(`os_read_at`)만 쓰고 버퍼는 요청마다 따로다. 결과는 락 안에서 요청 소유 메모리로 모두 복사한 뒤 락을 풀고 네트워크로 보낸다. 느린 클라이언트가 테이블 락을 잡고 있을 수 없다.
+- 행 수 · 쓴 행 수는 `_Atomic` 이다 (쓰기 락 안에서 증가, `/stats` 는 락 없이 읽음). 처리 · 거절 수는 서버의 atomic 카운터다. 큐 길이와 바쁜 워커 수는 스레드 풀의 atomic 이다.
+
+#### 긴 탐색과 INSERT 대기
+
+설계 2.10 은 "조회 부하 중 INSERT 락 대기 p99 가 100ms 를 넘으면 조치"라고 정했다. 처음 구현(탐색이 읽기 락을 끝까지 잡음)을 10만 행 이상 테이블에서 재 보니 넘었다 (`python tests/measure_lock_wait.py`, 15만 행, 읽기 6 · 쓰기 2 스레드, 워커 4, 8초).
+
+| 방식 | INSERT 락 대기 p99 | 최대 | 8초 동안 끝난 INSERT |
+|---|---|---|---|
+| 탐색이 락을 끝까지 잡음 (`--sync always`) | 109.6 ms | 127.0 ms | 128 |
+| 같음 (`--sync none`) | 106.6 ms | 110.6 ms | 131 |
+| 탐색이 약 1 MiB 마다 읽기 락을 풀었다 다시 잡음 (`--sync always`) | 12.3 ms | 20.6 ms | 303 |
+| 같음 (`--sync none`) | 12.9 ms | 32.9 ms | 291 |
+| 같음, 40만 행 (`--sync always`) | 14.3 ms | 17.9 ms | 121 (10초) |
+
+(측정 표본은 서버가 기록한 마지막 8192개 대기이며, 앞의 10만여 행을 채우는 INSERT 약 150개가 경합 없이 섞여 있다. 한 번의 탐색은 15만 행에서 약 53 ms, 40만 행에서 약 141 ms 걸린다.)
+
+고른 방식 : **블록 단위로 락을 풀기** (`table_scan_yielding`). 도착 순서 gate 는 쓰기 대기가 "지금 진행 중인 탐색 하나가 끝날 때까지"로 줄 뿐이라, 탐색 시간(테이블 크기에 비례)이 그대로 대기가 된다. 15만 행에서도 이미 한계 근처이고 100만 행이면 넘는다. 블록 단위로 풀면 대기가 한 블록 분량(약 1 MiB 를 읽고 거르는 시간)으로 줄어 테이블 크기와 무관하다 (15만 행과 40만 행의 p99 가 비슷함).
+
+- 탐색은 시작할 때의 확정된 끝 위치(`end`)까지만 본다. 파일은 추가만 하고 확정된 끝 앞의 바이트는 바뀌지 않으므로, 락을 푼 사이 INSERT 가 들어와도 그 SELECT 는 시작 시점에 확정된 행들의 일관된 앞부분만 본다 (끝 위치 스냅샷). 이번 SELECT 에 보이지 않는 행은 다음 SELECT 에 보인다. `rows_examined` 도 그 앞부분의 행 수다.
+- 인덱스 조회(`WHERE id = ?`)는 한 번의 점 읽기라 락을 끝까지 잡아도 짧다. 풀지 않는다.
+- 읽기 락을 다시 잡지 못하면 (`pthread_rwlock_rdlock` 실패) 그 SELECT 는 내부 오류(500)로 끝나고 executor 는 풀지 않은 락을 풀지 않는다 (`lock_lost`).
+- 한계 : 쓰기 락 대기자가 있을 때 새 읽기 락 요청을 뒤로 미루는 것은 rwlock 구현에 달렸다. winpthreads (이 환경) 에서는 측정으로 확인했다. 읽기 우선인 구현 (예 : glibc 기본값) 에서는 읽기가 끊이지 않으면 쓰기가 굶을 수 있어, 그때는 도착 순서 gate 를 더해야 한다. POSIX 빌드는 이 환경에서 확인하지 못했다.
+
+#### 큰 INSERT 와 쓰기 락
+
+문장 단위 원자성 때문에 한 INSERT 문장이 쓰기 락을 잡는 시간은 그 문장이 쓰는 바이트에 비례한다. 서버의 본문 상한 1 MiB 가 문장 하나의 크기를 막는다 (본문 = SQL 텍스트, 저장 레코드는 이보다 조금 크거나 작다). 실측 (`--sync always`, 이 PC) : 약 527 KiB 짜리 2만 행 INSERT 가 서버 안에서 25 ~ 29 ms, 약 950 KiB 짜리 (64 KB 가까운 TEXT 15행) 가 19 ms 였다. 그 시간만큼 다른 요청의 락 대기가 늘 수 있으나 100 ms 안이다. 본문 상한 1 MiB 보다 큰 일괄 입력은 요청을 나누어야 하며, 나눈 요청 사이에서는 원자성이 없다.
+
+### SELECT 결과 상한
+
+`EXECUTOR_MAX_RESULT_BYTES` = 16 MiB. 행마다 `열 수 × sizeof(Value)` 와 TEXT 바이트 (+1) 를 더해 넘으면 `result exceeds the 16 MiB limit; ...` SQL 오류로 문장을 거절한다 (400, CLI 는 `error at L:C`). 같은 executor 를 쓰므로 CLI 와 서버 규칙이 같다. 상한은 메모리 상한이고 JSON 글자 수가 아니다. 제어 문자가 많은 TEXT 는 JSON 에서 `\u00XX` 로 최대 6배가 된다.
+
+### 종료
+
+콘솔 Ctrl+C (Windows `SetConsoleCtrlHandler` 로 Ctrl+C · Ctrl+Break · 콘솔 닫기, POSIX 는 `sigaction` SIGINT · SIGTERM) → 처리기가 종료 플래그를 세우고 listen 소켓을 닫아 (POSIX 는 `shutdown`) accept 를 깨운다. accept 는 200 ms 마다 플래그를 확인하기도 해서 깨우기를 놓쳐도 멈춘다. 이어서 `tp_shutdown` 이 큐에 남은 연결을 모두 처리하고 (각 연결은 위 시한을 따름) 워커를 join 하고, 거절 전담 스레드를 같은 방식으로 끝낸 뒤 `db_close` 로 파일을 닫고 종료 코드 0 으로 끝난다. 큐에서 기다리던 요청은 응답을 받고, accept 하지 않은 연결 (backlog) 은 끊긴다. 종료 때 표준 오류에 처리 · 거절 수를 남긴다.
+
+### 서버 테스트
+
+`python tests/test_server.py` (`mingw32-make test-server`) 는 테스트마다 `build/` 아래 고유 데이터 폴더와 `--port 0` 서버를 띄우고 끝에 종료한다. 서버가 첫 줄에 `listening 127.0.0.1:<포트>` 를 출력하므로 포트 충돌이 없다. 종료 테스트는 Windows 에서 `CREATE_NEW_PROCESS_GROUP` 으로 띄운 서버에 `CTRL_BREAK_EVENT` 를, 그 밖에서 SIGINT 를 보내 실제 종료 처리기를 거친다. 서버 테스트는 약 30초 걸려 `mingw32-make test` 에 넣지 않았다. 10만 행 이상 락 대기 측정은 `python tests/measure_lock_wait.py` (인자 : `--rows --seconds --readers --writers --threads --sync`) 로 따로 한다.

@@ -45,6 +45,13 @@ int table_append_rows(Table *table, const Value *rows, size_t nrows,
                       int64_t *ids_out, DbError *err);
 int table_read_at(Table *table, uint64_t off, Row *out, DbError *err);
 int table_scan(Table *table, RowVisitor visitor, void *ctx, DbError *err);
+/* Same scan, but the caller must hold the table READ lock, which this function releases and
+ * takes again about every 1 MiB so a waiting INSERT is not blocked for the whole scan. It
+ * sees the rows committed when it started (a snapshot of the confirmed end). It returns with
+ * the read lock held, except when it cannot re-take it: then *lock_lost = 1 and the caller
+ * must not unlock. *lock_lost is 0 otherwise. */
+#define SCAN_YIELD_BYTES (1024u * 1024u)
+int table_scan_yielding(Table *table, RowVisitor visitor, void *ctx, DbError *err, int *lock_lost);
 void row_free(Row *row);
 void table_close(Table *table);
 
@@ -56,7 +63,14 @@ int table_write_lock(Table *table);
 int table_unlock(Table *table);
 void table_set_sync(Table *table, int sync_always);
 uint64_t table_rows_written(const Table *table);
-/* Rows in the confirmed file (counted at open, grown by appends). */
+/* Write-lock waits of INSERT statements: the last TABLE_WAIT_SAMPLES in us (copied
+ * into out, which must hold that many), the largest ever, and how many waits were
+ * ever recorded. Safe from any thread and never takes the table lock. */
+#define TABLE_WAIT_SAMPLES 8192u
+size_t table_write_wait_samples(Table *table, uint32_t *out, uint64_t *max, uint64_t *total);
+/* Nearest-rank 99th percentile of samples[0..n); sorts them in place. 0 when n == 0. */
+uint64_t wait_p99(uint32_t *samples, size_t n);
+/* Rows in the confirmed file (counted at open, grown by appends). Atomic: needs no table lock. */
 uint64_t table_row_count(const Table *table);
 
 /* db_open attaches the index built from its open callback before publication.
