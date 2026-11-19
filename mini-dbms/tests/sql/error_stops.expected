@@ -1,0 +1,8 @@
+exit_code=1
+(1 row inserted, ids=1, <time> ms)
+id
+--
+1
+(1 row, plan=scan, examined=1, <time> ms)
+error at 3:1: unknown table
+(2 statements committed before error)

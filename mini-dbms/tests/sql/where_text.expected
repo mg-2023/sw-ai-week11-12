@@ -1,0 +1,7 @@
+exit_code=0
+(3 rows inserted, ids=1,2,3, <time> ms)
+name     | age
+---------+----
+it's     | -1
+it's     | 3
+(2 rows, plan=scan, examined=3, <time> ms)

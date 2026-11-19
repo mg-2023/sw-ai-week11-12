@@ -1,0 +1,6 @@
+exit_code=0
+(1 row inserted, ids=1, <time> ms)
+age
+---
+7
+(1 row, plan=scan, examined=1, <time> ms)

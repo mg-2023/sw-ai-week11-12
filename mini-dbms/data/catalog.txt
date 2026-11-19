@@ -1,0 +1,4 @@
+# 테이블 이름 : 컬럼 타입, ...   (id INT 는 모든 테이블의 첫 컬럼)
+users : id INT, name TEXT, age INT
+games : id INT, game_key TEXT, room INT, black TEXT, white TEXT, winner TEXT, moves INT, reason TEXT, ended_at TEXT
+moves : id INT, game_key TEXT, seq INT, cell INT, color TEXT

@@ -1,0 +1,5 @@
+/build/
+/data/*.tbl
+/data/.mini-dbms.lock
+*.exe
+__pycache__/
