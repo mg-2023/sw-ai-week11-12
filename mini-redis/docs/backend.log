@@ -1,0 +1,11 @@
+20:56:56.428 POST /api/games 원본 저장 성공 id=1
+20:56:56.437 POST /api/games reason=invalidate-after-save cmd="DEL gomoku:recent-summary" reply=(integer) 0
+20:56:56.453 POST /api/games 원본 저장 성공 id=2
+20:56:56.454 POST /api/games reason=invalidate-after-save cmd="DEL gomoku:recent-summary" reply=(integer) 0
+20:56:56.459 GET /api/games/summary reason=summary-read cmd="GET gomoku:recent-summary" reply=(nil)
+20:56:56.478 GET /api/games/summary reason=cache-fill cmd="SET gomoku:recent-summary {"recent":[{"id":2,"winner":"B… EX 30" reply=OK
+20:56:59.426 GET /api/games/summary reason=summary-read cmd="GET gomoku:recent-summary" reply="{"recent":[{"id":2,"winner":"B","moves":…"
+20:57:00.324 POST /api/games 원본 저장 성공 id=3
+20:57:00.326 POST /api/games reason=invalidate-after-save cmd="DEL gomoku:recent-summary" reply=(integer) 1
+20:57:00.649 GET /api/games/summary reason=summary-read cmd="GET gomoku:recent-summary" reply=(nil)
+20:57:00.650 GET /api/games/summary reason=cache-fill cmd="SET gomoku:recent-summary {"recent":[{"id":3,"winner":"B… EX 30" reply=OK
