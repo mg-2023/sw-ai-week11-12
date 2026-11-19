@@ -1,0 +1,14 @@
+{
+  "name": "mini-dbms",
+  "private": true,
+  "type": "module",
+  "description": "SQL 처리기 + B+ 트리 인덱스 + 스레드 풀 API 서버로 이루어진 미니 DBMS",
+  "scripts": {
+    "cli": "node cli.js",
+    "sample": "node cli.js sql/sample.sql",
+    "start": "node server.js",
+    "test": "node --test \"src/__tests__/**/*.test.js\"",
+    "bench": "node bench/index-vs-scan.js",
+    "bench:pool": "node bench/thread-pool.js"
+  }
+}

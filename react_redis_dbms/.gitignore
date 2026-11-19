@@ -1,0 +1,7 @@
+node_modules/
+data/
+bench-data/
+admin.json
+.claude/
+words/report/
+package-lock.json

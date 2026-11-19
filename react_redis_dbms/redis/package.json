@@ -1,0 +1,10 @@
+{
+  "name": "mini-redis",
+  "private": true,
+  "type": "module",
+  "description": "해시 테이블을 직접 구현한 키-값 저장소 (TTL · 무효화 · AOF 영속성 · HTTP API)",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"src/__tests__/**/*.test.js\""
+  }
+}

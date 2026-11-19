@@ -1,0 +1,17 @@
+{
+  "name": "word-chain",
+  "private": true,
+  "type": "module",
+  "description": "끝말잇기 — 미니 리액트 화면 + 미니 레디스(판 진행 · 캐시) + 미니 DBMS(단어 사전 · 기록)",
+  "scripts": {
+    "start": "node server.js",
+    "room": "node room.js",
+    "admin": "node game/set-admin.js",
+    "words": "node game/import-words.js",
+    "words:reset": "node game/import-words.js --reset",
+    "test": "node --test \"game/__tests__/**/*.test.js\"",
+    "test:redis": "node --test \"redis/src/__tests__/**/*.test.js\"",
+    "test:dbms": "node --test \"dbms/src/__tests__/**/*.test.js\"",
+    "bench": "node bench/word-cache.js"
+  }
+}
